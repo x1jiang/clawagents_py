@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "clawagents"
+version = "5.5.0"
+description = "Python port of the ClawAgents framework"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "openai>=1.0.0",
+    "google-genai>=0.1.0",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.20.0",
+    "python-dotenv>=1.0.0",
+    "pydantic>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+]
+
+[project.scripts]
+clawagents = "clawagents.__main__:main"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = ["benchmark: performance benchmark tests (deselect with -m 'not benchmark')"]
