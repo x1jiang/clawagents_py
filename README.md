@@ -228,6 +228,372 @@ Every agent includes these — no setup needed:
 | `ask_user` | Interactive stdin-based user input |
 | `use_skill` | Load a skill's instructions (when skills exist) |
 
+### Tool Examples
+
+<details>
+<summary><strong>📂 Filesystem — ls, read_file, write_file, edit_file</strong></summary>
+
+The agent calls tools by emitting JSON blocks. Here's what happens under the hood when you ask the agent to work with files:
+
+```python
+# The agent autonomously emits tool calls like:
+
+# List a directory
+{"tool": "ls", "args": {"path": "src/"}}
+# → Returns:  drwxr-xr-x  4.0 KB  2026-02-24  components/
+#             -rw-r--r--  1.2 KB  2026-02-24  main.py
+
+# Read a file with pagination
+{"tool": "read_file", "args": {"path": "src/main.py", "offset": 0, "limit": 50}}
+# → Returns:  1 | import asyncio
+#             2 | from clawagents import create_claw_agent
+#             ...
+
+# Write a new file (parent directories auto-created)
+{"tool": "write_file", "args": {"path": "src/utils/helpers.py", "content": "def greet(name):\n    return f'Hello, {name}!'"}}
+# → Returns:  ✅ Wrote 45 bytes to src/utils/helpers.py
+
+# Edit an existing file by pattern match
+{"tool": "edit_file", "args": {
+    "path": "src/main.py",
+    "old": "print('hello')",
+    "new": "print('Hello, World!')"
+}}
+# → Returns:  ✅ 1 replacement made in src/main.py
+```
+
+</details>
+
+<details>
+<summary><strong>🔍 Search — grep, glob</strong></summary>
+
+```python
+# Recursive grep across all Python files
+{"tool": "grep", "args": {"pattern": "TODO", "path": "src/", "include": "*.py"}}
+# → Returns:  src/agent.py:42:  # TODO: add retry logic
+#             src/tools/web.py:15:  # TODO: handle redirects
+
+# Single-file search
+{"tool": "grep", "args": {"pattern": "class.*Tool", "path": "src/tools/registry.py"}}
+# → Returns:  15: class ToolResult:
+#             24: class Tool(Protocol):
+
+# Find files by pattern
+{"tool": "glob", "args": {"pattern": "**/*.md", "path": "."}}
+# → Returns:  ./README.md (15.3 KB)
+#             ./docs/ARCHITECTURE.md (4.1 KB)
+#             ./AGENTS.md (892 B)
+```
+
+</details>
+
+<details>
+<summary><strong>⚡ Shell Execution</strong></summary>
+
+```python
+# Run any shell command
+{"tool": "execute", "args": {"command": "python -m pytest tests/ -v"}}
+# → Returns full stdout/stderr with exit code
+
+# With custom timeout (in milliseconds)
+{"tool": "execute", "args": {"command": "pip install requests", "timeout": 60000}}
+
+# Dangerous commands are auto-blocked
+{"tool": "execute", "args": {"command": "rm -rf /"}}
+# → Error: Blocked potentially destructive command
+```
+
+</details>
+
+<details>
+<summary><strong>🧠 Think — structured reasoning</strong></summary>
+
+```python
+# The agent can reason without side effects
+{"tool": "think", "args": {
+    "thought": "The user wants me to refactor the database layer. Let me plan: 1) Read the current schema, 2) Identify coupled components, 3) Extract a repository pattern, 4) Update tests."
+}}
+# → [Thought recorded] — no files touched, no commands run
+```
+
+This reduces unnecessary tool calls by giving the agent a structured space to plan.
+</details>
+
+<details>
+<summary><strong>📋 Planning — write_todos, update_todo</strong></summary>
+
+```python
+# Create a structured plan
+{"tool": "write_todos", "args": {
+    "todos": ["Read the existing codebase", "Fix the auth bug", "Add unit tests", "Update docs"]
+}}
+# → ## Progress: 0/4 complete
+#   0. [ ] Read the existing codebase
+#   1. [ ] Fix the auth bug
+#   2. [ ] Add unit tests
+#   3. [ ] Update docs
+
+# Mark steps complete as you go
+{"tool": "update_todo", "args": {"index": 0}}
+# → ## Progress: 1/4 complete
+#   0. [x] Read the existing codebase
+#   1. [ ] Fix the auth bug
+#   ...
+```
+
+</details>
+
+<details>
+<summary><strong>🤖 Sub-agent delegation</strong></summary>
+
+```python
+# Delegate to a fresh sub-agent with isolated context
+{"tool": "task", "args": {
+    "description": "Analyze all Python files in src/ and create a summary of the module structure",
+    "max_iterations": 10
+}}
+# → [Sub-agent completed: 6 tool calls, 4 iterations]
+#   The src/ directory contains 3 modules: ...
+
+# With named specialized sub-agents (configured at creation)
+{"tool": "task", "args": {
+    "description": "Review this pull request for security issues",
+    "agent": "security-reviewer"
+}}
+```
+
+**Registering named sub-agents:**
+```python
+from clawagents import create_claw_agent
+from clawagents.tools.subagent import SubAgentSpec
+
+agent = create_claw_agent(
+    "gemini-3-flash",
+    subagents=[
+        SubAgentSpec(
+            name="researcher",
+            description="Deep research on a topic",
+            system_prompt="You are a thorough researcher. Always cite sources.",
+            max_iterations=15,
+        ),
+        SubAgentSpec(
+            name="coder",
+            description="Write and test code",
+            system_prompt="You are a senior engineer. Write clean, tested code.",
+            max_iterations=10,
+        ),
+    ],
+)
+```
+
+</details>
+
+<details>
+<summary><strong>🌐 Web Fetch</strong></summary>
+
+```python
+# Fetch and read a web page (HTML stripped automatically)
+{"tool": "web_fetch", "args": {"url": "https://docs.python.org/3/library/asyncio.html"}}
+# → [200] https://docs.python.org/3/library/asyncio.html
+#   asyncio — Asynchronous I/O ...
+
+# Fetch a JSON API
+{"tool": "web_fetch", "args": {"url": "https://api.github.com/repos/python/cpython", "timeout": 10}}
+# → Returns raw JSON response
+```
+
+</details>
+
+### Custom Tools
+
+Create your own tools by implementing the `Tool` protocol:
+
+```python
+from clawagents import create_claw_agent
+from clawagents.tools.registry import Tool, ToolResult
+
+class DatabaseQueryTool:
+    name = "query_db"
+    description = "Run a read-only SQL query against the application database."
+    parameters = {
+        "sql": {"type": "string", "description": "The SQL SELECT query", "required": True},
+        "limit": {"type": "number", "description": "Max rows to return. Default: 100"},
+    }
+
+    async def execute(self, args):
+        sql = args.get("sql", "")
+        limit = int(args.get("limit", 100))
+        # ... your database logic here ...
+        rows = await run_query(sql, limit=limit)
+        return ToolResult(success=True, output=format_table(rows))
+
+# Register custom tools alongside built-ins
+agent = create_claw_agent("gpt-5", tools=[DatabaseQueryTool()])
+```
+
+You can also wrap **LangChain tools** directly:
+
+```python
+from langchain_community.tools import WikipediaQueryRun
+
+agent = create_claw_agent("gpt-5", tools=[WikipediaQueryRun()])
+# LangChain tools are automatically adapted via LangChainToolAdapter
+```
+
+---
+
+## Skills System
+
+Skills are **reusable instruction sets** that teach the agent domain-specific knowledge — without polluting the system prompt. They use a progressive disclosure pattern: the agent loads skill instructions on demand via the `use_skill` tool.
+
+### Skill Directory Structure
+
+```
+your-project/
+├── skills/                  # Auto-discovered (or .skills/, skill/, .skill/, Skills/)
+│   ├── code_review/
+│   │   └── SKILL.md         # ← Skill defined as a folder + SKILL.md
+│   ├── sql_expert.md         # ← Skill defined as a single .md file
+│   └── deploy_checklist.md
+├── AGENTS.md                 # Project memory (auto-injected)
+└── src/
+    └── ...
+```
+
+### Writing a Skill
+
+Every skill is a Markdown file with optional YAML frontmatter:
+
+**Example 1 — `skills/code_review/SKILL.md`**
+
+```markdown
+---
+name: code_review
+description: "Perform thorough code reviews following team standards"
+allowed-tools: read_file grep glob think
+---
+
+# Code Review Skill
+
+When reviewing code, follow these steps:
+
+## 1. Structure Check
+- Verify the file follows our module pattern (one class per file)
+- Check imports are grouped: stdlib → third-party → local
+- Ensure `__init__.py` exports are up to date
+
+## 2. Logic Review
+- Look for unhandled edge cases (empty inputs, None values)
+- Verify error messages are actionable
+- Check that async functions are properly awaited
+
+## 3. Security
+- No hardcoded secrets or API keys
+- SQL queries use parameterized statements
+- User input is sanitized before use
+
+## 4. Output Format
+Provide your review as:
+- ✅ **Approved** — no issues found
+- ⚠️ **Changes requested** — list specific issues with file:line references
+- 🚫 **Blocked** — critical issues that must be fixed
+```
+
+**Example 2 — `skills/sql_expert.md`** (single-file skill)
+
+```markdown
+---
+name: sql_expert
+description: "Write optimized SQL queries for PostgreSQL"
+allowed-tools: execute read_file think
+---
+
+# SQL Expert
+
+You are a PostgreSQL expert. When writing queries:
+
+## Rules
+1. Always use explicit `JOIN` syntax (never implicit joins in WHERE)
+2. Use CTEs (`WITH` clauses) for complex multi-step queries
+3. Add `EXPLAIN ANALYZE` when the user asks about performance
+4. Use parameterized queries — never interpolate user values
+5. Default to `LIMIT 100` unless the user specifies otherwise
+
+## Patterns
+
+### Pagination
+Use keyset pagination for large tables:
+```sql
+SELECT * FROM events
+WHERE id > :last_seen_id
+ORDER BY id
+LIMIT 50;
+```
+
+### Aggregation
+Always include the raw count alongside percentages:
+```sql
+SELECT
+    status,
+    COUNT(*) AS n,
+    ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 1) AS pct
+FROM orders
+GROUP BY status
+ORDER BY n DESC;
+```
+```
+
+**Example 3 — `skills/deploy_checklist.md`**
+
+```markdown
+---
+name: deploy_checklist
+description: "Step-by-step production deployment checklist"
+---
+
+# Deployment Checklist
+
+Before deploying to production, complete every step:
+
+- [ ] All tests pass: `pytest tests/ -v`
+- [ ] No lint errors: `ruff check src/`
+- [ ] Version bumped in `pyproject.toml`
+- [ ] CHANGELOG.md updated
+- [ ] Docker image builds: `docker build -t app:latest .`
+- [ ] Smoke test on staging environment
+- [ ] Database migrations reviewed and tested
+- [ ] Rollback plan documented
+```
+
+### How Skills Work at Runtime
+
+```python
+# Skills are auto-discovered from ./skills/ directory
+agent = create_claw_agent("gemini-3-flash")
+
+# Or specify custom skill directories
+agent = create_claw_agent("gpt-5", skills=["./my-skills", "./shared-skills"])
+```
+
+When skills are available, the agent gets two additional tools:
+
+```python
+# 1. List available skills
+{"tool": "list_skills", "args": {}}
+# → Available skills (3):
+#   - **code_review**: Perform thorough code reviews following team standards
+#     → Allowed tools: read_file, grep, glob, think
+#   - **sql_expert**: Write optimized SQL queries for PostgreSQL
+#     → Allowed tools: execute, read_file, think
+#   - **deploy_checklist**: Step-by-step production deployment checklist
+
+# 2. Load a specific skill's instructions
+{"tool": "use_skill", "args": {"name": "sql_expert"}}
+# → Returns the full skill content, injected into the agent's context
+```
+
+The agent **decides on its own** when to use a skill. If you ask it to "write a query to find all overdue orders," and a `sql_expert` skill exists, it will load the skill first, then write the query following those rules.
+
 ---
 
 ## API Reference
