@@ -18,9 +18,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+accurate-tokens = [
+    "tiktoken>=0.5.0",
+]
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
+    "tiktoken>=0.5.0",
 ]
 
 [project.scripts]

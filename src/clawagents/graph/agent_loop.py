@@ -226,21 +226,20 @@ Keep working until the task is fully complete.
 
 
 # ─── Adaptive Token Estimation (learned from deepagents) ──────────────────
+# Now uses tiktoken for accurate BPE counting (with fallback to heuristic).
 
+from clawagents.tokenizer import count_tokens, count_tokens_content, count_messages_tokens as _count_messages_tokens
+
+# Keep _CHARS_PER_TOKEN for the Tier-3 preflight char-budget calculation only
 _CHARS_PER_TOKEN = 4
 
 
-def _estimate_tokens(content: str | list[dict], multiplier: float = 1.0) -> int:
-    if isinstance(content, str):
-        return math.ceil((len(content) / _CHARS_PER_TOKEN) * multiplier)
-    else:
-        # Multimodal roughly estimated: 500 tokens per image + text chars
-        length = sum(len(p.get("text", "")) for p in content) + (len(content) * 2000)
-        return math.ceil((length / _CHARS_PER_TOKEN) * multiplier)
+def _estimate_tokens(content: str | list[dict], multiplier: float = 1.0, model: str | None = None) -> int:
+    return count_tokens_content(content, model=model, multiplier=multiplier)
 
 
-def _estimate_messages_tokens(messages: list[LLMMessage], multiplier: float = 1.0) -> int:
-    return sum(_estimate_tokens(m.content, multiplier) for m in messages)
+def _estimate_messages_tokens(messages: list[LLMMessage], multiplier: float = 1.0, model: str | None = None) -> int:
+    return _count_messages_tokens(messages, model=model, multiplier=multiplier)
 
 
 # ─── Tool Argument Truncation in Old Messages (learned from deepagents) ───
