@@ -3,6 +3,7 @@ import math
 import logging
 
 from clawagents.providers.llm import LLMProvider, LLMMessage
+from clawagents.tokenizer import count_tokens
 
 class AgentMessage:
     def __init__(self, role: str, content: str, timestamp: Optional[float] = None):
@@ -16,8 +17,8 @@ SAFETY_MARGIN = 1.2
 DEFAULT_SUMMARY_FALLBACK = "No prior history."
 
 def estimate_tokens(message: AgentMessage) -> int:
-    """Rough estimation: 4 chars per token"""
-    return math.ceil(len(message.content or "") / 4)
+    """Token count using tiktoken (falls back to heuristic if unavailable)."""
+    return count_tokens(message.content or "")
 
 def estimate_messages_tokens(messages: List[AgentMessage]) -> int:
     return sum(estimate_tokens(m) for m in messages)
