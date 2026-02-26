@@ -261,6 +261,30 @@ def _parse_openai_tool_calls(
 # Those would need a separate ResponsesAPIProvider.
 
 
+# Models that only accept a specific temperature value
+_FIXED_TEMPERATURE_MODELS: dict[str, float] = {
+    "gpt-5-nano": 1.0,
+    "gpt-5-mini": 1.0,
+    "gpt-5": 1.0,
+    "gpt-5.1": 1.0,
+    "gpt-5.2": 1.0,
+    "o1": 1.0,
+    "o1-mini": 1.0,
+    "o1-preview": 1.0,
+    "o3": 1.0,
+    "o3-mini": 1.0,
+    "o4-mini": 1.0,
+}
+
+
+def _resolve_temperature(model: str, requested: float) -> float:
+    """Return the fixed temperature if the model requires it, else the requested value."""
+    for prefix, fixed in _FIXED_TEMPERATURE_MODELS.items():
+        if model == prefix or model.startswith(prefix + "-"):
+            return fixed
+    return requested
+
+
 class OpenAIProvider(LLMProvider):
     name = "openai"
 
@@ -268,7 +292,7 @@ class OpenAIProvider(LLMProvider):
         self.client = AsyncOpenAI(api_key=config.openai_api_key)
         self.model = config.openai_model
         self._max_tokens = config.max_tokens
-        self._temperature = config.temperature
+        self._temperature = _resolve_temperature(config.openai_model, config.temperature)
 
     async def chat(
         self,
