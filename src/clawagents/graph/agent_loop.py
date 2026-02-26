@@ -327,6 +327,113 @@ class _ToolCallTracker:
         return self._soft_warnings
 
 
+# ─── Pre-flight Context Guard ─────────────────────────────────────────────
+# Runs once before the main loop to ensure the initial payload fits in the
+# context window. Applies graduated shedding when the system prompt + tool
+# descriptions + user task already exceed the budget.
+
+_MAX_OVERFLOW_RETRIES = 3
+
+
+def _preflight_context_check(
+    messages: list[LLMMessage],
+    context_window: int,
+    tool_desc: str,
+    native_schemas: list[NativeToolSchema] | None,
+    registry: ToolRegistry | None,
+    emit: OnEvent,
+    model_name: Optional[str] = None,
+) -> tuple[list[LLMMessage], str, list[NativeToolSchema] | None]:
+    """Ensure the initial payload fits in the context budget.
+
+    Returns (messages, tool_desc, native_schemas) — possibly modified via
+    graduated shedding.
+
+    Tiers:
+      1. Truncate verbose tool parameter descriptions
+      2. Drop text-based tool descriptions if native schemas are available
+      3. Truncate the system prompt itself, keeping the core behavior section
+    """
+    effective_window, ratio = (
+        _resolve_context_budget(model_name, context_window)
+        if model_name
+        else (context_window, _CONTEXT_BUDGET_RATIO)
+    )
+    budget = int(effective_window * ratio)
+
+    native_schema_tokens = 0
+    if native_schemas:
+        schema_text = json.dumps([
+            {"name": s.name, "description": s.description, "parameters": s.parameters}
+            for s in native_schemas
+        ])
+        native_schema_tokens = _estimate_tokens(schema_text)
+
+    def _payload_tokens() -> int:
+        return _estimate_messages_tokens(messages) + native_schema_tokens
+
+    if _payload_tokens() <= budget:
+        return messages, tool_desc, native_schemas
+
+    emit("context", {
+        "message": f"pre-flight: initial payload ~{_payload_tokens()} tokens exceeds budget {budget}"
+    })
+
+    # ── Tier 1: Truncate parameter descriptions in tool_desc ──────────
+    if tool_desc and registry:
+        short_parts = ["## Available Tools\n"]
+        for tool in registry.list():
+            short_parts.append(f"### {tool.name}\n{tool.description}")
+            if tool.parameters:
+                short_parts.append("Parameters: " + ", ".join(
+                    f"`{k}` ({v.get('type', 'string')}{'*' if v.get('required') else ''})"
+                    for k, v in tool.parameters.items()
+                ))
+            short_parts.append("")
+        short_desc = "\n".join(short_parts)
+        sys_msg = messages[0]
+        messages = [
+            LLMMessage(role="system", content=sys_msg.content.replace(tool_desc, short_desc)),
+            *messages[1:],
+        ]
+        tool_desc = short_desc
+        emit("context", {"message": f"tier-1: shortened tool descriptions -> ~{_payload_tokens()} tokens"})
+
+    if _payload_tokens() <= budget:
+        return messages, tool_desc, native_schemas
+
+    # ── Tier 2: Drop text tool descriptions if native schemas exist ───
+    if tool_desc and native_schemas:
+        sys_msg = messages[0]
+        messages = [
+            LLMMessage(role="system", content=sys_msg.content.replace(tool_desc, "").strip()),
+            *messages[1:],
+        ]
+        tool_desc = ""
+        emit("context", {"message": f"tier-2: removed text tool descriptions -> ~{_payload_tokens()} tokens"})
+
+    if _payload_tokens() <= budget:
+        return messages, tool_desc, native_schemas
+
+    # ── Tier 3: Truncate system prompt, preserving core behavior ──────
+    sys_content = messages[0].content
+    max_sys_chars = int((budget - native_schema_tokens - _estimate_tokens(messages[1].content if len(messages) > 1 else "")) * _CHARS_PER_TOKEN * 0.8)
+    if max_sys_chars > 200 and len(sys_content) > max_sys_chars:
+        truncated = sys_content[:max_sys_chars] + "\n\n...(system prompt truncated to fit context window)"
+        messages = [LLMMessage(role="system", content=truncated), *messages[1:]]
+        emit("context", {"message": f"tier-3: truncated system prompt -> ~{_payload_tokens()} tokens"})
+
+    if _payload_tokens() > budget:
+        emit("warn", {
+            "message": (
+                f"pre-flight: payload still ~{_payload_tokens()} tokens after all shedding "
+                f"(budget {budget}). Consider increasing CONTEXT_WINDOW or reducing tools/instruction."
+            )
+        })
+
+    return messages, tool_desc, native_schemas
+
+
 # ─── Context Window Guard with Auto-Compaction ────────────────────────────
 
 _CONTEXT_BUDGET_RATIO = 0.75
@@ -471,6 +578,11 @@ async def run_agent_graph(
         LLMMessage(role="user", content=task),
     ]
 
+    # Pre-flight: ensure initial payload fits in context window
+    messages, tool_desc, native_schemas = _preflight_context_check(
+        messages, context_window, tool_desc, native_schemas, registry, emit,
+    )
+
     state = AgentState(
         messages=messages,
         current_task=task,
@@ -481,6 +593,7 @@ async def run_agent_graph(
         tool_calls=0,
     )
 
+    overflow_retries = 0
     cancel_event = asyncio.Event()
     loop = asyncio.get_running_loop()
 
@@ -536,12 +649,24 @@ async def run_agent_graph(
             except Exception as err:
                 err_msg = str(err).lower()
                 if "context" in err_msg or "token" in err_msg:
+                    overflow_retries += 1
+                    if overflow_retries > _MAX_OVERFLOW_RETRIES:
+                        emit("error", {
+                            "phase": "llm_call",
+                            "message": (
+                                f"context overflow persists after {_MAX_OVERFLOW_RETRIES} retries. "
+                                "Increase CONTEXT_WINDOW, reduce tools, or shorten your instruction."
+                            ),
+                        })
+                        state.status = "error"
+                        state.result = str(err)
+                        break
                     observed_ratio = context_window / max(
                         _estimate_messages_tokens(messages, 1.0), 1,
                     )
                     token_multiplier = min(observed_ratio * 1.1, 3.0)
                     emit("context", {
-                        "message": f"token overflow — calibrated multiplier to {token_multiplier:.2f}",
+                        "message": f"token overflow — calibrated multiplier to {token_multiplier:.2f} (retry {overflow_retries}/{_MAX_OVERFLOW_RETRIES})",
                     })
                     messages = await _compact_if_needed(
                         messages, context_window, llm, emit, token_multiplier, resolved_model_name,

@@ -30,6 +30,7 @@ class EngineConfig(BaseSettings):
     gemini_api_key: str = ""
     gemini_model: str = "gemini-3-flash-preview"
     max_tokens: int = 8192
+    temperature: float = 0.0
     context_window: int = 128000
     streaming: bool = True
 
