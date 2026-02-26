@@ -267,6 +267,8 @@ class OpenAIProvider(LLMProvider):
     def __init__(self, config: EngineConfig):
         self.client = AsyncOpenAI(api_key=config.openai_api_key)
         self.model = config.openai_model
+        self._max_tokens = config.max_tokens
+        self._temperature = config.temperature
 
     async def chat(
         self,
@@ -300,7 +302,12 @@ class OpenAIProvider(LLMProvider):
         self, messages: list[dict[str, str]],
         oai_tools: list[dict[str, Any]] | None = None,
     ) -> LLMResponse:
-        kwargs: dict[str, Any] = {"model": self.model, "messages": messages}
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "max_completion_tokens": self._max_tokens,
+            "temperature": self._temperature,
+        }
         if oai_tools:
             kwargs["tools"] = oai_tools
         resp = await self.client.chat.completions.create(**kwargs)
@@ -339,6 +346,8 @@ class OpenAIProvider(LLMProvider):
                 kwargs: dict[str, Any] = {
                     "model": self.model,
                     "messages": messages,
+                    "max_completion_tokens": self._max_tokens,
+                    "temperature": self._temperature,
                     "stream": True,
                     "stream_options": {"include_usage": True},
                 }
@@ -430,6 +439,8 @@ class GeminiProvider(LLMProvider):
     def __init__(self, config: EngineConfig):
         self.client = genai.Client(api_key=config.gemini_api_key)
         self.model = config.gemini_model
+        self._max_tokens = config.max_tokens
+        self._temperature = config.temperature
 
     async def chat(
         self,
@@ -488,7 +499,10 @@ class GeminiProvider(LLMProvider):
 
         system_instruction = "\n".join(system_parts)
 
-        config_opts: dict[str, Any] = {}
+        config_opts: dict[str, Any] = {
+            "max_output_tokens": self._max_tokens,
+            "temperature": self._temperature,
+        }
         if system_instruction:
             config_opts["system_instruction"] = system_instruction
         if tools:

@@ -161,8 +161,9 @@ def create_claw_agent(
     memory: Union[str, List[Union[str, os.PathLike]], None] = None,
     sandbox: Any = None,
     streaming: bool = True,
-    context_window: int = 128_000,
-    max_tokens: int = 8192,
+    context_window: Optional[int] = None,
+    max_tokens: Optional[int] = None,
+    temperature: Optional[float] = None,
     use_native_tools: bool = True,
     on_event: Optional[OnEvent] = None,
 ) -> ClawAgent:
@@ -179,8 +180,9 @@ def create_claw_agent(
         skills:         Skill directories (default: auto-discovers ./skills).
         memory:         AGENTS.md paths (default: auto-discovers ./AGENTS.md, ./CLAWAGENTS.md).
         streaming:      Enable streaming output (default: True).
-        context_window:  Max context window in tokens (default: 128000).
-        max_tokens:     Max output tokens per call (default: 8192).
+        context_window:  Max context window in tokens (default: from CONTEXT_WINDOW env / 128000).
+        max_tokens:     Max output tokens per call (default: from MAX_TOKENS env / 8192).
+        temperature:    Sampling temperature (default: from TEMPERATURE env / 0.0).
 
     Examples:
         # Zero-config (uses env vars)
@@ -196,7 +198,7 @@ def create_claw_agent(
         agent.before_tool = lambda name, args: name != "execute"
     """
     # ── Resolve model → LLMProvider ────────────────────────────────────
-    llm = _resolve_model(model, streaming, api_key, context_window, max_tokens)
+    llm = _resolve_model(model, streaming, api_key, context_window, max_tokens, temperature)
 
     # ── Resolve sandbox backend ────────────────────────────────────────
     if sandbox is None:
@@ -288,6 +290,7 @@ def _resolve_model(
     api_key: Optional[str] = None,
     context_window: Optional[int] = None,
     max_tokens: Optional[int] = None,
+    temperature: Optional[float] = None,
 ) -> LLMProvider:
     """Accept a model name string, an LLMProvider, or None (auto-detect)."""
     if isinstance(model, LLMProvider):
@@ -302,6 +305,8 @@ def _resolve_model(
         config.context_window = context_window
     if max_tokens is not None:
         config.max_tokens = max_tokens
+    if temperature is not None:
+        config.temperature = temperature
 
     active_model = model if isinstance(model, str) and model else get_default_model(config)
 
