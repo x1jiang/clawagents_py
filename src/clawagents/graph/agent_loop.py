@@ -539,6 +539,37 @@ def _make_buffer():
     return buf, on_chunk
 
 
+# ─── Truncated JSON Detection ─────────────────────────────────────────────
+
+_TRUNCATED_JSON_RE = re.compile(r'\{\s*"tool"\s*:', re.DOTALL)
+
+
+def _looks_like_truncated_json(text: str) -> bool:
+    """Detect if text looks like a JSON tool call that was cut off mid-output."""
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if not _TRUNCATED_JSON_RE.search(stripped):
+        return False
+    # Has what looks like a tool call but doesn't parse as valid JSON
+    try:
+        parsed = json.loads(stripped)
+        if isinstance(parsed, (dict, list)):
+            return False  # Valid JSON — not truncated
+    except json.JSONDecodeError:
+        pass
+    # Check for fence-wrapped truncated JSON
+    for m in re.finditer(r'```(?:json)?\s*\n?(.*?)(?:```|$)', stripped, re.DOTALL):
+        inner = m.group(1).strip()
+        if _TRUNCATED_JSON_RE.search(inner):
+            try:
+                json.loads(inner)
+                return False
+            except json.JSONDecodeError:
+                return True
+    return True
+
+
 # ─── ReAct Loop ──────────────────────────────────────────────────────────
 
 MAX_TOOL_ROUNDS = 1000
@@ -696,6 +727,19 @@ async def run_agent_graph(
                 tool_calls = registry.parse_tool_calls(response.content)
 
             if not tool_calls:
+                # Check if the response is a truncated JSON tool call (hit max_tokens)
+                if not use_native_tools and _looks_like_truncated_json(response.content):
+                    emit("warn", {"message": "truncated JSON tool call detected — asking LLM to retry"})
+                    messages.append(LLMMessage(role="assistant", content=response.content))
+                    messages.append(LLMMessage(
+                        role="user",
+                        content=(
+                            "Your previous response was cut off mid-JSON. "
+                            "Please resend the complete tool call as valid JSON."
+                        ),
+                    ))
+                    continue
+
                 state.result = response.content
                 state.status = "done"
                 state.iterations += 1

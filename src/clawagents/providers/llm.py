@@ -181,6 +181,71 @@ async def _with_retry(
     raise last_error  # type: ignore[misc]
 
 
+# ─── Truncated JSON Repair ─────────────────────────────────────────────────
+
+
+def _repair_json(text: str) -> Any:
+    """Best-effort parse of possibly-truncated JSON from an LLM tool call.
+
+    Strategy:
+      1. Try normal json.loads.
+      2. Try closing open braces/brackets from the end.
+      3. Fall back to empty dict.
+    """
+    text = text.strip()
+    if not text:
+        return {}
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Attempt to close unclosed braces/brackets
+    closers = {"{": "}", "[": "]"}
+    stack: list[str] = []
+    in_string = False
+    escape = False
+    for ch in text:
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"' and not escape:
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch in closers:
+            stack.append(closers[ch])
+        elif ch in ("}", "]"):
+            if stack and stack[-1] == ch:
+                stack.pop()
+
+    repaired = text + "".join(reversed(stack))
+    try:
+        return json.loads(repaired)
+    except json.JSONDecodeError:
+        pass
+
+    # Last resort: try to extract a partial object up to the last complete key-value
+    try:
+        # Truncate to last comma or colon and close
+        for i in range(len(text) - 1, 0, -1):
+            if text[i] in (",", ":"):
+                candidate = text[:i].rstrip(",: \t\n") + "".join(reversed(stack))
+                try:
+                    return json.loads(candidate)
+                except json.JSONDecodeError:
+                    continue
+    except Exception:
+        pass
+
+    logger.warning("JSON repair failed for tool call arguments — using empty args")
+    return {}
+
+
 # ─── Native Tool Schema Converters ────────────────────────────────────────
 
 
@@ -236,17 +301,15 @@ def _parse_openai_tool_calls(
     """Extract NativeToolCall list from OpenAI response tool_calls (handles function vs custom union)."""
     if not tool_calls:
         return None
-    import json as _json
     result: list[NativeToolCall] = []
     for tc in tool_calls:
         if getattr(tc, "type", None) == "function":
             fn = tc.function
             result.append(NativeToolCall(
                 tool_name=fn.name,
-                args=_json.loads(fn.arguments or "{}"),
+                args=_repair_json(fn.arguments or "{}"),
                 tool_call_id=getattr(tc, "id", "") or "",
             ))
-        # Skip custom tool calls — we only generate function tools
     return result if result else None
 
 
@@ -417,13 +480,12 @@ class OpenAIProvider(LLMProvider):
 
                 native_calls = None
                 if tools_accumulation:
-                    import json as _json
                     native_calls = []
                     for idx in sorted(tools_accumulation.keys()):
                         fn = tools_accumulation[idx]
                         native_calls.append(NativeToolCall(
                             tool_name=fn["name"],
-                            args=_json.loads(fn["arguments"] or "{}"),
+                            args=_repair_json(fn["arguments"] or "{}"),
                             tool_call_id=fn.get("id", ""),
                         ))
 
