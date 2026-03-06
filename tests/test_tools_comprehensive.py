@@ -20,6 +20,11 @@ import pytest
 import tempfile
 import shutil
 
+from clawagents.sandbox.local import LocalBackend
+
+def _sb(root=None):
+    return LocalBackend(root=root)
+
 # ─── Filesystem Tools ─────────────────────────────────────────────────────
 
 class TestLsTool:
@@ -40,7 +45,7 @@ class TestLsTool:
     @pytest.mark.asyncio
     async def test_ls_with_metadata(self):
         from clawagents.tools.filesystem import LsTool
-        tool = LsTool()
+        tool = LsTool(_sb(self.tmpdir))
         result = await tool.execute({"path": self.tmpdir})
 
         assert result.success is True
@@ -52,7 +57,7 @@ class TestLsTool:
     @pytest.mark.asyncio
     async def test_ls_dirs_first(self):
         from clawagents.tools.filesystem import LsTool
-        tool = LsTool()
+        tool = LsTool(_sb(self.tmpdir))
         result = await tool.execute({"path": self.tmpdir})
         lines = result.output.strip().split("\n")
 
@@ -62,7 +67,7 @@ class TestLsTool:
     @pytest.mark.asyncio
     async def test_ls_empty_dir(self):
         from clawagents.tools.filesystem import LsTool
-        tool = LsTool()
+        tool = LsTool(_sb(self.tmpdir))
         empty = os.path.join(self.tmpdir, "subdir")
         result = await tool.execute({"path": empty})
 
@@ -72,8 +77,8 @@ class TestLsTool:
     @pytest.mark.asyncio
     async def test_ls_nonexistent(self):
         from clawagents.tools.filesystem import LsTool
-        tool = LsTool()
-        result = await tool.execute({"path": "/nonexistent/path"})
+        tool = LsTool(_sb(self.tmpdir))
+        result = await tool.execute({"path": os.path.join(self.tmpdir, "nonexistent")})
 
         assert result.success is False
         assert "failed" in result.error.lower() or "not a directory" in result.error.lower()
@@ -94,7 +99,7 @@ class TestReadFileTool:
     @pytest.mark.asyncio
     async def test_read_file_basic(self):
         from clawagents.tools.filesystem import ReadFileTool
-        tool = ReadFileTool()
+        tool = ReadFileTool(_sb(self.tmpdir))
         result = await tool.execute({"path": self.filepath})
 
         assert result.success is True
@@ -104,7 +109,7 @@ class TestReadFileTool:
     @pytest.mark.asyncio
     async def test_read_file_pagination(self):
         from clawagents.tools.filesystem import ReadFileTool
-        tool = ReadFileTool()
+        tool = ReadFileTool(_sb(self.tmpdir))
         result = await tool.execute({"path": self.filepath, "offset": 10, "limit": 5})
 
         assert result.success is True
@@ -115,8 +120,8 @@ class TestReadFileTool:
     @pytest.mark.asyncio
     async def test_read_missing_file(self):
         from clawagents.tools.filesystem import ReadFileTool
-        tool = ReadFileTool()
-        result = await tool.execute({"path": "/nonexistent/file.txt"})
+        tool = ReadFileTool(_sb(self.tmpdir))
+        result = await tool.execute({"path": os.path.join(self.tmpdir, "nonexistent.txt")})
 
         assert result.success is False
 
@@ -132,7 +137,7 @@ class TestWriteFileTool:
     @pytest.mark.asyncio
     async def test_write_creates_file(self):
         from clawagents.tools.filesystem import WriteFileTool
-        tool = WriteFileTool()
+        tool = WriteFileTool(_sb(self.tmpdir))
         path = os.path.join(self.tmpdir, "new.txt")
         result = await tool.execute({"path": path, "content": "Hello world!"})
 
@@ -144,7 +149,7 @@ class TestWriteFileTool:
     @pytest.mark.asyncio
     async def test_write_creates_nested_dirs(self):
         from clawagents.tools.filesystem import WriteFileTool
-        tool = WriteFileTool()
+        tool = WriteFileTool(_sb(self.tmpdir))
         path = os.path.join(self.tmpdir, "a", "b", "c", "deep.txt")
         result = await tool.execute({"path": path, "content": "nested!"})
 
@@ -154,7 +159,7 @@ class TestWriteFileTool:
     @pytest.mark.asyncio
     async def test_write_overwrites(self):
         from clawagents.tools.filesystem import WriteFileTool
-        tool = WriteFileTool()
+        tool = WriteFileTool(_sb(self.tmpdir))
         path = os.path.join(self.tmpdir, "overwrite.txt")
 
         await tool.execute({"path": path, "content": "first"})
@@ -178,7 +183,7 @@ class TestEditFileTool:
     @pytest.mark.asyncio
     async def test_edit_single_replace(self):
         from clawagents.tools.filesystem import EditFileTool
-        tool = EditFileTool()
+        tool = EditFileTool(_sb(self.tmpdir))
         result = await tool.execute({
             "path": self.filepath,
             "target": "Foo Bar",
@@ -194,7 +199,7 @@ class TestEditFileTool:
     @pytest.mark.asyncio
     async def test_edit_fails_on_non_unique(self):
         from clawagents.tools.filesystem import EditFileTool
-        tool = EditFileTool()
+        tool = EditFileTool(_sb(self.tmpdir))
         result = await tool.execute({
             "path": self.filepath,
             "target": "Hello World",
@@ -208,7 +213,7 @@ class TestEditFileTool:
     @pytest.mark.asyncio
     async def test_edit_replace_all(self):
         from clawagents.tools.filesystem import EditFileTool
-        tool = EditFileTool()
+        tool = EditFileTool(_sb(self.tmpdir))
         result = await tool.execute({
             "path": self.filepath,
             "target": "Hello World",
@@ -225,7 +230,7 @@ class TestEditFileTool:
     @pytest.mark.asyncio
     async def test_edit_missing_target(self):
         from clawagents.tools.filesystem import EditFileTool
-        tool = EditFileTool()
+        tool = EditFileTool(_sb(self.tmpdir))
         result = await tool.execute({
             "path": self.filepath,
             "target": "NONEXISTENT TEXT",
@@ -238,9 +243,9 @@ class TestEditFileTool:
     @pytest.mark.asyncio
     async def test_edit_missing_file(self):
         from clawagents.tools.filesystem import EditFileTool
-        tool = EditFileTool()
+        tool = EditFileTool(_sb(self.tmpdir))
         result = await tool.execute({
-            "path": "/nonexistent/file.txt",
+            "path": os.path.join(self.tmpdir, "nonexistent.txt"),
             "target": "x",
             "replacement": "y"
         })
@@ -267,7 +272,7 @@ class TestGrepTool:
     @pytest.mark.asyncio
     async def test_grep_single_file(self):
         from clawagents.tools.filesystem import GrepTool
-        tool = GrepTool()
+        tool = GrepTool(_sb(self.tmpdir))
         result = await tool.execute({
             "path": os.path.join(self.tmpdir, "README.md"),
             "pattern": "TODO"
@@ -280,7 +285,7 @@ class TestGrepTool:
     @pytest.mark.asyncio
     async def test_grep_recursive(self):
         from clawagents.tools.filesystem import GrepTool
-        tool = GrepTool()
+        tool = GrepTool(_sb(self.tmpdir))
         result = await tool.execute({
             "path": self.tmpdir,
             "pattern": "TODO",
@@ -294,7 +299,7 @@ class TestGrepTool:
     @pytest.mark.asyncio
     async def test_grep_with_glob_filter(self):
         from clawagents.tools.filesystem import GrepTool
-        tool = GrepTool()
+        tool = GrepTool(_sb(self.tmpdir))
         result = await tool.execute({
             "path": self.tmpdir,
             "pattern": "TODO",
@@ -310,7 +315,7 @@ class TestGrepTool:
     @pytest.mark.asyncio
     async def test_grep_no_matches(self):
         from clawagents.tools.filesystem import GrepTool
-        tool = GrepTool()
+        tool = GrepTool(_sb(self.tmpdir))
         result = await tool.execute({
             "path": self.tmpdir,
             "pattern": "ZZZZNONEXISTENT",
@@ -339,7 +344,7 @@ class TestGlobTool:
     @pytest.mark.asyncio
     async def test_glob_py_files(self):
         from clawagents.tools.filesystem import GlobTool
-        tool = GlobTool()
+        tool = GlobTool(_sb(self.tmpdir))
         result = await tool.execute({
             "pattern": "**/*.py",
             "path": self.tmpdir
@@ -352,7 +357,7 @@ class TestGlobTool:
     @pytest.mark.asyncio
     async def test_glob_md_files(self):
         from clawagents.tools.filesystem import GlobTool
-        tool = GlobTool()
+        tool = GlobTool(_sb(self.tmpdir))
         result = await tool.execute({
             "pattern": "*.md",
             "path": self.tmpdir
@@ -364,7 +369,7 @@ class TestGlobTool:
     @pytest.mark.asyncio
     async def test_glob_no_matches(self):
         from clawagents.tools.filesystem import GlobTool
-        tool = GlobTool()
+        tool = GlobTool(_sb(self.tmpdir))
         result = await tool.execute({
             "pattern": "**/*.xyz",
             "path": self.tmpdir
@@ -575,7 +580,8 @@ class TestComposeBeforeLLM:
         messages = [{"role": "system", "content": "You are helpful."}]
         result = hook(messages)
 
-        assert "Always use TypeScript" in result[0]["content"]
+        c0 = result[0].content if hasattr(result[0], "content") else result[0]["content"]
+        assert "Always use TypeScript" in c0
 
     def test_with_skills_only(self):
         from clawagents.agent import _compose_before_llm
@@ -589,7 +595,8 @@ class TestComposeBeforeLLM:
         messages = [{"role": "system", "content": "Base prompt."}]
         result = hook(messages)
 
-        assert "code_review" in result[0]["content"]
+        c0 = result[0].content if hasattr(result[0], "content") else result[0]["content"]
+        assert "code_review" in c0
 
     def test_with_both(self):
         from clawagents.agent import _compose_before_llm
@@ -606,8 +613,9 @@ class TestComposeBeforeLLM:
         messages = [{"role": "system", "content": "Base."}]
         result = hook(messages)
 
-        assert "Project rules" in result[0]["content"]
-        assert "test" in result[0]["content"]
+        c0 = result[0].content if hasattr(result[0], "content") else result[0]["content"]
+        assert "Project rules" in c0
+        assert "test" in c0
 
     def test_with_neither(self):
         from clawagents.agent import _compose_before_llm

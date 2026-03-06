@@ -29,11 +29,13 @@ class LLMMessage:
         content: str | list[dict[str, Any]],
         tool_call_id: str | None = None,
         tool_calls_meta: list[dict[str, Any]] | None = None,
+        gemini_parts: list[dict[str, Any]] | None = None,
     ):
         self.role = role
         self.content = content
         self.tool_call_id = tool_call_id          # For role="tool": the ID this result belongs to
         self.tool_calls_meta = tool_calls_meta    # For role="assistant": list of {id, name, args}
+        self.gemini_parts = gemini_parts          # Preserved Gemini response parts (thought/thought_signature)
 
 
 class NativeToolSchema:
@@ -69,12 +71,14 @@ class LLMResponse:
         tokens_used: int,
         partial: bool = False,
         tool_calls: list[NativeToolCall] | None = None,
+        gemini_parts: list[dict[str, Any]] | None = None,
     ):
         self.content = content
         self.model = model
         self.tokens_used = tokens_used
         self.partial = partial
         self.tool_calls = tool_calls
+        self.gemini_parts = gemini_parts          # Preserved Gemini response parts (thought/thought_signature)
 
 
 OnChunkCallback = (
@@ -519,6 +523,29 @@ class OpenAIProvider(LLMProvider):
 # ─── Gemini Provider ──────────────────────────────────────────────────────
 
 
+def _serialize_gemini_parts(parts: Any) -> list[dict[str, Any]] | None:
+    """Serialize Gemini Part objects to dicts, preserving thought/thought_signature."""
+    if not parts:
+        return None
+    serialized = []
+    for p in parts:
+        d: dict[str, Any] = {}
+        if getattr(p, "text", None) is not None:
+            d["text"] = p.text
+        if getattr(p, "thought", None):
+            d["thought"] = True
+        if getattr(p, "thought_signature", None):
+            d["thought_signature"] = p.thought_signature
+        fc = getattr(p, "function_call", None)
+        if fc:
+            d["function_call"] = {"name": fc.name, "args": dict(fc.args) if fc.args else {}}
+            if getattr(p, "thought_signature", None):
+                d["thought_signature"] = p.thought_signature
+        if d:
+            serialized.append(d)
+    return serialized if serialized else None
+
+
 class GeminiProvider(LLMProvider):
     name = "gemini"
 
@@ -558,13 +585,17 @@ class GeminiProvider(LLMProvider):
                     "response": {"result": m.content},
                 }}]})
             elif m.role == "assistant" and m.tool_calls_meta:
-                # Convert tool_calls_meta to functionCall parts
-                parts = []
-                if m.content:
-                    parts.append({"text": m.content})
-                for tc in m.tool_calls_meta:
-                    parts.append({"function_call": {"name": tc["name"], "args": tc["args"]}})
-                user_contents.append({"role": "model", "parts": parts})
+                if m.gemini_parts:
+                    user_contents.append({"role": "model", "parts": m.gemini_parts})
+                else:
+                    parts = []
+                    if m.content:
+                        parts.append({"text": m.content})
+                    for tc in m.tool_calls_meta:
+                        parts.append({"function_call": {"name": tc["name"], "args": tc["args"]}})
+                    user_contents.append({"role": "model", "parts": parts})
+            elif m.role == "assistant" and m.gemini_parts:
+                user_contents.append({"role": "model", "parts": m.gemini_parts})
             else:
                 role_name = "model" if m.role == "assistant" else "user"
                 if isinstance(m.content, str):
@@ -613,12 +644,13 @@ class GeminiProvider(LLMProvider):
             contents=user_contents,
             config=gemini_config,
         )
-        # Extract native function calls from Gemini response parts
         fn_calls: list[NativeToolCall] | None = None
+        raw_parts = None
         candidates = getattr(resp, "candidates", None)
         if candidates:
             parts = getattr(candidates[0].content, "parts", None) if candidates[0].content else None
             if parts:
+                raw_parts = _serialize_gemini_parts(parts)
                 fn_calls = []
                 for p in parts:
                     fc = getattr(p, "function_call", None)
@@ -633,8 +665,11 @@ class GeminiProvider(LLMProvider):
                     fn_calls = None
         extracted_text = ""
         if candidates and parts:
-            extracted_text = "".join(getattr(p, "text", "") for p in parts if getattr(p, "text", None))
-            
+            extracted_text = "".join(
+                getattr(p, "text", "") for p in parts
+                if getattr(p, "text", None) and not getattr(p, "thought", False)
+            )
+
         return LLMResponse(
             content=extracted_text,
             model=self.model,
@@ -644,6 +679,7 @@ class GeminiProvider(LLMProvider):
                 else 0
             ),
             tool_calls=fn_calls,
+            gemini_parts=raw_parts,
         )
 
     async def _stream_with_retry(
@@ -667,6 +703,7 @@ class GeminiProvider(LLMProvider):
             chunks: list[str] = []
             final_tokens = 0
             fn_calls: list[NativeToolCall] = []
+            all_stream_parts: list[Any] = []
 
             try:
                 stream = await self.client.aio.models.generate_content_stream(
@@ -683,18 +720,18 @@ class GeminiProvider(LLMProvider):
                             tokens_used=final_tokens,
                             partial=True,
                             tool_calls=fn_calls if fn_calls else None,
+                            gemini_parts=_serialize_gemini_parts(all_stream_parts),
                         )
 
                     try:
-                        # Extract text content
                         if hasattr(chunk, "text") and chunk.text:
                             chunks.append(chunk.text)
                             await _invoke_callback(on_chunk, chunk.text)
-                        # Extract function calls from streaming parts
                         if hasattr(chunk, "candidates") and chunk.candidates:
                             for candidate in chunk.candidates:
                                 if hasattr(candidate, "content") and candidate.content and hasattr(candidate.content, "parts"):
                                     for p in candidate.content.parts:
+                                        all_stream_parts.append(p)
                                         fc = getattr(p, "function_call", None)
                                         if fc:
                                             import uuid
@@ -713,6 +750,7 @@ class GeminiProvider(LLMProvider):
                     model=self.model,
                     tokens_used=final_tokens,
                     tool_calls=fn_calls if fn_calls else None,
+                    gemini_parts=_serialize_gemini_parts(all_stream_parts),
                 )
 
             except Exception as exc:
@@ -728,6 +766,7 @@ class GeminiProvider(LLMProvider):
                         model=self.model,
                         tokens_used=final_tokens,
                         partial=True,
+                        gemini_parts=_serialize_gemini_parts(all_stream_parts),
                     )
                 if not _is_retryable(exc):
                     break

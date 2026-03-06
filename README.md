@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-5.5.0-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-5.13.0-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -21,7 +21,7 @@ Built by extracting and unifying the best architectural patterns from [OpenClaw]
 pip install clawagents
 ```
 
-> **Version 5.5.0** — Latest stable release (February 2026)
+> **Version 5.13.0** — Latest stable release (February 2026)
 
 ---
 
@@ -36,8 +36,14 @@ PROVIDER=gemini                    # or "openai"
 GEMINI_API_KEY=AIza...             # Your Gemini API key
 GEMINI_MODEL=gemini-3-flash-preview
 STREAMING=1
-CONTEXT_WINDOW=128000
-MAX_TOKENS=4096
+CONTEXT_WINDOW=1000000
+MAX_TOKENS=8192
+TEMPERATURE=0                      # Model-specific overrides apply (see below)
+
+# Optional: RL-inspired agent improvements
+CLAW_TRAJECTORY=1                  # Enable trajectory logging + scoring
+CLAW_RETHINK=1                     # Enable consecutive-failure detection
+CLAW_LEARN=1                       # Enable PTRL (lessons from past runs)
 ```
 
 <details>
@@ -48,8 +54,12 @@ PROVIDER=openai
 OPENAI_API_KEY=sk-...
 OPENAI_MODEL=gpt-5-nano
 STREAMING=1
-CONTEXT_WINDOW=128000
-MAX_TOKENS=4096
+CONTEXT_WINDOW=1000000
+MAX_TOKENS=8192
+TEMPERATURE=1                      # GPT-5 family requires temperature=1
+CLAW_TRAJECTORY=1
+CLAW_RETHINK=1
+CLAW_LEARN=1
 ```
 </details>
 
@@ -73,7 +83,32 @@ agent = create_claw_agent(
 result = await agent.invoke("Review this codebase and suggest improvements")
 ```
 
-### 4. CLI mode
+### 4. With trajectory logging & rethink
+
+```python
+agent = create_claw_agent(
+    "gpt-5-mini",
+    trajectory=True,   # logs every turn + scores the run
+    rethink=True,       # auto-injects "rethink" after 3 consecutive failures
+)
+result = await agent.invoke("Refactor the auth module and add tests")
+# Run summary written to .clawagents/trajectories/runs.jsonl
+```
+
+### 5. With PTRL (Prompt-Time Reinforcement Learning)
+
+```python
+agent = create_claw_agent(
+    "gpt-5-mini",
+    learn=True,    # enables all 3 PTRL layers (implies trajectory=True)
+    rethink=True,  # enhanced rethink uses past lessons
+)
+result = await agent.invoke("Build the data pipeline")
+# After the run: lessons extracted and saved to .clawagents/lessons.md
+# Next run: lessons injected into system prompt automatically
+```
+
+### 5. CLI mode
 
 ```bash
 python -m clawagents --task "Find all TODO comments in the codebase"
@@ -83,7 +118,7 @@ python -m clawagents --task "Find all TODO comments in the codebase"
 
 ## 🏆 Performance: ClawAgents vs Traditional Frameworks
 
-ClawAgents v5.5 outperforms traditional multi-layer agentic frameworks through **architectural simplicity**. Here's how it stacks up against DeepAgents (LangGraph/LangChain-based) in head-to-head benchmarks.
+ClawAgents v5.10 outperforms traditional multi-layer agentic frameworks through **architectural simplicity**. Here's how it stacks up against DeepAgents (LangGraph/LangChain-based) in head-to-head benchmarks.
 
 ### Benchmark Results (February 2026)
 
@@ -147,7 +182,7 @@ Traditional Stack (DeepAgents):           ClawAgents:
 
 ## Feature Matrix
 
-| Feature | ClawAgents v5.5 | DeepAgents | OpenClaw |
+| Feature | ClawAgents v5.13 | DeepAgents | OpenClaw |
 |:---|:---:|:---:|:---:|
 | ReAct loop | ✅ | ✅ | ✅ |
 | Tool loop detection | ✅ **soft + hard** | ❌ | ✅ |
@@ -168,6 +203,14 @@ Traditional Stack (DeepAgents):           ClawAgents:
 | `think` tool (structured reasoning) | ✅ | ❌ | ❌ |
 | LangChain tool adapter | ✅ | N/A | ❌ |
 | Streaming with stall detection | ✅ | ❌ | ✅ |
+| Trajectory logging + run scoring | ✅ | ❌ | ❌ |
+| Consecutive-failure rethink | ✅ | ❌ | ❌ |
+| Discrete reward bands (RL-inspired) | ✅ | ❌ | ❌ |
+| Weighted execution scoring | ✅ | ❌ | ❌ |
+| Truncated JSON repair + retry | ✅ | ❌ | ❌ |
+| Model-specific temperature override | ✅ | ❌ | ❌ |
+| Gemini 3 thought_signature support | ✅ | ❌ | ❌ |
+| Prompt-Time RL (PTRL) — learn from past runs | ✅ | ❌ | ❌ |
 
 ---
 
@@ -179,8 +222,9 @@ Traditional Stack (DeepAgents):           ClawAgents:
 clawagents/
 ├── agent.py            # ClawAgent class — ReAct loop, hooks, compaction
 ├── __main__.py          # CLI entrypoint
-├── config/              # Env-based configuration
+├── config/              # Env-based configuration (incl. TEMPERATURE, CLAW_*)
 ├── providers/           # LLM backends (OpenAI, Gemini, Fallback)
+│   └── llm.py           # max_completion_tokens, temperature override, JSON repair
 ├── tools/               # 14+ built-in tools
 │   ├── filesystem.py    # ls, read_file, write_file, edit_file
 │   ├── advanced_fs.py   # tree, diff, insert_lines
@@ -195,10 +239,12 @@ clawagents/
 │   ├── protocol.py      # SandboxBackend interface (15+ methods)
 │   ├── local.py         # LocalBackend (pathlib + asyncio)
 │   └── in_memory.py     # InMemoryBackend (VFS for testing)
+├── trajectory/          # RL-inspired run analysis (v5.9+)
+│   └── recorder.py      # TrajectoryRecorder, discrete scoring, quality grading
 ├── gateway/             # Production HTTP server
 │   ├── server.py        # FastAPI + SSE streaming
 │   └── queue.py         # 4-lane FIFO command queue
-├── graph/               # Agent loop orchestration
+├── graph/               # Agent loop orchestration + failure tracking
 ├── memory/              # AGENTS.md discovery + compaction
 ├── process/             # Process management
 └── logging/             # Structured logging
@@ -609,6 +655,15 @@ The agent **decides on its own** when to use a skill. If you ask it to "write a 
 | `memory` | `str \| list` | auto-discover | Memory files to inject |
 | `streaming` | `bool` | `True` | Enable streaming responses |
 | `sandbox` | `SandboxBackend` | `LocalBackend` | Pluggable sandbox for file/shell operations |
+| `context_window` | `int \| None` | from env / `1000000` | Token budget for compaction |
+| `max_tokens` | `int \| None` | from env / `8192` | Max output tokens per response |
+| `temperature` | `float \| None` | from env / `0.0` | LLM temperature (model-specific overrides apply) |
+| `trajectory` | `bool \| None` | from `CLAW_TRAJECTORY` / `False` | Enable trajectory logging + run scoring |
+| `rethink` | `bool \| None` | from `CLAW_RETHINK` / `False` | Enable consecutive-failure detection |
+| `learn` | `bool \| None` | from `CLAW_LEARN` / `False` | Enable PTRL: post-run self-analysis, pre-run lesson injection, enhanced rethink. Implies `trajectory=True` |
+| `max_iterations` | `int \| None` | from `MAX_ITERATIONS` / `200` | Max tool rounds before the agent stops |
+| `preview_chars` | `int \| None` | from `CLAW_PREVIEW_CHARS` / `120` | Max chars for tool-output previews in trajectory logs |
+| `response_chars` | `int \| None` | from `CLAW_RESPONSE_CHARS` / `500` | Max chars for LLM response text in trajectory records |
 | `on_event` | `callable` | `None` | Event callback |
 
 ### Hooks & Access Control
@@ -732,8 +787,15 @@ snapshot = mem.snapshot()  # deterministic state capture
 | `GEMINI_API_KEY` | — | Gemini API key |
 | `GEMINI_MODEL` | `gemini-3-flash-preview` | Gemini model |
 | `STREAMING` | `1` | `1` = enabled, `0` = disabled |
-| `CONTEXT_WINDOW` | `128000` | Token budget for compaction |
-| `MAX_TOKENS` | `4096` | Max output tokens per response |
+| `CONTEXT_WINDOW` | `1000000` | Token budget for compaction |
+| `MAX_TOKENS` | `8192` | Max output tokens per response (sent as `max_completion_tokens` for OpenAI, `max_output_tokens` for Gemini) |
+| `TEMPERATURE` | `0.0` | LLM temperature. Automatically overridden for models that require a fixed value (e.g. GPT-5 family → 1.0, o1/o3 series → 1.0) |
+| `CLAW_TRAJECTORY` | `0` | `1` = enable trajectory logging. Logs every turn and scores each run to `.clawagents/trajectories/runs.jsonl` |
+| `CLAW_RETHINK` | `0` | `1` = enable consecutive-failure detection. Injects a "rethink" prompt after 3 consecutive meaningful tool failures |
+| `CLAW_LEARN` | `0` | `1` = enable Prompt-Time Reinforcement Learning. Post-run self-analysis extracts lessons to `.clawagents/lessons.md`; pre-run injection + enhanced rethink use them. Implies `CLAW_TRAJECTORY=1` |
+| `MAX_ITERATIONS` | `200` | Max tool rounds before the agent stops. Override per-run via `agent.invoke(task, max_iterations=N)` |
+| `CLAW_PREVIEW_CHARS` | `120` | Max chars for tool-output previews in trajectory logs and events |
+| `CLAW_RESPONSE_CHARS` | `500` | Max chars for LLM response text stored in trajectory records |
 
 ---
 
@@ -752,7 +814,82 @@ python -m pytest tests/ -v -m benchmark
 
 ---
 
-## What's New in v5.5
+## Changelog
+
+### v5.13.0 — Prompt-Time Reinforcement Learning (PTRL)
+
+| Feature | Description |
+|:---|:---|
+| 🧠 **PTRL: Post-run self-analysis** | After each run, the LLM reviews its own trajectory and extracts 2-5 actionable lessons, saved to `.clawagents/lessons.md` |
+| 📖 **PTRL: Pre-run lesson injection** | On subsequent runs, stored lessons are injected into the system prompt so the agent avoids past mistakes |
+| 🔄 **PTRL: Enhanced mid-run rethink** | When consecutive failures trigger a rethink, relevant past lessons are included in the rethink message |
+| 🎛️ **`learn` flag / `CLAW_LEARN` env** | Opt-in via `learn=True` or `CLAW_LEARN=1`. Automatically enables trajectory logging |
+| 📐 **Default `context_window` → 1,000,000** | Increased from 128,000 to support modern large-context models |
+| 🔧 **macOS sandbox symlink fix** | `LocalBackend` now resolves symlinks at init (fixes `/var` → `/private/var` on macOS) |
+| ✅ **All 150 tests passing** | Fixed 48 pre-existing test failures (sandbox path traversal, LLMMessage subscript, mock assertions) |
+
+### v5.12.1 — Streamlit / Jupyter Compatibility
+
+| Feature | Description |
+|:---|:---|
+| 🔧 **Signal handler fix** | `add_signal_handler` now catches `RuntimeError` in addition to `NotImplementedError`/`OSError`, fixing crashes in Streamlit, Jupyter, and other non-main-thread environments |
+
+### v5.12.0 — Gemini 3 Thought Signature Support
+
+| Feature | Description |
+|:---|:---|
+| 🧠 **`thought_signature` preservation** | Gemini 3 thinking models (e.g. `gemini-3-flash-preview`) require `thought` and `thought_signature` fields to be echoed back during multi-turn function calling. ClawAgents now captures the full response parts and replays them verbatim, preventing 400 errors. |
+| 🔄 **`gemini_parts` field** | New optional field on `LLMMessage` and `LLMResponse` carries raw Gemini response parts through the conversation history. Used automatically — no user action required. |
+
+### v5.11.0 — Configurable Limits
+
+| Feature | Description |
+|:---|:---|
+| 🔢 **`max_iterations`** | Now settable at construction or via `MAX_ITERATIONS` env (default 200, was hardcoded in caller) |
+| 📏 **`preview_chars`** | Tool-output preview length configurable via `CLAW_PREVIEW_CHARS` env (default 120) |
+| 📄 **`response_chars`** | Response text length in trajectory records via `CLAW_RESPONSE_CHARS` env (default 500) |
+| ⚙️ **Priority** | Explicit param > env var > default for all three |
+
+### v5.10.0 — Discrete Reward Bands & Weighted Scoring
+
+| Feature | Description |
+|:---|:---|
+| 🎯 **Discrete reward bands** | Run scores mapped to -1 … +3 bands (inspired by CUDA-Agent PPO reward shaping) |
+| ⚖️ **Weighted execution scoring** | `execute`, `shell`, `run_code` weighted 2× higher than generic tools |
+| 🏷️ **Run quality grading** | Each run classified as `clean`, `noisy`, or `failed` for trajectory filtering |
+| 🛡️ **Gameable tool exclusion** | `think`, `todolist`, `use_skill`, etc. excluded from scoring to prevent reward hacking |
+
+### v5.9.0 — Trajectory Logging & Rethink
+
+| Feature | Description |
+|:---|:---|
+| 📊 **Trajectory logging** | Structured recording of every turn, tool call, and outcome to `runs.jsonl` |
+| 🔄 **Consecutive-failure rethink** | After 3 consecutive meaningful failures, injects a system "rethink" prompt |
+| 🎛️ **Opt-in flags** | `trajectory=True` / `CLAW_TRAJECTORY=1` and `rethink=True` / `CLAW_RETHINK=1` |
+
+### v5.8.0 — JSON Resilience
+
+| Feature | Description |
+|:---|:---|
+| 🔧 **JSON repair** | `_repair_json()` utility fixes truncated JSON from hitting `max_completion_tokens` |
+| 🔁 **Truncated JSON retry** | Detects incomplete JSON tool calls and prompts the LLM to resend |
+
+### v5.7.0 — Model-Specific Temperature
+
+| Feature | Description |
+|:---|:---|
+| 🌡️ **Fixed-temperature models** | GPT-5 family and o1/o3/o4 series auto-override to `temperature=1.0` |
+| 🌡️ **Configurable temperature** | `TEMPERATURE` env var + `temperature` parameter on `create_claw_agent` |
+
+### v5.6.0 — LLM Parameter Fixes
+
+| Feature | Description |
+|:---|:---|
+| 🔑 **`max_completion_tokens`** | OpenAI calls now use `max_completion_tokens` (replacing deprecated `max_tokens`) |
+| 🔑 **`max_output_tokens`** | Gemini calls now pass `max_output_tokens` correctly |
+| ⚙️ **Config priority** | Explicit param > `.env` > default — no more shadowing of env values |
+
+### v5.5.0 — Foundation
 
 | Feature | Description |
 |:---|:---|
@@ -769,15 +906,91 @@ python -m pytest tests/ -v -m benchmark
 
 ---
 
+## Trajectory Logging & RL-Inspired Scoring
+
+ClawAgents includes an optional **trajectory system** inspired by reinforcement learning techniques from [CUDA-Agent](https://github.com/NexaAI/CUDA-Agent) and [OpenClaw-RL](https://github.com/anthropics/openclaw-rl). Enable it with `trajectory=True` or `CLAW_TRAJECTORY=1`.
+
+### What gets logged
+
+Every agent run records:
+- **Turn-level data**: tool calls, arguments, success/failure, output previews
+- **Weighted turn scores**: execution tools (shell, code runners) weighted 2× higher than generic tools
+- **Run summary**: total turns, tool calls, successes/failures, elapsed time
+
+### Discrete reward bands
+
+Each run receives a score from **-1 to +3**:
+
+| Score | Meaning |
+|:---:|:---|
+| **+3** | All tools succeeded, task completed cleanly |
+| **+2** | Minor hiccups but overall success |
+| **+1** | Partial success with some failures |
+| **0** | Inconclusive — mixed results |
+| **-1** | Majority of tool calls failed |
+
+### Quality grading
+
+Runs are classified for downstream filtering:
+
+| Quality | Criteria |
+|:---|:---|
+| `clean` | Score ≥ 2 and ≤ 2 mid-run failures |
+| `noisy` | Score ≥ 0 but too many mid-run failures |
+| `failed` | Score < 0 |
+
+### Anti-gaming protections
+
+Tools like `think`, `todolist`, `use_skill`, `list_skills`, and `update_todo` are excluded from scoring — they can't inflate success rates.
+
+### Consecutive-failure rethink
+
+With `rethink=True` or `CLAW_RETHINK=1`, the agent monitors tool outcomes in real-time. After **3 consecutive meaningful failures**, it injects a system message:
+
+> *"You have had 3 consecutive tool failures. Stop and rethink your approach before continuing."*
+
+This simple mechanism prevents the agent from spiraling into repeated failed attempts.
+
+### Output
+
+Run summaries are appended to `.clawagents/trajectories/runs.jsonl`:
+
+```json
+{
+  "run_id": "a1b2c3d4",
+  "model": "gpt-5-mini",
+  "total_turns": 8,
+  "tool_calls": 12,
+  "successes": 10,
+  "failures": 2,
+  "run_score": 2,
+  "quality": "clean",
+  "elapsed_ms": 45230,
+  "turns": [...]
+}
+```
+
+---
+
 ## Roadmap
 
 - [ ] Docker sandbox backend (protocol ready)
 - [ ] Semantic browser automation (accessibility tree)
 - [ ] Prompt caching (Anthropic-style)
-- [x] Pluggable sandbox backend ✅
-- [x] Lane-based queue serialization ✅
-- [x] Skill progressive disclosure ✅
-- [x] Gateway HTTP server ✅
+- [ ] Persistent memory learning from trajectory data (advanced — RFT-style rule extraction)
+- [x] Post-run self-analysis + lesson extraction ✅ (v5.13 — PTRL)
+- [x] Pre-run lesson injection ✅ (v5.13 — PTRL)
+- [x] Enhanced mid-run rethink with past lessons ✅ (v5.13 — PTRL)
+- [x] Trajectory logging + discrete reward bands ✅ (v5.9–5.10)
+- [x] Consecutive-failure rethink injection ✅ (v5.9)
+- [x] Weighted execution scoring + quality grading ✅ (v5.10)
+- [x] JSON repair + truncated JSON retry ✅ (v5.8)
+- [x] Model-specific temperature override ✅ (v5.7)
+- [x] Configurable temperature / max_completion_tokens ✅ (v5.6)
+- [x] Pluggable sandbox backend ✅ (v5.5)
+- [x] Lane-based queue serialization ✅ (v5.5)
+- [x] Skill progressive disclosure ✅ (v5.5)
+- [x] Gateway HTTP server ✅ (v5.5)
 
 ---
 

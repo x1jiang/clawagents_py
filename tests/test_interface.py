@@ -37,10 +37,10 @@ class TestCreateClawAgent:
             result = _resolve_model("gemini-3-flash", True)
 
             assert result is mock_provider
-            assert mock_cfg.gemini_model == "gemini-3-flash"
+            mock_create.assert_called_once_with("gemini-3-flash", mock_cfg)
 
     def test_factory_with_openai_string(self):
-        """create_claw_agent('gpt-5') should set openai model."""
+        """create_claw_agent('gpt-5') should pass model string to create_provider."""
         from clawagents.agent import _resolve_model
 
         with patch('clawagents.config.config.load_config') as mock_config, \
@@ -51,7 +51,7 @@ class TestCreateClawAgent:
 
             _resolve_model("gpt-5", True)
 
-            assert mock_cfg.openai_model == "gpt-5"
+            mock_create.assert_called_once_with("gpt-5", mock_cfg)
 
     def test_factory_with_none_auto_detects(self):
         """create_claw_agent() should auto-detect from env."""
@@ -157,7 +157,9 @@ class TestInjectContext:
         result = agent.before_llm(messages)
 
         assert len(result) == 2
-        assert "[Context] Always respond in Spanish" in result[-1]["content"]
+        last = result[-1]
+        content = last.content if hasattr(last, "content") else last["content"]
+        assert "[Context] Always respond in Spanish" in content
 
     def test_stacks_multiple_contexts(self):
         from clawagents.agent import ClawAgent
@@ -172,8 +174,10 @@ class TestInjectContext:
 
         # Original + 2 injected
         assert len(result) == 3
-        assert "Rule 1" in result[1]["content"]
-        assert "Rule 2" in result[2]["content"]
+        c1 = result[1].content if hasattr(result[1], "content") else result[1]["content"]
+        c2 = result[2].content if hasattr(result[2], "content") else result[2]["content"]
+        assert "Rule 1" in c1
+        assert "Rule 2" in c2
 
 
 # ─── Test: Convenience Hook - truncate_output ─────────────────────────────

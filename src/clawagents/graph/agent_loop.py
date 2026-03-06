@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal, Optional
 
 from clawagents.providers.llm import LLMProvider, LLMMessage, LLMResponse, NativeToolSchema, NativeToolCall
-from clawagents.tools.registry import ToolRegistry, ParsedToolCall
+from clawagents.tools.registry import ToolRegistry, ParsedToolCall, ToolResult
 
 logger = logging.getLogger(__name__)
 
@@ -201,6 +201,7 @@ class AgentState:
     iterations: int
     max_iterations: int
     tool_calls: int
+    trajectory_file: str = ""
 
 
 BASE_SYSTEM_PROMPT = """You are a ClawAgent, an AI assistant that helps users accomplish tasks using tools. You respond with text and tool calls.
@@ -324,6 +325,73 @@ class _ToolCallTracker:
     def bump_soft_warning(self) -> int:
         self._soft_warnings += 1
         return self._soft_warnings
+
+
+# ─── Consecutive Failure Detection ────────────────────────────────────────
+# Tracks tool-call success/failure to detect persistent failure streaks.
+# When N consecutive tool calls fail, injects a "step back and rethink"
+# message — lightweight online adaptation inspired by OpenClaw-RL's
+# next-state reward signal.
+
+_RETHINK_THRESHOLD = 3
+_MAX_RETHINKS = 3
+
+_RETHINK_MESSAGE = (
+    "[System] Your last {n} tool calls all failed. "
+    "Stop and reconsider your approach before trying again. "
+    "Review the errors above, think about what went wrong, "
+    "and try a fundamentally different strategy."
+)
+
+
+_SCORELESS_TOOLS: frozenset[str] = frozenset({
+    "think", "todolist", "todo_write", "todo_read", "use_skill", "ask_user",
+})
+
+
+class _FailureTracker:
+    """Track consecutive tool failures to trigger rethink injection.
+
+    Scoreless tools (think, todolist, etc.) are excluded — their results
+    are not meaningful signals for failure detection.
+    """
+
+    def __init__(self, threshold: int = _RETHINK_THRESHOLD, max_rethinks: int = _MAX_RETHINKS):
+        self._results: list[bool] = []  # True = success, False = failure
+        self._threshold = threshold
+        self._max_rethinks = max_rethinks
+        self._rethink_count = 0
+
+    def record(self, success: bool, tool_name: str = "") -> None:
+        if tool_name in _SCORELESS_TOOLS:
+            return
+        self._results.append(success)
+
+    def record_batch(self, results: list[tuple[bool, str]]) -> None:
+        for success, name in results:
+            self.record(success, name)
+
+    def should_rethink(self) -> bool:
+        if self._rethink_count >= self._max_rethinks:
+            return False
+        if len(self._results) < self._threshold:
+            return False
+        return all(not s for s in self._results[-self._threshold:])
+
+    def bump_rethink(self) -> int:
+        self._rethink_count += 1
+        self._results.clear()
+        return self._rethink_count
+
+    @property
+    def consecutive_failures(self) -> int:
+        count = 0
+        for s in reversed(self._results):
+            if not s:
+                count += 1
+            else:
+                break
+        return count
 
 
 # ─── Pre-flight Context Guard ─────────────────────────────────────────────
@@ -582,12 +650,17 @@ async def run_agent_graph(
     system_prompt: Optional[str] = None,
     max_iterations: int = MAX_TOOL_ROUNDS,
     streaming: bool = True,
-    context_window: int = 128_000,
+    context_window: int = 1_000_000,
     on_event: Optional[OnEvent] = None,
     before_llm: Optional[BeforeLLMHook] = None,
     before_tool: Optional[BeforeToolHook] = None,
     after_tool: Optional[AfterToolHook] = None,
     use_native_tools: bool = True,
+    trajectory: bool = False,
+    rethink: bool = False,
+    learn: bool = False,
+    preview_chars: int = 120,
+    response_chars: int = 500,
 ) -> AgentState:
     """Single ReAct loop: LLM → tools → LLM → tools → ... → final answer."""
     registry = tools or ToolRegistry()
@@ -596,12 +669,27 @@ async def run_agent_graph(
     )
     tool_desc = registry.describe_for_llm() if not use_native_tools else ""
     loop_tracker = _ToolCallTracker()
+    failure_tracker = _FailureTracker() if rethink else None
     emit = on_event or _default_on_event
+
+    # Trajectory recorder (opt-in; learn implies trajectory)
+    recorder = None
+    if trajectory or learn:
+        from clawagents.trajectory.recorder import TrajectoryRecorder
+        recorder = TrajectoryRecorder(task=task, response_chars=response_chars)
 
     token_multiplier = 1.0
     resolved_model_name: Optional[str] = None
 
     prompt_to_use = system_prompt or BASE_SYSTEM_PROMPT
+
+    # PTRL Layer 1: Pre-run lesson injection
+    if learn:
+        from clawagents.trajectory.lessons import build_lesson_preamble
+        preamble = build_lesson_preamble()
+        if preamble:
+            prompt_to_use = prompt_to_use + preamble
+            emit("context", {"message": "PTRL: injected lessons from past runs"})
 
     messages: list[LLMMessage] = [
         LLMMessage(role="system", content=f"{prompt_to_use}\n\n{tool_desc}"),
@@ -633,7 +721,7 @@ async def run_agent_graph(
 
     try:
         loop.add_signal_handler(signal.SIGINT, _on_sigint)
-    except (NotImplementedError, OSError):
+    except (NotImplementedError, OSError, RuntimeError):
         pass
 
     effective_max_rounds = min(
@@ -740,6 +828,12 @@ async def run_agent_graph(
                     ))
                     continue
 
+                if recorder:
+                    recorder.record_turn(
+                        response_text=response.content or "",
+                        model=response.model,
+                        tokens_used=response.tokens_used,
+                    )
                 state.result = response.content
                 state.status = "done"
                 state.iterations += 1
@@ -814,7 +908,7 @@ async def run_agent_graph(
                     preview = "[Multimodal Array Content]"
                 else:
                     tool_output = _evict_large_tool_result(call.tool_name, raw_output)
-                    preview = tool_output[:120]
+                    preview = tool_output[:preview_chars]
 
                 emit("tool_result", {
                     "name": call.tool_name,
@@ -822,12 +916,31 @@ async def run_agent_graph(
                     "preview": preview,
                 })
 
+                # ── Failure tracking + trajectory ──
+                if failure_tracker:
+                    failure_tracker.record(tool_result.success, call.tool_name)
+                if recorder:
+                    from clawagents.trajectory.recorder import ToolCallRecord
+                    recorder.record_turn(
+                        response_text=response.content or "",
+                        model=response.model,
+                        tokens_used=response.tokens_used,
+                        tool_calls=[ToolCallRecord(
+                            tool_name=call.tool_name,
+                            args=call.args,
+                            success=tool_result.success,
+                            output_preview=preview if isinstance(preview, str) else "[multimodal]",
+                            error=tool_result.error if not tool_result.success else None,
+                        )],
+                    )
+
                 # Use proper tool role messages when native tools are enabled
                 if use_native_tools and native_tc and native_tc.tool_call_id:
                     messages.append(LLMMessage(
                         role="assistant",
                         content=response.content or "",
                         tool_calls_meta=[{"id": native_tc.tool_call_id, "name": call.tool_name, "args": call.args}],
+                        gemini_parts=getattr(response, "gemini_parts", None),
                     ))
                     tool_content = f"{tool_output}" if isinstance(tool_output, str) else json.dumps(tool_output)
                     messages.append(LLMMessage(
@@ -843,6 +956,21 @@ async def run_agent_graph(
                     messages.append(
                         LLMMessage(role="user", content=user_content)
                     )
+
+                # ── Rethink injection on consecutive failures ──
+                if failure_tracker and failure_tracker.should_rethink():
+                    n = failure_tracker.consecutive_failures
+                    rethink_num = failure_tracker.bump_rethink()
+                    emit("warn", {"message": f"rethink #{rethink_num}: {n} consecutive tool failures"})
+                    rethink_msg = _RETHINK_MESSAGE.format(n=n)
+                    if learn:
+                        from clawagents.trajectory.lessons import build_rethink_with_lessons
+                        rethink_msg = build_rethink_with_lessons(rethink_msg)
+                    messages.append(LLMMessage(
+                        role="user",
+                        content=rethink_msg,
+                    ))
+
             else:
                 # ── before_tool hook (parallel) — filter out rejected calls ──
                 approved_calls = tool_calls
@@ -903,7 +1031,7 @@ async def run_agent_graph(
                         preview = "[Multimodal Array Content]"
                     else:
                         output = _evict_large_tool_result(call.tool_name, raw_out)
-                        preview = output[:120]
+                        preview = output[:preview_chars]
                         
                     emit("tool_result", {
                         "name": call.tool_name,
@@ -919,6 +1047,30 @@ async def run_agent_graph(
                         call_summaries.append(json.dumps(output))
                         tool_outputs.append(json.dumps(output))
 
+                # ── Failure tracking + trajectory (parallel) ──
+                if failure_tracker:
+                    failure_tracker.record_batch([
+                        (r.success, c.tool_name) for c, r in zip(approved_calls, results)
+                    ])
+                if recorder:
+                    from clawagents.trajectory.recorder import ToolCallRecord
+                    tc_records = []
+                    for call, result in zip(approved_calls, results):
+                        raw_p = result.output[:preview_chars] if result.success else (result.error or "")[:preview_chars]
+                        tc_records.append(ToolCallRecord(
+                            tool_name=call.tool_name,
+                            args=call.args,
+                            success=result.success,
+                            output_preview=raw_p,
+                            error=result.error if not result.success else None,
+                        ))
+                    recorder.record_turn(
+                        response_text=response.content or "",
+                        model=response.model,
+                        tokens_used=response.tokens_used,
+                        tool_calls=tc_records,
+                    )
+
                 # Use proper tool role messages when native tools are enabled
                 if use_native_tools and native_tc_map:
                     tc_meta = []
@@ -931,6 +1083,7 @@ async def run_agent_graph(
                         role="assistant",
                         content=response.content or "",
                         tool_calls_meta=tc_meta,
+                        gemini_parts=getattr(response, "gemini_parts", None),
                     ))
                     for idx, (call, output_str) in enumerate(zip(approved_calls, tool_outputs)):
                         ntc = native_tc_map.get(idx)
@@ -954,6 +1107,20 @@ async def run_agent_graph(
                         )
                     )
 
+                # ── Rethink injection on consecutive failures (parallel) ──
+                if failure_tracker and failure_tracker.should_rethink():
+                    n = failure_tracker.consecutive_failures
+                    rethink_num = failure_tracker.bump_rethink()
+                    emit("warn", {"message": f"rethink #{rethink_num}: {n} consecutive tool failures"})
+                    rethink_msg = _RETHINK_MESSAGE.format(n=n)
+                    if learn:
+                        from clawagents.trajectory.lessons import build_rethink_with_lessons
+                        rethink_msg = build_rethink_with_lessons(rethink_msg)
+                    messages.append(LLMMessage(
+                        role="user",
+                        content=rethink_msg,
+                    ))
+
         else:
             emit("warn", {"message": f"reached max {effective_max_rounds} tool rounds"})
             state.status = "done"
@@ -976,6 +1143,29 @@ async def run_agent_graph(
 
     elapsed = time.monotonic() - t0
     state.messages = messages
+
+    # ── Finalize trajectory ──
+    run_summary = None
+    if recorder:
+        outcome = state.status if state.status != "running" else "success"
+        run_summary = recorder.finalize(outcome)
+        state.trajectory_file = run_summary.trajectory_file
+        emit("context", {"message": f"trajectory saved to {run_summary.trajectory_file}"})
+
+    # ── PTRL Layer 3: Post-run self-analysis ──
+    if learn and recorder and run_summary:
+        try:
+            from dataclasses import asdict
+            from clawagents.trajectory.lessons import extract_lessons, save_lessons
+            summary_dict = asdict(run_summary)
+            turn_dicts = [asdict(t) for t in recorder.turns]
+            lessons_text = await extract_lessons(llm, summary_dict, turn_dicts)
+            if lessons_text:
+                save_lessons(lessons_text, run_summary.task, run_summary.outcome)
+                emit("context", {"message": "PTRL: extracted and saved lessons from this run"})
+        except Exception:
+            logger.debug("PTRL: post-run self-analysis failed", exc_info=True)
+
     emit("agent_done", {
         "tool_calls": state.tool_calls,
         "iterations": state.iterations,
