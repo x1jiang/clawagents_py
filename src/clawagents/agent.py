@@ -63,11 +63,17 @@ class ClawAgent:
         system_prompt: Optional[str] = None,
         streaming: bool = True,
         use_native_tools: bool = True,
-        context_window: int = 128_000,
+        context_window: int = 1_000_000,
         on_event: Optional[OnEvent] = None,
         before_llm: Optional[BeforeLLMHook] = None,
         before_tool: Optional[BeforeToolHook] = None,
         after_tool: Optional[AfterToolHook] = None,
+        trajectory: bool = False,
+        rethink: bool = False,
+        learn: bool = False,
+        max_iterations: int = 200,
+        preview_chars: int = 120,
+        response_chars: int = 500,
     ):
         self.llm = llm
         self.tools = tools
@@ -79,11 +85,17 @@ class ClawAgent:
         self.before_llm = before_llm
         self.before_tool = before_tool
         self.after_tool = after_tool
+        self.trajectory = trajectory
+        self.rethink = rethink
+        self.learn = learn
+        self.max_iterations = max_iterations
+        self.preview_chars = preview_chars
+        self.response_chars = response_chars
 
     async def invoke(
         self,
         task: str,
-        max_iterations: int = 200,
+        max_iterations: Optional[int] = None,
         on_event: Optional[OnEvent] = None,
     ) -> AgentState:
         return await run_agent_graph(
@@ -91,7 +103,7 @@ class ClawAgent:
             llm=self.llm,
             tools=self.tools,
             system_prompt=self.system_prompt,
-            max_iterations=max_iterations,
+            max_iterations=max_iterations if max_iterations is not None else self.max_iterations,
             streaming=self.streaming,
             context_window=self.context_window,
             on_event=on_event or self.on_event,
@@ -99,6 +111,11 @@ class ClawAgent:
             before_tool=self.before_tool,
             after_tool=self.after_tool,
             use_native_tools=self.use_native_tools,
+            trajectory=self.trajectory,
+            rethink=self.rethink,
+            learn=self.learn,
+            preview_chars=self.preview_chars,
+            response_chars=self.response_chars,
         )
 
     # ── Convenience hook methods ──────────────────────────────────────
@@ -166,6 +183,12 @@ def create_claw_agent(
     temperature: Optional[float] = None,
     use_native_tools: bool = True,
     on_event: Optional[OnEvent] = None,
+    trajectory: Optional[bool] = None,
+    rethink: Optional[bool] = None,
+    learn: Optional[bool] = None,
+    max_iterations: Optional[int] = None,
+    preview_chars: Optional[int] = None,
+    response_chars: Optional[int] = None,
 ) -> ClawAgent:
     """
     Create a ClawAgent with full-stack capabilities.
@@ -180,9 +203,29 @@ def create_claw_agent(
         skills:         Skill directories (default: auto-discovers ./skills).
         memory:         AGENTS.md paths (default: auto-discovers ./AGENTS.md, ./CLAWAGENTS.md).
         streaming:      Enable streaming output (default: True).
-        context_window:  Max context window in tokens (default: from CONTEXT_WINDOW env / 128000).
+        context_window:  Max context window in tokens (default: from CONTEXT_WINDOW env / 1000000).
         max_tokens:     Max output tokens per call (default: from MAX_TOKENS env / 8192).
         temperature:    Sampling temperature (default: from TEMPERATURE env / 0.0).
+        trajectory:     Enable trajectory logging to .clawagents/trajectories/.
+                        Records every turn for debugging and analysis.
+                        Default: from CLAW_TRAJECTORY env / False.
+        rethink:        Enable consecutive-failure detection. Injects a "rethink"
+                        message after 3 consecutive tool failures.
+                        Default: from CLAW_RETHINK env / False.
+        learn:          Enable Prompt-Time Reinforcement Learning (PTRL).
+                        After each run the agent self-analyzes its trajectory,
+                        extracts lessons, and stores them in .clawagents/lessons.md.
+                        On subsequent runs lessons are injected into the system
+                        prompt and into rethink messages so the agent improves
+                        over time — without model fine-tuning.
+                        Automatically enables trajectory when True.
+                        Default: from CLAW_LEARN env / False.
+        max_iterations: Max tool rounds before the agent stops.
+                        Default: from MAX_ITERATIONS env / 200.
+        preview_chars:  Max chars for tool-output previews in trajectory logs.
+                        Default: from CLAW_PREVIEW_CHARS env / 120.
+        response_chars: Max chars for LLM response text in trajectory logs.
+                        Default: from CLAW_RESPONSE_CHARS env / 500.
 
     Examples:
         # Zero-config (uses env vars)
@@ -191,12 +234,40 @@ def create_claw_agent(
         # Explicit model + key
         agent = create_claw_agent("gpt-5-mini", api_key="sk-...")
 
-        # Gemini with key
-        agent = create_claw_agent("gemini-2.5-flash", api_key="AIza...")
+        # With PTRL learning enabled
+        agent = create_claw_agent("gpt-5-mini", learn=True, rethink=True)
+
+        # With trajectory logging + higher limits
+        agent = create_claw_agent("gpt-5-mini", trajectory=True, max_iterations=200,
+                                  preview_chars=500, response_chars=2000)
 
     Advanced hooks (set after creation):
         agent.before_tool = lambda name, args: name != "execute"
     """
+    # ── Resolve opt-in flags ────────────────────────────────────────────
+    if trajectory is None:
+        trajectory = os.environ.get("CLAW_TRAJECTORY", "").lower() in ("1", "true", "yes")
+    if rethink is None:
+        rethink = os.environ.get("CLAW_RETHINK", "").lower() in ("1", "true", "yes")
+    if learn is None:
+        learn = os.environ.get("CLAW_LEARN", "").lower() in ("1", "true", "yes")
+    if learn:
+        trajectory = True
+    if max_iterations is None:
+        raw = os.environ.get("MAX_ITERATIONS", "")
+        max_iterations = int(raw) if raw.isdigit() else 200
+    if preview_chars is None:
+        raw = os.environ.get("CLAW_PREVIEW_CHARS", "")
+        preview_chars = int(raw) if raw.isdigit() else 120
+    if response_chars is None:
+        raw = os.environ.get("CLAW_RESPONSE_CHARS", "")
+        response_chars = int(raw) if raw.isdigit() else 500
+
+    # ── Resolve context_window from config if not provided ──────────────
+    if context_window is None:
+        from clawagents.config.config import load_config as _lc
+        context_window = _lc().context_window  # default: 1_000_000
+
     # ── Resolve model → LLMProvider ────────────────────────────────────
     llm = _resolve_model(model, streaming, api_key, context_window, max_tokens, temperature)
 
@@ -243,14 +314,17 @@ def create_claw_agent(
             if os.path.exists(str(d)):
                 skill_store.add_directory(d)
 
+        # Support non-main threads (Streamlit, Jupyter) where asyncio.run()
+        # fails due to set_wakeup_fd. Reuse caller's loop if available.
         try:
-            asyncio.get_running_loop()
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                future = pool.submit(lambda: asyncio.run(skill_store.load_all()))
-                future.result(timeout=10)
+            _loop = asyncio.get_event_loop()
+            if _loop.is_closed():
+                raise RuntimeError
+            _loop.run_until_complete(skill_store.load_all())
         except RuntimeError:
-            asyncio.run(skill_store.load_all())
+            _loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(_loop)
+            _loop.run_until_complete(skill_store.load_all())
 
         loaded_skills = skill_store.list()
         if loaded_skills:
@@ -272,7 +346,9 @@ def create_claw_agent(
         llm=llm, tools=registry, system_prompt=instruction,
         streaming=streaming, use_native_tools=use_native_tools,
         context_window=context_window, on_event=on_event,
-        before_llm=composed_before_llm,
+        before_llm=composed_before_llm, trajectory=trajectory,
+        rethink=rethink, learn=learn, max_iterations=max_iterations,
+        preview_chars=preview_chars, response_chars=response_chars,
     )
 
     # ── Sub-agent tool (always available) ──────────────────────────────

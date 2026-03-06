@@ -17,6 +17,10 @@ import shutil
 from unittest.mock import MagicMock
 
 from clawagents.tools.registry import ToolResult
+from clawagents.sandbox.local import LocalBackend
+
+def _sb(root=None):
+    return LocalBackend(root=root)
 
 
 # ─── Filesystem: Unicode / Special Characters ─────────────────────────────
@@ -36,10 +40,10 @@ class TestUnicodeContent:
         path = os.path.join(self.tmpdir, "unicode.txt")
 
         content = "Hello 世界! 🎉 Ñoño café résumé über naïve"
-        w = await WriteFileTool().execute({"path": path, "content": content})
+        w = await WriteFileTool(_sb(self.tmpdir)).execute({"path": path, "content": content})
         assert w.success is True
 
-        r = await ReadFileTool().execute({"path": path})
+        r = await ReadFileTool(_sb(self.tmpdir)).execute({"path": path})
         assert r.success is True
         assert "世界" in r.output
         assert "🎉" in r.output
@@ -50,8 +54,8 @@ class TestUnicodeContent:
         from clawagents.tools.filesystem import WriteFileTool, EditFileTool
         path = os.path.join(self.tmpdir, "edit_unicode.txt")
 
-        await WriteFileTool().execute({"path": path, "content": "Hello 世界"})
-        result = await EditFileTool().execute({
+        await WriteFileTool(_sb(self.tmpdir)).execute({"path": path, "content": "Hello 世界"})
+        result = await EditFileTool(_sb(self.tmpdir)).execute({
             "path": path,
             "target": "世界",
             "replacement": "World 🌍"
@@ -66,8 +70,8 @@ class TestUnicodeContent:
         from clawagents.tools.filesystem import WriteFileTool, GrepTool
         path = os.path.join(self.tmpdir, "grep_unicode.txt")
 
-        await WriteFileTool().execute({"path": path, "content": "Line 1\n函数定义\nLine 3\n"})
-        result = await GrepTool().execute({"path": path, "pattern": "函数"})
+        await WriteFileTool(_sb(self.tmpdir)).execute({"path": path, "content": "Line 1\n函数定义\nLine 3\n"})
+        result = await GrepTool(_sb(self.tmpdir)).execute({"path": path, "pattern": "函数"})
 
         assert result.success is True
         assert "函数" in result.output
@@ -88,10 +92,10 @@ class TestSpecialFilenames:
         from clawagents.tools.filesystem import WriteFileTool, ReadFileTool
         path = os.path.join(self.tmpdir, "file with spaces.txt")
 
-        w = await WriteFileTool().execute({"path": path, "content": "spaced"})
+        w = await WriteFileTool(_sb(self.tmpdir)).execute({"path": path, "content": "spaced"})
         assert w.success is True
 
-        r = await ReadFileTool().execute({"path": path})
+        r = await ReadFileTool(_sb(self.tmpdir)).execute({"path": path})
         assert r.success is True
         assert "spaced" in r.output
 
@@ -100,8 +104,8 @@ class TestSpecialFilenames:
         from clawagents.tools.filesystem import WriteFileTool, LsTool
         path = os.path.join(self.tmpdir, ".hidden")
 
-        await WriteFileTool().execute({"path": path, "content": "secret"})
-        result = await LsTool().execute({"path": self.tmpdir})
+        await WriteFileTool(_sb(self.tmpdir)).execute({"path": path, "content": "secret"})
+        result = await LsTool(_sb(self.tmpdir)).execute({"path": self.tmpdir})
 
         assert result.success is True
         assert ".hidden" in result.output
@@ -111,10 +115,10 @@ class TestSpecialFilenames:
         from clawagents.tools.filesystem import WriteFileTool, ReadFileTool
         path = os.path.join(self.tmpdir, "a", "b", "c", "d", "e", "f", "deep.txt")
 
-        w = await WriteFileTool().execute({"path": path, "content": "deep!"})
+        w = await WriteFileTool(_sb(self.tmpdir)).execute({"path": path, "content": "deep!"})
         assert w.success is True
 
-        r = await ReadFileTool().execute({"path": path})
+        r = await ReadFileTool(_sb(self.tmpdir)).execute({"path": path})
         assert r.success is True
         assert "deep!" in r.output
 
@@ -136,7 +140,7 @@ class TestBoundaryConditions:
         with open(path, "w") as f:
             pass  # empty file
 
-        result = await ReadFileTool().execute({"path": path})
+        result = await ReadFileTool(_sb(self.tmpdir)).execute({"path": path})
         assert result.success is True
 
     @pytest.mark.asyncio
@@ -146,7 +150,7 @@ class TestBoundaryConditions:
         with open(path, "w") as f:
             f.write("only line")
 
-        result = await ReadFileTool().execute({"path": path})
+        result = await ReadFileTool(_sb(self.tmpdir)).execute({"path": path})
         assert result.success is True
         assert "only line" in result.output
 
@@ -158,7 +162,7 @@ class TestBoundaryConditions:
             for i in range(10000):
                 f.write(f"Line {i}: {'x' * 80}\n")
 
-        result = await ReadFileTool().execute({"path": path, "limit": 10})
+        result = await ReadFileTool(_sb(self.tmpdir)).execute({"path": path, "limit": 10})
         assert result.success is True
         assert "10000 lines total" in result.output
 
@@ -167,7 +171,7 @@ class TestBoundaryConditions:
         from clawagents.tools.filesystem import WriteFileTool
         path = os.path.join(self.tmpdir, "empty_write.txt")
 
-        result = await WriteFileTool().execute({"path": path, "content": ""})
+        result = await WriteFileTool(_sb(self.tmpdir)).execute({"path": path, "content": ""})
         assert result.success is True
         assert os.path.getsize(path) == 0
 
@@ -178,7 +182,7 @@ class TestBoundaryConditions:
         with open(path, "w") as f:
             f.write("before\n    \nafter\n")
 
-        result = await EditFileTool().execute({
+        result = await EditFileTool(_sb(self.tmpdir)).execute({
             "path": path,
             "target": "    \n",
             "replacement": "REPLACED\n"
@@ -192,7 +196,7 @@ class TestBoundaryConditions:
         with open(path, "w") as f:
             f.write("line1\nline2\nline3\n")
 
-        result = await EditFileTool().execute({
+        result = await EditFileTool(_sb(self.tmpdir)).execute({
             "path": path,
             "target": "line1\nline2",
             "replacement": "REPLACED"
@@ -209,20 +213,20 @@ class TestBoundaryConditions:
         with open(path, "w") as f:
             f.write("only 2 lines\nhere\n")
 
-        result = await ReadFileTool().execute({"path": path, "offset": 100, "limit": 10})
+        result = await ReadFileTool(_sb(self.tmpdir)).execute({"path": path, "offset": 100, "limit": 10})
         assert result.success is True
         # Should return empty slice gracefully
 
     @pytest.mark.asyncio
     async def test_grep_empty_pattern(self):
         from clawagents.tools.filesystem import GrepTool
-        result = await GrepTool().execute({"path": self.tmpdir, "pattern": ""})
+        result = await GrepTool(_sb(self.tmpdir)).execute({"path": self.tmpdir, "pattern": ""})
         assert result.success is False
 
     @pytest.mark.asyncio
     async def test_glob_empty_pattern(self):
         from clawagents.tools.filesystem import GlobTool
-        result = await GlobTool().execute({"pattern": "", "path": self.tmpdir})
+        result = await GlobTool(_sb(self.tmpdir)).execute({"pattern": "", "path": self.tmpdir})
         assert result.success is False
 
     @pytest.mark.asyncio
@@ -232,7 +236,7 @@ class TestBoundaryConditions:
         with open(path, "w") as f:
             f.write("x")
 
-        result = await LsTool().execute({"path": path})
+        result = await LsTool(_sb(self.tmpdir)).execute({"path": path})
         assert result.success is False
 
 
@@ -255,7 +259,7 @@ class TestGrepEdgeCases:
             f.write("price is $100.00\nfoo(bar)\n[brackets]\n")
 
         for pattern in ["$100.00", "foo(bar)", "[brackets]"]:
-            result = await GrepTool().execute({"path": path, "pattern": pattern})
+            result = await GrepTool(_sb(self.tmpdir)).execute({"path": path, "pattern": pattern})
             assert result.success is True
             assert pattern in result.output, f"Failed for pattern: {pattern}"
 
@@ -266,7 +270,7 @@ class TestGrepEdgeCases:
         with open(path, "w") as f:
             f.write("Hello World\nhello world\nHELLO WORLD\n")
 
-        result = await GrepTool().execute({"path": path, "pattern": "Hello"})
+        result = await GrepTool(_sb(self.tmpdir)).execute({"path": path, "pattern": "Hello"})
         assert result.success is True
         assert "1 match" in result.output  # Only first line
 
@@ -288,7 +292,7 @@ class TestEditReplaceAllCornerCases:
         with open(path, "w") as f:
             f.write("aaa")  # 3 consecutive 'a's — "a" appears 3 times
 
-        result = await EditFileTool().execute({
+        result = await EditFileTool(_sb(self.tmpdir)).execute({
             "path": path,
             "target": "a",
             "replacement": "bb",
@@ -305,7 +309,7 @@ class TestEditReplaceAllCornerCases:
         with open(path, "w") as f:
             f.write("keep DELETE keep")
 
-        result = await EditFileTool().execute({
+        result = await EditFileTool(_sb(self.tmpdir)).execute({
             "path": path,
             "target": " DELETE ",
             "replacement": " "
@@ -322,7 +326,7 @@ class TestEditReplaceAllCornerCases:
         with open(path, "w") as f:
             f.write("same same same")
 
-        result = await EditFileTool().execute({
+        result = await EditFileTool(_sb(self.tmpdir)).execute({
             "path": path,
             "target": "same",
             "replacement": "same",
@@ -407,7 +411,9 @@ class TestHookChaining:
         # Context should be injected
         msgs = [{"role": "system", "content": "base"}]
         result = agent.before_llm(msgs)
-        assert "Be brief" in result[-1]["content"]
+        last = result[-1]
+        c = last.content if hasattr(last, "content") else last["content"]
+        assert "Be brief" in c
 
         # Execute should be blocked
         assert agent.before_tool("execute", {}) is False
@@ -454,9 +460,12 @@ class TestHookChaining:
 
         # All 3 injected in order
         assert len(result) == 4
-        assert "First" in result[1]["content"]
-        assert "Second" in result[2]["content"]
-        assert "Third" in result[3]["content"]
+        c1 = result[1].content if hasattr(result[1], "content") else result[1]["content"]
+        c2 = result[2].content if hasattr(result[2], "content") else result[2]["content"]
+        c3 = result[3].content if hasattr(result[3], "content") else result[3]["content"]
+        assert "First" in c1
+        assert "Second" in c2
+        assert "Third" in c3
 
 
 # ─── Memory: Corner Cases ────────────────────────────────────────────────

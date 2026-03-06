@@ -13,7 +13,7 @@ class LocalBackend:
     kind = "local"
 
     def __init__(self, root: str | None = None):
-        self._cwd = root or os.getcwd()
+        self._cwd = str(Path(root or os.getcwd()).resolve())
 
     @property
     def cwd(self) -> str:
