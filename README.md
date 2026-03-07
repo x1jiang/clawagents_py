@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-5.13.0-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-5.14.0-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -21,7 +21,7 @@ Built by extracting and unifying the best architectural patterns from [OpenClaw]
 pip install clawagents
 ```
 
-> **Version 5.13.0** — Latest stable release (February 2026)
+> **Version 5.14.0** — Latest stable release (February 2026)
 
 ---
 
@@ -815,6 +815,16 @@ python -m pytest tests/ -v -m benchmark
 ---
 
 ## Changelog
+
+### v5.14.0 — SkyRL-Inspired PTRL Improvements
+
+| Feature | Description |
+|:---|:---|
+| 🚦 **Quality gate for lesson extraction** | Lessons only extracted from runs with mixed outcomes (both successes and failures). Zero-variance runs (all-success or all-failure with no contrast) are skipped — inspired by SkyRL's GRPO dynamic sampling |
+| ⏰ **Lesson staleness decay** | Each lesson block is now timestamped + model-tagged (`@timestamp [model]`). `load_lessons(max_age_s=N)` filters out stale lessons. Prevents prompt pollution from outdated advice |
+| 🔤 **Format vs. logic failure classification** | Every failed tool call is classified as `"format"` (bad JSON, wrong params) or `"logic"` (valid call, wrong approach). Rethink messages now include format-specific or strategy-specific guidance |
+| 📊 **Per-step reward attribution** | Each `TurnRecord` now includes `observation_context` (what the agent saw before deciding), `productivity_score` (-1.0 to 1.0), and `failure_type` per tool call. `RunSummary` adds `format_failures`, `logic_failures`, `has_mixed_outcomes`, and `finish_reason` |
+| 🧠 **Enhanced self-analysis prompt** | Post-run LLM analysis now receives failure type breakdown and productivity scores for targeted lesson extraction |
 
 ### v5.13.0 — Prompt-Time Reinforcement Learning (PTRL)
 

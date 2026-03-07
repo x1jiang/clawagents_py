@@ -31,6 +31,7 @@ _CLAWAGENTS_DIR = Path.cwd() / ".clawagents"
 _LESSONS_FILE = _CLAWAGENTS_DIR / "lessons.md"
 _MAX_LESSONS = 50
 _MAX_LESSONS_CHARS = 4000
+_LESSON_MAX_AGE_RUNS = 50   # Feature 2: drop lessons older than this many runs
 
 # ─── Post-Run Self-Analysis ──────────────────────────────────────────────────
 
@@ -41,10 +42,13 @@ concise, actionable lessons.
 ## Run Summary
 - Task: {task}
 - Outcome: {outcome}
+- Finish reason: {finish_reason}
 - Run score: {run_score}/3  (3=clean, 2=efficient, 1=messy success, 0=ambiguous, -1=failed)
 - Quality: {quality}
 - Total turns: {total_turns}
 - Mid-run failures: {mid_run_failures}
+- Format errors: {format_failures} (bad JSON, wrong params, unknown tools)
+- Logic errors: {logic_failures} (valid calls, wrong approach)
 - Duration: {duration_s}s
 
 ## Key Turns (failures and pivots)
@@ -53,8 +57,9 @@ concise, actionable lessons.
 ## Instructions
 Based on this trajectory:
 1. What went wrong? (specific tool failures, bad strategies, repeated mistakes)
-2. What worked? (successful approaches, efficient patterns)
-3. What should the agent do differently next time?
+2. Were failures FORMAT errors (fixable by correcting syntax) or LOGIC errors (need new strategy)?
+3. What worked? (successful approaches, efficient patterns)
+4. What should the agent do differently next time?
 
 Respond with a markdown list of 2-5 concise lessons. Each lesson should be a \
 single line starting with "- ". Focus on ACTIONABLE advice, not vague platitudes.
@@ -92,14 +97,20 @@ def _extract_key_turns(turns: list[dict[str, Any]], max_turns: int = 10) -> str:
     lines: list[str] = []
     for t in key:
         idx = t.get("turn_index", "?")
+        productivity = t.get("productivity_score", 0)
         calls_info = []
         for tc in t.get("tool_calls", []):
             status = "OK" if tc.get("success") else "FAIL"
             name = tc.get("tool_name", "?")
+            ft = tc.get("failure_type", "")
+            ft_tag = f" [{ft}]" if ft and not tc.get("success") else ""
             preview = tc.get("output_preview", "")[:80]
-            calls_info.append(f"  - [{status}] {name}: {preview}")
+            calls_info.append(f"  - [{status}{ft_tag}] {name}: {preview}")
         resp = (t.get("response_text", "") or "")[:200]
-        lines.append(f"### Turn {idx} (score={t.get('score', 0)})")
+        obs = (t.get("observation_context", "") or "")[:150]
+        lines.append(f"### Turn {idx} (score={t.get('score', 0)}, productivity={productivity})")
+        if obs:
+            lines.append(f"Context: {obs}")
         if resp:
             lines.append(f"Response: {resp}")
         if calls_info:
@@ -122,10 +133,13 @@ async def extract_lessons(
     prompt = _SELF_ANALYSIS_PROMPT.format(
         task=summary.get("task", "unknown"),
         outcome=summary.get("outcome", "unknown"),
+        finish_reason=summary.get("finish_reason", "unknown"),
         run_score=summary.get("run_score", 0),
         quality=summary.get("quality", "unknown"),
         total_turns=summary.get("total_turns", 0),
         mid_run_failures=summary.get("mid_run_failures", 0),
+        format_failures=summary.get("format_failures", 0),
+        logic_failures=summary.get("logic_failures", 0),
         duration_s=summary.get("duration_s", 0),
         key_turns=key_turns,
     )
@@ -143,14 +157,61 @@ async def extract_lessons(
         return None
 
 
+# ─── Feature 1: Quality Gate ─────────────────────────────────────────────────
+
+def should_extract_lessons(summary: dict[str, Any]) -> bool:
+    """Determine if a run has enough signal for lesson extraction.
+
+    SkyRL-inspired: only extract lessons when the trajectory has contrast
+    (both successes and failures), not when it's uniformly good or bad.
+    Zero-variance runs carry no learning signal.
+    """
+    quality = summary.get("quality", "")
+    run_score = summary.get("run_score", 0)
+    has_mixed = summary.get("has_mixed_outcomes", False)
+    mid_run_failures = summary.get("mid_run_failures", 0)
+    total_turns = summary.get("total_turns", 0)
+
+    # Always extract from failed runs with at least some turns (negative examples)
+    if run_score <= -1 and total_turns >= 3:
+        return True
+
+    # Mixed-outcome runs are the most valuable (natural A/B within a single run)
+    if has_mixed:
+        return True
+
+    # Clean all-success runs: nothing to learn
+    if run_score >= 3 and mid_run_failures == 0:
+        return False
+
+    # Noisy runs with many failures: worth analyzing
+    if quality == "noisy":
+        return True
+
+    # Efficient runs (score 2) with some failures: borderline useful
+    if run_score == 2 and mid_run_failures > 0:
+        return True
+
+    # Default: skip (all-success or trivial runs)
+    return False
+
+
 # ─── Lesson Storage ──────────────────────────────────────────────────────────
 
-def save_lessons(new_lessons: str, task: str, outcome: str) -> None:
-    """Append new lessons to .clawagents/lessons.md, keeping it bounded."""
+def save_lessons(
+    new_lessons: str,
+    task: str,
+    outcome: str,
+    model: str = "",
+) -> None:
+    """Append new lessons to .clawagents/lessons.md with staleness metadata."""
     try:
         _CLAWAGENTS_DIR.mkdir(parents=True, exist_ok=True)
 
-        header = f"\n## Lessons from run ({outcome}) — {task[:80]}\n"
+        # Feature 2: tag with timestamp and model for staleness decay
+        ts = int(time.time())
+        model_tag = f" [{model}]" if model else ""
+        header = f"\n## Lessons from run ({outcome}) — {task[:80]}{model_tag} @{ts}\n"
         entry = header + new_lessons.strip() + "\n"
 
         existing = ""
@@ -171,8 +232,11 @@ def save_lessons(new_lessons: str, task: str, outcome: str) -> None:
         logger.debug("PTRL: failed to save lessons", exc_info=True)
 
 
-def load_lessons(max_chars: int = _MAX_LESSONS_CHARS) -> str:
+def load_lessons(max_chars: int = _MAX_LESSONS_CHARS, max_age_s: int = 0) -> str:
     """Load existing lessons from .clawagents/lessons.md.
+
+    Feature 2: If max_age_s > 0, only include lesson blocks whose @timestamp
+    is within the given age window. Stale lessons are silently dropped.
 
     Returns empty string if no lessons exist or file is not readable.
     """
@@ -182,6 +246,26 @@ def load_lessons(max_chars: int = _MAX_LESSONS_CHARS) -> str:
         text = _LESSONS_FILE.read_text(encoding="utf-8").strip()
         if not text:
             return ""
+
+        # Feature 2: filter by age if requested
+        if max_age_s > 0:
+            import re
+            now = int(time.time())
+            cutoff = now - max_age_s
+            blocks = re.split(r"(?=\n## Lessons from run)", text)
+            fresh: list[str] = []
+            for block in blocks:
+                ts_match = re.search(r"@(\d{10,})", block)
+                if ts_match:
+                    ts = int(ts_match.group(1))
+                    if ts >= cutoff:
+                        fresh.append(block)
+                else:
+                    fresh.append(block)
+            text = "\n".join(fresh).strip()
+            if not text:
+                return ""
+
         if len(text) > max_chars:
             text = text[-max_chars:]
             nl = text.find("\n")
@@ -206,14 +290,43 @@ def build_lesson_preamble() -> str:
     )
 
 
-def build_rethink_with_lessons(generic_rethink: str) -> str:
-    """Enhance a generic rethink message with relevant past lessons."""
+def build_rethink_with_lessons(
+    generic_rethink: str,
+    format_failure_count: int = 0,
+    logic_failure_count: int = 0,
+) -> str:
+    """Enhance a rethink message with past lessons and failure-type guidance.
+
+    Feature 3: If recent failures are predominantly format errors, add
+    specific guidance about tool call formatting.
+    """
+    parts = [generic_rethink]
+
+    # Feature 3: format-specific guidance
+    if format_failure_count > 0 and format_failure_count >= logic_failure_count:
+        parts.append(
+            "\n\n## Format Error Guidance\n"
+            "Your recent tool call failures are FORMAT errors (bad JSON, wrong parameter "
+            "names, unknown tools). Before retrying:\n"
+            "- Check that tool names match exactly (case-sensitive)\n"
+            "- Ensure all required parameters are provided\n"
+            "- Verify JSON syntax is valid (matching braces, quoted strings)\n"
+            "- Review the tool descriptions above for correct parameter names"
+        )
+    elif logic_failure_count > 0:
+        parts.append(
+            "\n\n## Strategy Guidance\n"
+            "Your recent failures are LOGIC errors (correct tool calls, wrong approach). "
+            "The tools work but your strategy needs adjustment. "
+            "Try a fundamentally different approach."
+        )
+
     lessons = load_lessons(max_chars=1500)
-    if not lessons:
-        return generic_rethink
-    return (
-        f"{generic_rethink}\n\n"
-        "## Relevant Lessons from Past Runs\n"
-        "Consider these lessons from previous runs:\n\n"
-        f"{lessons}\n"
-    )
+    if lessons:
+        parts.append(
+            "\n\n## Relevant Lessons from Past Runs\n"
+            "Consider these lessons from previous runs:\n\n"
+            f"{lessons}"
+        )
+
+    return "\n".join(parts)

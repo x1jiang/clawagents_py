@@ -46,6 +46,7 @@ class ToolCallRecord:
     output_preview: str
     error: str | None = None
     duration_ms: float = 0.0
+    failure_type: str = ""    # "format" | "logic" | "" (Feature 3)
 
 
 @dataclass
@@ -59,6 +60,8 @@ class TurnRecord:
     tool_calls: list[ToolCallRecord] = field(default_factory=list)
     score: int = 0            # weighted turn score
     cumulative_score: int = 0
+    observation_context: str = ""       # what agent saw before deciding (Feature 4)
+    productivity_score: float = 0.0     # per-step productivity: -1.0 to 1.0 (Feature 4)
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -76,9 +79,71 @@ class RunSummary:
     run_score: int            # discrete band: -1, 0, +1, +2, +3
     quality: str              # "clean" | "noisy" | "failed"
     mid_run_failures: int     # how many turns had failures before final success
-    duration_s: float
-    tokens_total: int
-    trajectory_file: str
+    format_failures: int = 0  # count of format-type failures (Feature 3)
+    logic_failures: int = 0   # count of logic-type failures (Feature 3)
+    has_mixed_outcomes: bool = False    # True if run had both successes and failures (Feature 1)
+    finish_reason: str = ""   # why the run ended (Feature 4)
+    duration_s: float = 0.0
+    tokens_total: int = 0
+    trajectory_file: str = ""
+
+
+# ─── Feature 3: Format vs. Logic Failure Classification ───────────────────
+
+_FORMAT_ERROR_PATTERNS = (
+    "invalid json", "json decode", "json parse", "unexpected token",
+    "missing required", "unknown tool", "unrecognized tool",
+    "no tool named", "expected string", "expected number",
+    "not a valid", "malformed", "syntax error in args",
+    "missing parameter", "unknown parameter", "extra parameter",
+)
+
+
+def classify_failure(tool_name: str, error: str | None, output: str | None) -> str:
+    """Classify a tool failure as 'format' or 'logic'.
+
+    Format errors: bad JSON, wrong parameter names, unknown tool names.
+    Logic errors: valid call but wrong approach (file not found, command failed, etc.).
+    """
+    if not error and not output:
+        return "unknown"
+    text = ((error or "") + " " + (output or "")).lower()
+    for pattern in _FORMAT_ERROR_PATTERNS:
+        if pattern in text:
+            return "format"
+    return "logic"
+
+
+# ─── Feature 4: Per-Step Productivity Scoring ─────────────────────────────
+
+def _compute_productivity(
+    calls: list[ToolCallRecord],
+    prev_cumulative: int,
+    turn_index: int,
+) -> float:
+    """Compute a per-step productivity score from -1.0 to 1.0.
+
+    Factors:
+    - Did the tools succeed? (primary signal)
+    - Is this a recovery from failure? (pivot bonus)
+    - Are we making progress? (cumulative trend)
+    """
+    if not calls:
+        return 0.0
+
+    scored = [c for c in calls if c.tool_name not in _SCORELESS_TOOLS]
+    if not scored:
+        return 0.0
+
+    successes = sum(1 for c in scored if c.success)
+    failures = len(scored) - successes
+    base = (successes - failures) / len(scored)  # -1.0 to 1.0
+
+    # Pivot bonus: recovering from a negative cumulative score
+    if prev_cumulative < 0 and base > 0:
+        base = min(base + 0.2, 1.0)
+
+    return round(base, 2)
 
 
 def _score_turn(calls: list[ToolCallRecord]) -> int:
@@ -171,6 +236,8 @@ class TrajectoryRecorder:
         self._cumulative_score = 0
         self._total_tokens = 0
         self._mid_run_failures = 0
+        self._has_successes = False
+        self._has_failures = False
         self._path = _TRAJECTORIES_DIR / f"{self.run_id}.jsonl"
         self._t0 = time.monotonic()
         self._ensure_dir()
@@ -188,6 +255,7 @@ class TrajectoryRecorder:
         tokens_used: int,
         tool_calls: list[ToolCallRecord] | None = None,
         metadata: dict[str, Any] | None = None,
+        observation_context: str = "",
     ) -> TurnRecord:
         if model and not self.model:
             self.model = model
@@ -195,8 +263,20 @@ class TrajectoryRecorder:
         calls = tool_calls or []
         score = _score_turn(calls)
 
+        # Feature 3: classify failure types
+        for tc in calls:
+            if not tc.success and not tc.failure_type:
+                tc.failure_type = classify_failure(tc.tool_name, tc.error, tc.output_preview)
+
         if score < 0:
             self._mid_run_failures += 1
+        if score > 0:
+            self._has_successes = True
+        if score < 0:
+            self._has_failures = True
+
+        # Feature 4: per-step productivity
+        productivity = _compute_productivity(calls, self._cumulative_score, len(self._turns))
 
         self._cumulative_score += score
         self._total_tokens += tokens_used
@@ -211,6 +291,8 @@ class TrajectoryRecorder:
             tool_calls=calls,
             score=score,
             cumulative_score=self._cumulative_score,
+            observation_context=observation_context[:300] if observation_context else "",
+            productivity_score=productivity,
             metadata=metadata or {},
         )
         self._turns.append(turn)
@@ -236,6 +318,27 @@ class TrajectoryRecorder:
         run_score = _compute_run_score(outcome, self._turns, self._mid_run_failures)
         quality = _compute_quality(run_score, self._mid_run_failures, len(self._turns))
 
+        # Feature 3: count format vs. logic failures
+        format_failures = sum(
+            1 for t in self._turns for tc in t.tool_calls
+            if not tc.success and tc.failure_type == "format"
+        )
+        logic_failures = sum(
+            1 for t in self._turns for tc in t.tool_calls
+            if not tc.success and tc.failure_type == "logic"
+        )
+
+        # Feature 1: mixed outcomes detection
+        has_mixed = self._has_successes and self._has_failures
+
+        # Feature 4: map outcome to finish_reason
+        finish_reason_map = {
+            "done": "success", "success": "success",
+            "error": "error", "cancelled": "cancelled",
+            "max_iterations": "max_iterations",
+        }
+        finish_reason = finish_reason_map.get(outcome, outcome)
+
         summary = RunSummary(
             run_id=self.run_id,
             task=self.task[:200],
@@ -249,6 +352,10 @@ class TrajectoryRecorder:
             run_score=run_score,
             quality=quality,
             mid_run_failures=self._mid_run_failures,
+            format_failures=format_failures,
+            logic_failures=logic_failures,
+            has_mixed_outcomes=has_mixed,
+            finish_reason=finish_reason,
             duration_s=round(elapsed, 2),
             tokens_total=self._total_tokens,
             trajectory_file=str(self._path),

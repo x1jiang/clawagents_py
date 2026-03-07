@@ -921,6 +921,12 @@ async def run_agent_graph(
                     failure_tracker.record(tool_result.success, call.tool_name)
                 if recorder:
                     from clawagents.trajectory.recorder import ToolCallRecord
+                    # Feature 4: capture observation context (last tool result the agent saw)
+                    obs_ctx = ""
+                    for m in reversed(messages):
+                        if m.role in ("user", "tool") and m.content and isinstance(m.content, str) and m.content.startswith("[Tool Result]"):
+                            obs_ctx = m.content[:300]
+                            break
                     recorder.record_turn(
                         response_text=response.content or "",
                         model=response.model,
@@ -932,6 +938,7 @@ async def run_agent_graph(
                             output_preview=preview if isinstance(preview, str) else "[multimodal]",
                             error=tool_result.error if not tool_result.success else None,
                         )],
+                        observation_context=obs_ctx,
                     )
 
                 # Use proper tool role messages when native tools are enabled
@@ -965,7 +972,9 @@ async def run_agent_graph(
                     rethink_msg = _RETHINK_MESSAGE.format(n=n)
                     if learn:
                         from clawagents.trajectory.lessons import build_rethink_with_lessons
-                        rethink_msg = build_rethink_with_lessons(rethink_msg)
+                        fmt_count = sum(1 for t in (recorder.turns if recorder else []) for tc in t.tool_calls if not tc.success and tc.failure_type == "format")
+                        logic_count = sum(1 for t in (recorder.turns if recorder else []) for tc in t.tool_calls if not tc.success and tc.failure_type == "logic")
+                        rethink_msg = build_rethink_with_lessons(rethink_msg, fmt_count, logic_count)
                     messages.append(LLMMessage(
                         role="user",
                         content=rethink_msg,
@@ -1064,11 +1073,18 @@ async def run_agent_graph(
                             output_preview=raw_p,
                             error=result.error if not result.success else None,
                         ))
+                    # Feature 4: capture observation context
+                    obs_ctx = ""
+                    for m in reversed(messages):
+                        if m.role in ("user", "tool") and m.content and isinstance(m.content, str) and m.content.startswith("[Tool Result"):
+                            obs_ctx = m.content[:300]
+                            break
                     recorder.record_turn(
                         response_text=response.content or "",
                         model=response.model,
                         tokens_used=response.tokens_used,
                         tool_calls=tc_records,
+                        observation_context=obs_ctx,
                     )
 
                 # Use proper tool role messages when native tools are enabled
@@ -1115,7 +1131,9 @@ async def run_agent_graph(
                     rethink_msg = _RETHINK_MESSAGE.format(n=n)
                     if learn:
                         from clawagents.trajectory.lessons import build_rethink_with_lessons
-                        rethink_msg = build_rethink_with_lessons(rethink_msg)
+                        fmt_count = sum(1 for t in (recorder.turns if recorder else []) for tc in t.tool_calls if not tc.success and tc.failure_type == "format")
+                        logic_count = sum(1 for t in (recorder.turns if recorder else []) for tc in t.tool_calls if not tc.success and tc.failure_type == "logic")
+                        rethink_msg = build_rethink_with_lessons(rethink_msg, fmt_count, logic_count)
                     messages.append(LLMMessage(
                         role="user",
                         content=rethink_msg,
@@ -1152,17 +1170,28 @@ async def run_agent_graph(
         state.trajectory_file = run_summary.trajectory_file
         emit("context", {"message": f"trajectory saved to {run_summary.trajectory_file}"})
 
-    # ── PTRL Layer 3: Post-run self-analysis ──
+    # ── PTRL Layer 3: Post-run self-analysis (with quality gate) ──
     if learn and recorder and run_summary:
         try:
             from dataclasses import asdict
-            from clawagents.trajectory.lessons import extract_lessons, save_lessons
+            from clawagents.trajectory.lessons import extract_lessons, save_lessons, should_extract_lessons
             summary_dict = asdict(run_summary)
-            turn_dicts = [asdict(t) for t in recorder.turns]
-            lessons_text = await extract_lessons(llm, summary_dict, turn_dicts)
-            if lessons_text:
-                save_lessons(lessons_text, run_summary.task, run_summary.outcome)
-                emit("context", {"message": "PTRL: extracted and saved lessons from this run"})
+
+            # Feature 1: Quality gate — only extract lessons from informative runs
+            if should_extract_lessons(summary_dict):
+                turn_dicts = [asdict(t) for t in recorder.turns]
+                lessons_text = await extract_lessons(llm, summary_dict, turn_dicts)
+                if lessons_text:
+                    save_lessons(
+                        lessons_text, run_summary.task, run_summary.outcome,
+                        model=run_summary.model,
+                    )
+                    emit("context", {"message": "PTRL: extracted and saved lessons from this run"})
+            else:
+                emit("context", {
+                    "message": f"PTRL: skipped lesson extraction (quality={run_summary.quality}, "
+                    f"mixed={run_summary.has_mixed_outcomes}, score={run_summary.run_score})"
+                })
         except Exception:
             logger.debug("PTRL: post-run self-analysis failed", exc_info=True)
 
