@@ -12,6 +12,7 @@ from typing import Any, Dict, List
 
 import pytest
 
+from clawagents.sandbox.local import LocalBackend
 from clawagents.tools.registry import ToolRegistry, ToolResult, ParsedToolCall
 
 
@@ -127,7 +128,7 @@ class TestGlobTool:
     @pytest.mark.asyncio
     async def test_glob_py_files(self, tmp_path):
         from clawagents.tools.filesystem import GlobTool
-        tool = GlobTool()
+        tool = GlobTool(LocalBackend(root=str(tmp_path)))
 
         (tmp_path / "a.py").write_text("pass", "utf-8")
         (tmp_path / "b.txt").write_text("hello", "utf-8")
@@ -143,7 +144,7 @@ class TestGlobTool:
     @pytest.mark.asyncio
     async def test_glob_no_matches(self, tmp_path):
         from clawagents.tools.filesystem import GlobTool
-        tool = GlobTool()
+        tool = GlobTool(LocalBackend(root=str(tmp_path)))
 
         result = await tool.execute({"pattern": "*.xyz", "path": str(tmp_path)})
         assert result.success is True
@@ -154,7 +155,7 @@ class TestGrepToolRecursive:
     @pytest.mark.asyncio
     async def test_recursive_grep(self, tmp_path):
         from clawagents.tools.filesystem import GrepTool
-        tool = GrepTool()
+        tool = GrepTool(LocalBackend(root=str(tmp_path)))
 
         (tmp_path / "a.py").write_text("def hello():\n    pass\n", "utf-8")
         (tmp_path / "sub").mkdir()
@@ -176,7 +177,7 @@ class TestLsToolMetadata:
     @pytest.mark.asyncio
     async def test_ls_with_metadata(self, tmp_path):
         from clawagents.tools.filesystem import LsTool
-        tool = LsTool()
+        tool = LsTool(LocalBackend(root=str(tmp_path)))
 
         (tmp_path / "subdir").mkdir()
         (tmp_path / "file.txt").write_text("hello world", "utf-8")
@@ -192,7 +193,7 @@ class TestEditFileReplaceAll:
     @pytest.mark.asyncio
     async def test_replace_all(self, tmp_path):
         from clawagents.tools.filesystem import EditFileTool
-        tool = EditFileTool()
+        tool = EditFileTool(LocalBackend(root=str(tmp_path)))
 
         f = tmp_path / "test.txt"
         f.write_text("foo bar foo baz foo", "utf-8")
@@ -210,7 +211,7 @@ class TestEditFileReplaceAll:
     @pytest.mark.asyncio
     async def test_single_replace_requires_unique(self, tmp_path):
         from clawagents.tools.filesystem import EditFileTool
-        tool = EditFileTool()
+        tool = EditFileTool(LocalBackend(root=str(tmp_path)))
 
         f = tmp_path / "test.txt"
         f.write_text("foo bar foo", "utf-8")

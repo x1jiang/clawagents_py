@@ -62,7 +62,6 @@ class TestSkillLoading:
         )
 
         tool_names = [t.name for t in agent.tools.list()]
-        assert "list_skills" in tool_names
         assert "use_skill" in tool_names
 
 

@@ -12,7 +12,41 @@ from clawagents.tools.registry import Tool, ToolResult
 DEFAULT_TIMEOUT_MS = 30000
 MAX_OUTPUT_CHARS = 10000
 
-BLOCKED_PATTERNS = ["rm -rf /", "mkfs", "dd if=", "> /dev/sd"]
+BLOCKED_PATTERNS = [
+    "rm -rf /", "rm -rf /*", "rm -rf .", "rm -rf ~",
+    "mkfs", "dd if=", "> /dev/sd", ":(){ :|:& };:",
+    "chmod -R 777 /", "chown -R", "> /dev/null",
+    "wget http", "curl http",
+]
+
+import re
+_DANGEROUS_RE = re.compile(
+    r"(?:sudo\s+)?rm\s+(?:-\w*[rf]\w*\s+)*/\s*$"
+    r"|>\s*/dev/sd"
+    r"|mkfs\."
+    r"|dd\s+if="
+    r"|:\(\)\s*\{",
+    re.IGNORECASE,
+)
+
+
+def _is_dangerous_command(command: str) -> bool:
+    if _DANGEROUS_RE.search(command):
+        return True
+    for pattern in BLOCKED_PATTERNS:
+        if pattern in command:
+            return True
+    return False
+
+
+def _ensure_brv_command(command: str) -> str:
+    """Run ByteRover CLI via npx so it works without a global install."""
+    s = command.strip()
+    if s == "brv":
+        return "npx byterover-cli"
+    if s.startswith("brv "):
+        return "npx byterover-cli " + s[4:].strip()
+    return command
 
 
 class ExecTool:
@@ -40,9 +74,11 @@ class ExecTool:
         if not command:
             return ToolResult(success=False, output="", error="No command provided")
 
-        for pattern in BLOCKED_PATTERNS:
-            if pattern in command:
-                return ToolResult(success=False, output="", error=f"Blocked potentially destructive command: {command}")
+        # Ensure ByteRover CLI is available: run via npx if command is brv and not on PATH
+        command = _ensure_brv_command(command)
+
+        if _is_dangerous_command(command):
+            return ToolResult(success=False, output="", error=f"Blocked potentially destructive command: {command}")
 
         try:
             result = await sb.exec(command, timeout=timeout_ms)
@@ -84,4 +120,30 @@ def _default_backend() -> Any:
     return LocalBackend()
 
 
-exec_tools: List[Tool] = create_exec_tools(_default_backend())
+class _LazyExecTools(list):
+    """Lazy list that populates itself on first access."""
+    _initialized = False
+
+    def _ensure(self):
+        if not self._initialized:
+            self._initialized = True
+            self.extend(create_exec_tools(_default_backend()))
+
+    def __iter__(self):
+        self._ensure()
+        return super().__iter__()
+
+    def __len__(self):
+        self._ensure()
+        return super().__len__()
+
+    def __getitem__(self, idx):
+        self._ensure()
+        return super().__getitem__(idx)
+
+    def __contains__(self, item):
+        self._ensure()
+        return super().__contains__(item)
+
+
+exec_tools: List[Tool] = _LazyExecTools()

@@ -1,10 +1,18 @@
 import os
 import re
+import shutil
+import sys
 from pathlib import Path
 from typing import Dict, Any, List, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from clawagents.tools.registry import Tool, ToolResult
+
+@dataclass
+class SkillRequires:
+    os: Optional[str] = None
+    bins: Optional[List[str]] = None
+    env: Optional[List[str]] = None
 
 @dataclass
 class Skill:
@@ -12,11 +20,8 @@ class Skill:
     description: str
     content: str
     path: str
-    allowed_tools: List[str] = None  # type: ignore[assignment]
-
-    def __post_init__(self):
-        if self.allowed_tools is None:
-            self.allowed_tools = []
+    allowed_tools: List[str] = field(default_factory=list)
+    requires: Optional[SkillRequires] = None
 
 def parse_skill_file(content: str, file_path: str) -> Skill:
     default_name = Path(file_path).stem
@@ -24,6 +29,7 @@ def parse_skill_file(content: str, file_path: str) -> Skill:
     description = ""
     body = content
     allowed_tools: List[str] = []
+    requires: Optional[SkillRequires] = None
 
     frontmatter_match = re.match(r"^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]*)$", content)
     if frontmatter_match:
@@ -43,7 +49,44 @@ def parse_skill_file(content: str, file_path: str) -> Skill:
         if tools_match:
             allowed_tools = [t.strip(",") for t in tools_match.group(1).split() if t.strip(",")]
 
-    return Skill(name=name, description=description, content=body.strip(), path=file_path, allowed_tools=allowed_tools)
+        # Parse requires block for eligibility gating
+        os_match = re.search(r"^requires\.os:\s*(.+)$", yaml_content, re.MULTILINE) \
+            or re.search(r"^\s+os:\s*(.+)$", yaml_content, re.MULTILINE)
+        bins_match = re.search(r"^requires\.bins:\s*(.+)$", yaml_content, re.MULTILINE) \
+            or re.search(r"^\s+bins:\s*(.+)$", yaml_content, re.MULTILINE)
+        env_match = re.search(r"^requires\.env:\s*(.+)$", yaml_content, re.MULTILINE) \
+            or re.search(r"^\s+env:\s*(.+)$", yaml_content, re.MULTILINE)
+
+        if os_match or bins_match or env_match:
+            def _parse_list(raw: str) -> List[str]:
+                cleaned = re.sub(r'[\[\]"\']', "", raw)
+                return [x.strip() for x in re.split(r"[\s,]+", cleaned) if x.strip()]
+
+            requires = SkillRequires(
+                os=os_match.group(1).strip() if os_match else None,
+                bins=_parse_list(bins_match.group(1)) if bins_match else None,
+                env=_parse_list(env_match.group(1)) if env_match else None,
+            )
+
+    return Skill(name=name, description=description, content=body.strip(), path=file_path,
+                 allowed_tools=allowed_tools, requires=requires)
+
+
+def is_skill_eligible(skill: Skill) -> bool:
+    if not skill.requires:
+        return True
+    req = skill.requires
+    if req.os and sys.platform != req.os:
+        return False
+    if req.bins:
+        for b in req.bins:
+            if shutil.which(b) is None:
+                return False
+    if req.env:
+        for var in req.env:
+            if not os.environ.get(var):
+                return False
+    return True
 
 
 class SkillStore:
@@ -75,11 +118,13 @@ class SkillStore:
                         if skill_file.exists():
                             content = skill_file.read_text("utf-8")
                             skill = parse_skill_file(content, str(skill_file))
-                            self.skills[skill.name] = skill
+                            if is_skill_eligible(skill):
+                                self.skills[skill.name] = skill
                     elif entry.suffix == ".md":
                         content = entry.read_text("utf-8")
                         skill = parse_skill_file(content, str(entry))
-                        self.skills[skill.name] = skill
+                        if is_skill_eligible(skill):
+                            self.skills[skill.name] = skill
                 except (OSError, UnicodeDecodeError):
                     continue
 

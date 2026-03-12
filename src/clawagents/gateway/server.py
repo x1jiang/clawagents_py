@@ -1,7 +1,9 @@
 import json
+import os
 from typing import Any
 
 from fastapi import FastAPI, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 import uvicorn
 
@@ -17,6 +19,7 @@ from clawagents.process.lanes import CommandLane
 from clawagents.agent import create_claw_agent
 
 VALID_LANES = {"main", "cron", "subagent", "nested"}
+_GATEWAY_API_KEY = os.getenv("GATEWAY_API_KEY", "")
 
 
 def _resolve_lane(raw: str | None) -> str:
@@ -24,12 +27,33 @@ def _resolve_lane(raw: str | None) -> str:
     return lane if lane in VALID_LANES else CommandLane.Main.value
 
 
+def _check_auth(request: Request) -> bool:
+    if not _GATEWAY_API_KEY:
+        return True
+    auth = request.headers.get("authorization", "")
+    if auth.startswith("Bearer "):
+        return auth[7:] == _GATEWAY_API_KEY
+    return request.headers.get("x-api-key", "") == _GATEWAY_API_KEY
+
+
 def create_app() -> tuple:
     config = load_config()
     active_model = get_default_model(config)
     llm = create_provider(active_model, config)
 
+    # Pre-build a shared registry for agent reuse
+    _shared_registry = None
+
     app = FastAPI(title="ClawAgents Gateway")
+
+    cors_origins = os.getenv("GATEWAY_CORS_ORIGINS", "*").split(",")
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[o.strip() for o in cors_origins],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     @app.get("/health")
     async def health():
@@ -46,6 +70,13 @@ def create_app() -> tuple:
 
     @app.post("/chat")
     async def chat(request: Request):
+        if not _check_auth(request):
+            return Response(
+                content=json.dumps({"error": "Unauthorized. Set Authorization: Bearer <GATEWAY_API_KEY>"}),
+                status_code=401,
+                media_type="application/json",
+            )
+
         try:
             payload = await request.json()
         except Exception:
@@ -81,6 +112,13 @@ def create_app() -> tuple:
 
     @app.post("/chat/stream")
     async def chat_stream(request: Request):
+        if not _check_auth(request):
+            return Response(
+                content=json.dumps({"error": "Unauthorized"}),
+                status_code=401,
+                media_type="application/json",
+            )
+
         try:
             payload = await request.json()
         except Exception:
@@ -119,8 +157,8 @@ def create_app() -> tuple:
             sse("started", {"lane": lane})
             agent = create_claw_agent(model=llm)
 
-            def on_event(ev: Any):
-                sse("agent", ev if isinstance(ev, dict) else {"type": str(ev)})
+            def on_event(kind, data):
+                sse("agent", {"kind": kind, "data": data})
 
             return await agent.invoke(task, on_event=on_event)
 
@@ -144,9 +182,11 @@ def create_app() -> tuple:
 
 def start_gateway(port: int = 3000):
     app, llm, active_model = create_app()
+    auth_status = "enabled" if _GATEWAY_API_KEY else "disabled (set GATEWAY_API_KEY to enable)"
     print(f"\n🦞 ClawAgents Gateway running on http://localhost:{port}")
     print(f"   Provider: {llm.name}")
     print(f"   Model: {active_model}")
+    print(f"   Auth: {auth_status}")
     print("   Endpoints: POST /chat | POST /chat/stream | GET /queue | GET /health\n")
 
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")

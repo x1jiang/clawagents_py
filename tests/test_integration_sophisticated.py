@@ -25,6 +25,7 @@ import shutil
 from unittest.mock import MagicMock, AsyncMock, patch
 from typing import Dict, Any, List
 
+from clawagents.sandbox.local import LocalBackend
 from clawagents.tools.registry import Tool, ToolResult, ToolRegistry
 
 
@@ -325,7 +326,7 @@ class TestCustomToolRegistration:
         from clawagents.tools.todolist import todolist_tools
 
         registry = ToolRegistry()
-        for t in filesystem_tools + exec_tools + todolist_tools:
+        for t in list(filesystem_tools) + list(exec_tools) + list(todolist_tools):
             registry.register(t)
 
         registry.register(CalculatorTool())
@@ -504,8 +505,8 @@ class TestMemoryInjection:
         result = hook(messages)
 
         # Memory should be appended to system message
-        assert "async/await" in result[0]["content"]
-        assert "type hints" in result[0]["content"]
+        assert "async/await" in result[0].content
+        assert "type hints" in result[0].content
 
     def test_compose_before_llm_injects_skills_summary(self):
         from clawagents.agent import _compose_before_llm
@@ -515,8 +516,8 @@ class TestMemoryInjection:
         messages = [{"role": "system", "content": "Base prompt."}]
         result = hook(messages)
 
-        assert "code_review" in result[0]["content"]
-        assert "sql_expert" in result[0]["content"]
+        assert "code_review" in result[0].content
+        assert "sql_expert" in result[0].content
 
     def test_compose_with_both_memory_and_skills(self):
         from clawagents.agent import _compose_before_llm
@@ -527,8 +528,8 @@ class TestMemoryInjection:
         result = hook(messages)
 
         # Both present
-        assert "async/await" in result[0]["content"]  # memory
-        assert "api_tester" in result[0]["content"]    # skills
+        assert "async/await" in result[0].content  # memory
+        assert "api_tester" in result[0].content    # skills
 
 
 class TestFullPipelineWithHooks:
@@ -622,7 +623,7 @@ class TestFullPipelineWithHooks:
         # This won't work because block_tools overwrites before_tool, not before_llm
         # before_llm was set in constructor; inject_context stacks on it
         # But we used _compose_before_llm directly, so it should still work
-        assert "async/await" in injected[0]["content"]
+        assert "async/await" in injected[0].content
 
     @pytest.mark.asyncio
     async def test_multi_tool_execution_chain(self):
@@ -646,7 +647,7 @@ class TestFullPipelineWithHooks:
         assert r.success and "0/5" in r.output
 
         # Step 2: List files
-        ls = LsTool()
+        ls = LsTool(LocalBackend(root=self.tmpdir))
         r = await ls.execute({"path": os.path.join(self.tmpdir, "src")})
         assert r.success
         assert "main.py" in r.output
@@ -655,7 +656,7 @@ class TestFullPipelineWithHooks:
         update = UpdateTodoTool()
         await update.execute({"index": 0})
 
-        grep = GrepTool()
+        grep = GrepTool(LocalBackend(root=self.tmpdir))
         r = await grep.execute({
             "path": self.tmpdir,
             "pattern": "TODO",
@@ -679,7 +680,7 @@ class TestFullPipelineWithHooks:
         await update.execute({"index": 2})
 
         # Step 5: Fix SQL injection
-        edit = EditFileTool()
+        edit = EditFileTool(LocalBackend(root=self.tmpdir))
         r = await edit.execute({
             "path": os.path.join(self.tmpdir, "src", "main.py"),
             "target": 'f"SELECT * FROM users WHERE id = {user_id}"',
@@ -690,7 +691,7 @@ class TestFullPipelineWithHooks:
         await update.execute({"index": 3})
 
         # Step 6: Verify fix
-        read = ReadFileTool()
+        read = ReadFileTool(LocalBackend(root=self.tmpdir))
         r = await read.execute({"path": os.path.join(self.tmpdir, "src", "main.py")})
         assert "user_id," in r.output  # parameterized
         assert "f\"SELECT" not in r.output  # f-string removed

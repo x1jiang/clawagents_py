@@ -1,5 +1,6 @@
 import os
 import asyncio
+from pathlib import Path
 from typing import Optional, List, Dict, Any, Union
 
 from clawagents.providers.llm import LLMProvider
@@ -97,6 +98,7 @@ class ClawAgent:
         task: str,
         max_iterations: Optional[int] = None,
         on_event: Optional[OnEvent] = None,
+        timeout_s: float = 0,
     ) -> AgentState:
         return await run_agent_graph(
             task=task,
@@ -116,6 +118,7 @@ class ClawAgent:
             learn=self.learn,
             preview_chars=self.preview_chars,
             response_chars=self.response_chars,
+            timeout_s=timeout_s,
         )
 
     # ── Convenience hook methods ──────────────────────────────────────
@@ -151,6 +154,38 @@ class ClawAgent:
 
         self.before_llm = hook
 
+    async def compare(
+        self,
+        task: str,
+        n_samples: int = 3,
+        max_iterations: Optional[int] = None,
+        on_event: Optional[OnEvent] = None,
+    ) -> Dict[str, Any]:
+        """Run the task N times and return the best result (GRPO-inspired).
+
+        Runs the same task multiple times, scores each using deterministic
+        signals from tool outputs, and returns the highest-scoring result.
+
+        Example: result = await agent.compare("Fix the bug in app.py", n_samples=3)
+        """
+        from clawagents.trajectory.compare import compare_samples
+        return await compare_samples(
+            task=task,
+            llm=self.llm,
+            tools=self.tools,
+            system_prompt=self.system_prompt,
+            n_samples=n_samples,
+            max_iterations=max_iterations if max_iterations is not None else self.max_iterations,
+            streaming=False,
+            context_window=self.context_window,
+            on_event=on_event or self.on_event,
+            use_native_tools=self.use_native_tools,
+            rethink=self.rethink,
+            learn=self.learn,
+            preview_chars=self.preview_chars,
+            response_chars=self.response_chars,
+        )
+
     def truncate_output(self, max_chars: int = 5000):
         """Truncate tool outputs to a maximum character length.
 
@@ -172,6 +207,8 @@ class ClawAgent:
 def create_claw_agent(
     model: Union[str, LLMProvider, None] = None,
     api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
+    api_version: Optional[str] = None,
     instruction: Optional[str] = None,
     tools: Optional[List] = None,
     skills: Union[str, List[Union[str, os.PathLike]], None] = None,
@@ -198,9 +235,14 @@ def create_claw_agent(
                         None = auto-detect from env.
         api_key:        API key for the model provider. Auto-routed based on model name.
                         Falls back to env vars (OPENAI_API_KEY / GEMINI_API_KEY) if omitted.
+        base_url:       Custom base URL for OpenAI-compatible APIs. Enables Azure OpenAI,
+                        AWS Bedrock, Ollama, vLLM, LM Studio, or any OpenAI-compatible endpoint.
+                        Default: from OPENAI_BASE_URL env / None (uses api.openai.com).
+        api_version:    API version string. Required for Azure OpenAI (e.g. "2024-12-01-preview").
+                        Default: from OPENAI_API_VERSION env / None.
         instruction:    What the agent should do / how it should behave.
         tools:          Additional tools. Built-in tools always included.
-        skills:         Skill directories (default: auto-discovers ./skills).
+        skills:         Skill directories (default: auto-discovers ./skills). The built-in ByteRover skill is always included when present.
         memory:         AGENTS.md paths (default: auto-discovers ./AGENTS.md, ./CLAWAGENTS.md).
         streaming:      Enable streaming output (default: True).
         context_window:  Max context window in tokens (default: from CONTEXT_WINDOW env / 1000000).
@@ -233,6 +275,18 @@ def create_claw_agent(
 
         # Explicit model + key
         agent = create_claw_agent("gpt-5-mini", api_key="sk-...")
+
+        # Azure OpenAI
+        agent = create_claw_agent("gpt-4o", api_key="...",
+            base_url="https://myresource.openai.azure.com/",
+            api_version="2024-12-01-preview")
+
+        # Local model (Ollama / vLLM / LM Studio)
+        agent = create_claw_agent("llama3.1", base_url="http://localhost:11434/v1")
+
+        # AWS Bedrock via gateway
+        agent = create_claw_agent("anthropic.claude-v3",
+            base_url="http://localhost:8080/v1", api_key="bedrock")
 
         # With PTRL learning enabled
         agent = create_claw_agent("gpt-5-mini", learn=True, rethink=True)
@@ -269,7 +323,7 @@ def create_claw_agent(
         context_window = _lc().context_window  # default: 1_000_000
 
     # ── Resolve model → LLMProvider ────────────────────────────────────
-    llm = _resolve_model(model, streaming, api_key, context_window, max_tokens, temperature)
+    llm = _resolve_model(model, streaming, api_key, context_window, max_tokens, temperature, base_url, api_version)
 
     # ── Resolve sandbox backend ────────────────────────────────────────
     if sandbox is None:
@@ -305,7 +359,9 @@ def create_claw_agent(
 
     # ── Auto-discover skills from default locations ─────────────────────
     skill_summaries: Optional[str] = None
-    skill_dirs = _to_list(skills) if skills is not None else _auto_discover_skills()
+    base_skill_dirs = _to_list(skills) if skills is not None else _auto_discover_skills()
+    _byterover_dir = _get_bundled_byterover_skill_dir()
+    skill_dirs = (base_skill_dirs + [_byterover_dir]) if (_byterover_dir and os.path.isdir(_byterover_dir)) else base_skill_dirs
     if skill_dirs:
         from clawagents.tools.skills import SkillStore, create_skill_tools
 
@@ -317,19 +373,32 @@ def create_claw_agent(
         # Support non-main threads (Streamlit, Jupyter) where asyncio.run()
         # fails due to set_wakeup_fd. Reuse caller's loop if available.
         try:
-            _loop = asyncio.get_event_loop()
-            if _loop.is_closed():
-                raise RuntimeError
-            _loop.run_until_complete(skill_store.load_all())
+            _loop = asyncio.get_running_loop()
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                pool.submit(asyncio.run, skill_store.load_all()).result()
         except RuntimeError:
-            _loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(_loop)
-            _loop.run_until_complete(skill_store.load_all())
+            asyncio.run(skill_store.load_all())
 
         loaded_skills = skill_store.list()
         if loaded_skills:
             lines = [f"- **{s.name}**: {s.description or '(no description)'}" for s in loaded_skills]
             skill_summaries = "## Available Skills\nUse the `use_skill` tool to load full instructions.\n" + "\n".join(lines)
+
+        # Skill prompt budget limits
+        MAX_SKILLS_PROMPT_CHARS = 4000
+        MAX_SKILLS_IN_PROMPT = 20
+
+        if skill_summaries:
+            skill_lines = [l for l in skill_summaries.split("\n") if l.startswith("- **")]
+            if len(skill_lines) > MAX_SKILLS_IN_PROMPT:
+                truncated = skill_lines[:MAX_SKILLS_IN_PROMPT]
+                skill_summaries = ("## Available Skills\nUse the `use_skill` tool to load full instructions.\n"
+                    + "\n".join(truncated)
+                    + f"\n\n({len(skill_lines) - MAX_SKILLS_IN_PROMPT} more skills available — use list_skills to see all)")
+            if len(skill_summaries) > MAX_SKILLS_PROMPT_CHARS:
+                skill_summaries = (skill_summaries[:MAX_SKILLS_PROMPT_CHARS]
+                    + "\n\n...(skill list truncated — use list_skills to see all)")
 
         for skill_tool in create_skill_tools(skill_store):
             if skill_tool.name == "use_skill":
@@ -367,6 +436,8 @@ def _resolve_model(
     context_window: Optional[int] = None,
     max_tokens: Optional[int] = None,
     temperature: Optional[float] = None,
+    base_url: Optional[str] = None,
+    api_version: Optional[str] = None,
 ) -> LLMProvider:
     """Accept a model name string, an LLMProvider, or None (auto-detect)."""
     if isinstance(model, LLMProvider):
@@ -383,6 +454,10 @@ def _resolve_model(
         config.max_tokens = max_tokens
     if temperature is not None:
         config.temperature = temperature
+    if base_url is not None:
+        config.openai_base_url = base_url
+    if api_version is not None:
+        config.openai_api_version = api_version
 
     active_model = model if isinstance(model, str) and model else get_default_model(config)
 
@@ -393,7 +468,8 @@ def _resolve_model(
         else:
             config.openai_api_key = api_key
 
-    return create_provider(active_model, config)
+    provider = create_provider(active_model, config)
+    return provider
 
 
 def _to_list(value) -> list:
@@ -403,6 +479,11 @@ def _to_list(value) -> list:
     if isinstance(value, (str, os.PathLike)):
         return [value]
     return list(value)
+
+
+def _get_bundled_byterover_skill_dir() -> str:
+    """Path to the bundled ByteRover skill (ClawHub byteroverinc/byterover)."""
+    return str(Path(__file__).resolve().parent / "skills" / "byterover")
 
 
 # Default locations for auto-discovery

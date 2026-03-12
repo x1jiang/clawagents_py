@@ -33,10 +33,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional
 
-from clawagents.providers.llm import LLMProvider, LLMMessage, LLMResponse, NativeToolSchema, NativeToolCall
+from clawagents.providers.llm import LLMProvider, LLMMessage, LLMResponse, NativeToolSchema, NativeToolCall, strip_thinking_tokens
 from clawagents.tools.registry import ToolRegistry, ParsedToolCall, ToolResult
 
 logger = logging.getLogger(__name__)
+
+
+# ─── Model Control Token Sanitization ─────────────────────────────────────
+_MODEL_CONTROL_TOKEN_RE = re.compile(r'<[｜|][^>]*?[｜|]>')
+
+def _sanitize_assistant_text(text: str) -> str:
+    """Strip leaked model control tokens from assistant text (GLM-5, DeepSeek, etc.)."""
+    return _MODEL_CONTROL_TOKEN_RE.sub('', text).strip()
 
 
 # ─── Dangling Tool Call Repair (learned from deepagents) ──────────────────
@@ -73,13 +81,22 @@ def _patch_dangling_tool_calls(messages: list[LLMMessage]) -> list[LLMMessage]:
 # replace it with a head/tail preview + file path.
 
 _EVICTION_CHARS_THRESHOLD = 80_000  # ~20K tokens
-_EVICTION_DIR = Path.cwd() / ".clawagents" / "large_results"
+def _get_eviction_dir() -> Path:
+    return Path.cwd() / ".clawagents" / "large_results"
 
+
+_PREVIEW_MAX_CHARS = 2000
 
 def _create_content_preview(content: str, head_lines: int = 5, tail_lines: int = 5) -> str:
     lines = content.split("\n")
-    if len(lines) <= head_lines + tail_lines + 2:
+    if len(lines) <= head_lines + tail_lines + 2 and len(content) <= _PREVIEW_MAX_CHARS:
         return content
+
+    if len(lines) <= head_lines + tail_lines + 2:
+        half = _PREVIEW_MAX_CHARS // 2
+        return (content[:half]
+                + f"\n... [{len(content) - _PREVIEW_MAX_CHARS} chars truncated] ...\n"
+                + content[-half:])
 
     head = "\n".join(f"{i + 1}: {l}" for i, l in enumerate(lines[:head_lines]))
     total = len(lines)
@@ -96,10 +113,10 @@ def _evict_large_tool_result(tool_name: str, output: str) -> str:
         return output
 
     try:
-        _EVICTION_DIR.mkdir(parents=True, exist_ok=True)
+        _get_eviction_dir().mkdir(parents=True, exist_ok=True)
         ts = int(time.time() * 1000)
         sanitized = re.sub(r"[^a-zA-Z0-9_-]", "_", tool_name)
-        file_path = _EVICTION_DIR / f"{sanitized}_{ts}.txt"
+        file_path = _get_eviction_dir() / f"{sanitized}_{ts}.txt"
         file_path.write_text(output, "utf-8")
 
         preview = _create_content_preview(output)
@@ -108,7 +125,12 @@ def _evict_large_tool_result(tool_name: str, output: str) -> str:
             f"Use read_file to access the full result. Preview:\n\n{preview}"
         )
     except Exception:
-        return output[:_EVICTION_CHARS_THRESHOLD] + "\n...(output truncated)"
+        half = _EVICTION_CHARS_THRESHOLD // 2
+        return (
+            output[:half]
+            + f"\n\n... [truncated {len(output) - _EVICTION_CHARS_THRESHOLD} chars] ...\n\n"
+            + output[-half:]
+        )
 
 
 # ─── Model-Aware Context Budget (learned from deepagents) ─────────────────
@@ -284,11 +306,20 @@ def _truncate_old_tool_args(
 
 
 class _ToolCallTracker:
-    def __init__(self, window_size: int = 30, soft_limit: int = 3, hard_limit: int = 6):
+    def __init__(
+        self,
+        window_size: int = 30,
+        soft_limit: int = 3,
+        hard_limit: int = 6,
+        circuit_breaker_limit: int = 30,
+    ):
         self._history: list[str] = []
         self._window_size = window_size
         self._soft_limit = soft_limit
         self._hard_limit = hard_limit
+        self._circuit_breaker_limit = circuit_breaker_limit
+        self._result_hashes: dict[str, str] = {}
+        self._no_progress_count = 0
         self._soft_warnings = 0
 
     def _key(self, tool_name: str, args: dict) -> str:
@@ -297,10 +328,48 @@ class _ToolCallTracker:
         except (TypeError, ValueError):
             return f"{tool_name}:{args}"
 
+    @staticmethod
+    def _hash_result(output: str) -> str:
+        sample = output[:500]
+        h = 0
+        for ch in sample:
+            h = ((h << 5) - h + ord(ch)) & 0xFFFFFFFF
+        return str(h)
+
     def record(self, tool_name: str, args: dict) -> None:
         self._history.append(self._key(tool_name, args))
         if len(self._history) > self._window_size:
             self._history.pop(0)
+
+    def record_result(self, tool_name: str, args: dict, output: str) -> None:
+        """Record the result of a tool call for no-progress detection."""
+        key = self._key(tool_name, args)
+        result_hash = self._hash_result(output)
+        prev_hash = self._result_hashes.get(key)
+        if prev_hash == result_hash:
+            self._no_progress_count += 1
+        else:
+            self._no_progress_count = max(0, self._no_progress_count - 1)
+        self._result_hashes[key] = result_hash
+
+    def is_ping_ponging(self) -> bool:
+        """Detect A->B->A->B ping-pong oscillation (last 6 entries)."""
+        if len(self._history) < 4:
+            return False
+        recent = self._history[-6:]
+        if len(recent) < 4:
+            return False
+        unique = set(recent)
+        if len(unique) != 2:
+            return False
+        for i in range(len(recent) - 1):
+            if recent[i] == recent[i + 1]:
+                return False
+        return True
+
+    def is_circuit_broken(self) -> bool:
+        """Global circuit breaker: too many no-progress calls."""
+        return self._no_progress_count >= self._circuit_breaker_limit
 
     def _count_occurrences(self, tool_name: str, args: dict) -> int:
         key = self._key(tool_name, args)
@@ -501,10 +570,166 @@ def _preflight_context_check(
     return messages, tool_desc, native_schemas
 
 
+# ─── Soft-Trim: prune stale/low-value content before compaction ───────────
+
+_SOFT_TRIM_RATIO = 0.60
+_SOFT_TRIM_RESULT_MAX_CHARS = 1000
+_SOFT_TRIM_RESULT_KEEP_CHARS = 500
+_SOFT_TRIM_RECENT_PROTECTED = 10
+
+_IMAGE_DATA_RE = re.compile(r'^\[image\s*data?\]$', re.IGNORECASE)
+
+
+def _soft_trim_messages(
+    messages: list[LLMMessage],
+    context_window: int,
+    token_multiplier: float,
+    emit: OnEvent,
+    model_name: Optional[str] = None,
+) -> list[LLMMessage]:
+    """Remove stale/low-value content from context before hitting compaction threshold."""
+    effective_window, _ratio = (
+        _resolve_context_budget(model_name, context_window)
+        if model_name
+        else (context_window, _CONTEXT_BUDGET_RATIO)
+    )
+    soft_budget = int(effective_window * _SOFT_TRIM_RATIO)
+    current_tokens = _estimate_messages_tokens(messages, token_multiplier)
+
+    if current_tokens <= soft_budget:
+        return messages
+
+    protect_from = max(0, len(messages) - _SOFT_TRIM_RECENT_PROTECTED * 2)
+    trim_count = 0
+
+    # First pass: identify duplicate tool results and mark latest index
+    seen: dict[str, int] = {}
+    for i, m in enumerate(messages):
+        if m.role == "tool" or (m.role == "user" and isinstance(m.content, str) and m.content.startswith("[Tool Result]")):
+            if i > 0:
+                prev = messages[i - 1]
+                if prev.role == "assistant" and isinstance(prev.content, str):
+                    content_str = m.content if isinstance(m.content, str) else ""
+                    key = prev.content[:200] + "|" + content_str[:200]
+                    seen[key] = i
+
+    # Second pass: trim/prune
+    result: list[LLMMessage] = []
+    for i, m in enumerate(messages):
+        if i >= protect_from:
+            result.append(m)
+            continue
+
+        is_tool_result = (
+            m.role == "tool"
+            or (m.role == "user" and isinstance(m.content, str) and m.content.startswith("[Tool Result]"))
+        )
+
+        if is_tool_result and isinstance(m.content, str):
+            # Prune image-only tool results from early turns
+            trimmed_content = m.content.replace("[Tool Result]", "", 1).strip()
+            if _IMAGE_DATA_RE.match(trimmed_content):
+                result.append(LLMMessage(role=m.role, content="[Tool Result] [image data removed — stale]",
+                                         tool_call_id=m.tool_call_id))
+                trim_count += 1
+                continue
+
+            # Remove duplicate tool results (keep only the most recent)
+            if i > 0:
+                prev = messages[i - 1]
+                if prev.role == "assistant" and isinstance(prev.content, str):
+                    key = prev.content[:200] + "|" + m.content[:200]
+                    latest_idx = seen.get(key)
+                    if latest_idx is not None and latest_idx != i:
+                        result.append(LLMMessage(role=m.role, content="[Tool Result] [duplicate — see later result]",
+                                                 tool_call_id=m.tool_call_id))
+                        trim_count += 1
+                        continue
+
+            # Trim large old tool results
+            if len(m.content) > _SOFT_TRIM_RESULT_MAX_CHARS:
+                half = _SOFT_TRIM_RESULT_KEEP_CHARS // 2
+                trimmed = (
+                    m.content[:half]
+                    + f"\n...[soft-trimmed {len(m.content) - _SOFT_TRIM_RESULT_KEEP_CHARS} chars]...\n"
+                    + m.content[-half:]
+                )
+                result.append(LLMMessage(role=m.role, content=trimmed, tool_call_id=m.tool_call_id))
+                trim_count += 1
+                continue
+
+        result.append(m)
+
+    if trim_count > 0:
+        emit("context", {"message": f"soft-trim: trimmed {trim_count} old tool results"})
+    return result
+
+
 # ─── Context Window Guard with Auto-Compaction ────────────────────────────
 
 _CONTEXT_BUDGET_RATIO = 0.75
-_RECENT_MESSAGES_TO_KEEP = 6
+_RECENT_MESSAGES_TO_KEEP = 20
+_COMPACTION_CHUNK_TOKENS = 30_000
+_COMPACTION_MAX_RETRIES = 3
+
+_IDENTIFIER_PRESERVATION = """
+CRITICAL: Preserve these verbatim (do not paraphrase or omit):
+- File paths (e.g., src/utils/auth.ts)
+- Function/variable/class names (e.g., handleAuth, userToken)
+- Error messages and stack traces
+- Command-line commands that were run
+- Configuration values and URLs"""
+
+
+def _find_safe_split_index(non_system: list[LLMMessage], desired_recent: int) -> int:
+    """Find a split index that doesn't break tool_call/tool_result pairs.
+
+    Walks backward from the desired split point until we find a boundary
+    that doesn't land between an assistant tool_call and its tool result.
+    """
+    split = max(0, len(non_system) - desired_recent)
+    while split < len(non_system) - 1:
+        msg = non_system[split]
+        if msg.role == "tool" and msg.tool_call_id:
+            split += 1
+            continue
+        break
+    return split
+
+
+async def _summarize_chunk(
+    llm: LLMProvider,
+    chunk_text: str,
+    task_context: str,
+) -> str:
+    """Summarize a single chunk with retry and exponential backoff."""
+    prompt = (
+        "You are summarizing a chunk of an AI agent's conversation history.\n\n"
+        f"## Original Task\n{task_context}\n\n"
+        f"## Conversation Chunk\n{chunk_text}\n\n"
+        "## Instructions\n"
+        "Write a structured summary preserving:\n"
+        "- What tools were called and their key results (file paths, data, errors)\n"
+        "- What has been accomplished\n"
+        "- Any critical facts, variable values, or decisions made\n"
+        + _IDENTIFIER_PRESERVATION + "\n"
+        "Be concise but preserve all actionable information."
+    )
+
+    last_error: BaseException | None = None
+    for attempt in range(_COMPACTION_MAX_RETRIES):
+        try:
+            resp = await llm.chat([LLMMessage(role="user", content=prompt)])
+            if resp.content.strip():
+                return resp.content.strip()
+        except Exception as e:
+            last_error = e
+        if attempt < _COMPACTION_MAX_RETRIES - 1:
+            await asyncio.sleep(1.0 * (2 ** attempt))
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Summarization returned empty")
 
 
 async def _compact_if_needed(
@@ -515,7 +740,6 @@ async def _compact_if_needed(
     token_multiplier: float = 1.0,
     model_name: Optional[str] = None,
 ) -> list[LLMMessage]:
-    # Phase 1: truncate tool args in older messages (cheap, no LLM call)
     messages = _truncate_old_tool_args(messages)
 
     effective_window, ratio = (
@@ -531,7 +755,6 @@ async def _compact_if_needed(
 
     emit("context", {"message": f"~{current_tokens} tokens exceeds budget {budget} — compacting"})
 
-    # Single-pass split
     system_msgs: list[LLMMessage] = []
     non_system: list[LLMMessage] = []
     for m in messages:
@@ -540,33 +763,73 @@ async def _compact_if_needed(
     if len(non_system) <= _RECENT_MESSAGES_TO_KEEP:
         return messages
 
-    recent_count = min(_RECENT_MESSAGES_TO_KEEP, len(non_system))
-    older = non_system[:-recent_count]
-    recent = non_system[-recent_count:]
+    split_idx = _find_safe_split_index(non_system, _RECENT_MESSAGES_TO_KEEP)
+    if split_idx <= 0:
+        return messages
 
-    # Phase 8: Offload full history to file before summarizing
+    older = non_system[:split_idx]
+    recent = non_system[split_idx:]
+
     offload_path = _offload_history(older)
     if offload_path:
         emit("context", {"message": f"offloaded {len(older)} messages to {offload_path}"})
 
-    text_log = "\n\n".join(
-        f"[{m.role.upper()}]: {m.content}" for m in older
-    )
+    task_context = ""
+    for m in non_system:
+        if m.role == "user" and not (isinstance(m.content, str) and m.content.startswith("[Tool Result]")):
+            task_context = m.content[:500] if isinstance(m.content, str) else ""
+            break
 
-    summary_prompt = (
-        "Compress the following agent conversation history into a concise summary. "
-        "Keep key facts, file paths, errors, and tool results. Be brief.\n\n"
-        + text_log
-    )
+    text_parts: list[str] = []
+    for m in older:
+        content = m.content if isinstance(m.content, str) else str(m.content)
+        if m.role == "assistant" and m.tool_calls_meta:
+            calls = ", ".join(tc["name"] for tc in m.tool_calls_meta)
+            text_parts.append(f"[TOOL CALLS: {calls}] {content[:200]}")
+        elif m.role == "tool":
+            text_parts.append(f"[TOOL RESULT]: {content[:200]}")
+        else:
+            text_parts.append(f"[{m.role.upper()}]: {content[:500]}")
+
+    total_tokens = _estimate_tokens("\n\n".join(text_parts), token_multiplier)
 
     try:
-        resp = await llm.chat([LLMMessage(role="user", content=summary_prompt)])
-        if not resp.content.strip():
+        if total_tokens <= _COMPACTION_CHUNK_TOKENS:
+            text_log = "\n\n".join(text_parts)
+            summary_text = await _summarize_chunk(llm, text_log, task_context)
+        else:
+            chunks: list[str] = []
+            current_chunk: list[str] = []
+            current_chunk_tokens = 0
+
+            for part in text_parts:
+                part_tokens = _estimate_tokens(part, token_multiplier)
+                if current_chunk_tokens + part_tokens > _COMPACTION_CHUNK_TOKENS and current_chunk:
+                    chunks.append("\n\n".join(current_chunk))
+                    current_chunk = []
+                    current_chunk_tokens = 0
+                current_chunk.append(part)
+                current_chunk_tokens += part_tokens
+            if current_chunk:
+                chunks.append("\n\n".join(current_chunk))
+
+            emit("context", {
+                "message": f"splitting {len(text_parts)} parts into {len(chunks)} chunks for summarization",
+            })
+
+            chunk_summaries: list[str] = []
+            for i, chunk in enumerate(chunks):
+                chunk_summary = await _summarize_chunk(llm, chunk, task_context)
+                chunk_summaries.append(f"### Chunk {i + 1}/{len(chunks)}\n{chunk_summary}")
+            summary_text = "\n\n".join(chunk_summaries)
+
+        if not summary_text.strip():
             emit("context", {"message": "compaction returned empty summary — dropping oldest"})
             return [*system_msgs, *recent]
+
         summary = LLMMessage(
-            role="assistant",
-            content=f"[Compacted History] {resp.content}",
+            role="user",
+            content=f"[System — Compacted History]\n{summary_text}",
         )
         emit("context", {"message": f"compacted {len(older)} messages into summary"})
         return [*system_msgs, summary, *recent]
@@ -580,15 +843,16 @@ async def _compact_if_needed(
 
 
 
-_HISTORY_DIR = Path.cwd() / ".clawagents" / "history"
+def _get_history_dir() -> Path:
+    return Path.cwd() / ".clawagents" / "history"
 
 
 def _offload_history(messages: list[LLMMessage]) -> str | None:
     """Save older messages to a JSON file before compaction."""
     try:
-        _HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+        _get_history_dir().mkdir(parents=True, exist_ok=True)
         ts = int(time.time())
-        path = _HISTORY_DIR / f"compacted_{ts}_{len(messages)}msgs.json"
+        path = _get_history_dir() / f"compacted_{ts}_{len(messages)}msgs.json"
         data = [{"role": m.role, "content": m.content} for m in messages]
         path.write_text(json.dumps(data, indent=2), "utf-8")
         return str(path)
@@ -661,6 +925,7 @@ async def run_agent_graph(
     learn: bool = False,
     preview_chars: int = 120,
     response_chars: int = 500,
+    timeout_s: float = 0,
 ) -> AgentState:
     """Single ReAct loop: LLM → tools → LLM → tools → ... → final answer."""
     registry = tools or ToolRegistry()
@@ -669,8 +934,20 @@ async def run_agent_graph(
     )
     tool_desc = registry.describe_for_llm() if not use_native_tools else ""
     loop_tracker = _ToolCallTracker()
-    failure_tracker = _FailureTracker() if rethink else None
     emit = on_event or _default_on_event
+
+    # Feature C + F: detect task type for adaptive rethink threshold
+    _task_type = "general"
+    if rethink or learn:
+        try:
+            from clawagents.trajectory.verifier import detect_task_type, compute_adaptive_rethink_threshold
+            _task_type = detect_task_type(task)
+            adaptive_threshold = compute_adaptive_rethink_threshold(_task_type, 0, 0)
+        except Exception:
+            adaptive_threshold = _RETHINK_THRESHOLD
+    else:
+        adaptive_threshold = _RETHINK_THRESHOLD
+    failure_tracker = _FailureTracker(threshold=adaptive_threshold) if rethink else None
 
     # Trajectory recorder (opt-in; learn implies trajectory)
     recorder = None
@@ -680,6 +957,7 @@ async def run_agent_graph(
 
     token_multiplier = 1.0
     resolved_model_name: Optional[str] = None
+    _cached_sys_tokens: int = 0  # Feature D: cache system prompt token count
 
     prompt_to_use = system_prompt or BASE_SYSTEM_PROMPT
 
@@ -695,11 +973,15 @@ async def run_agent_graph(
         LLMMessage(role="system", content=f"{prompt_to_use}\n\n{tool_desc}"),
         LLMMessage(role="user", content=task),
     ]
-
     # Pre-flight: ensure initial payload fits in context window
     messages, tool_desc, native_schemas = _preflight_context_check(
         messages, context_window, tool_desc, native_schemas, registry, emit,
     )
+
+    # Feature D: cache system prompt tokens (static prefix never changes)
+    if messages:
+        _cached_sys_tokens = _estimate_tokens(messages[0].content)
+        emit("context", {"message": f"system prompt: ~{_cached_sys_tokens} tokens (cached for budget calc)"})
 
     state = AgentState(
         messages=messages,
@@ -731,6 +1013,10 @@ async def run_agent_graph(
 
     t0 = time.monotonic()
 
+    def _check_timeout():
+        if timeout_s > 0 and (time.monotonic() - t0) > timeout_s:
+            raise TimeoutError(f"Agent run exceeded {timeout_s}s global timeout")
+
     try:
         for round_idx in range(effective_max_rounds):
             if cancel_event.is_set():
@@ -738,8 +1024,17 @@ async def run_agent_graph(
                 state.result = state.result or "[cancelled]"
                 break
 
+            try:
+                _check_timeout()
+            except TimeoutError as te:
+                emit("warn", {"message": str(te)})
+                state.status = "error"
+                state.result = str(te)
+                break
+
             # Patch dangling tool calls before sending to LLM
             messages = _patch_dangling_tool_calls(messages)
+            messages = _soft_trim_messages(messages, context_window, token_multiplier, emit, resolved_model_name)
             messages = await _compact_if_needed(
                 messages, context_window, llm, emit, token_multiplier, resolved_model_name,
             )
@@ -786,6 +1081,7 @@ async def run_agent_graph(
                     emit("context", {
                         "message": f"token overflow — calibrated multiplier to {token_multiplier:.2f} (retry {overflow_retries}/{_MAX_OVERFLOW_RETRIES})",
                     })
+                    messages = _soft_trim_messages(messages, context_window, token_multiplier, emit, resolved_model_name)
                     messages = await _compact_if_needed(
                         messages, context_window, llm, emit, token_multiplier, resolved_model_name,
                     )
@@ -803,6 +1099,19 @@ async def run_agent_graph(
                 state.result = state.result or "[interrupted]"
                 break
 
+            # Feature H: extract and preserve thinking tokens (<think>...</think>)
+            _thinking_content: str | None = None
+            if response.content and "<think>" in response.content:
+                clean_content, _thinking_content = strip_thinking_tokens(response.content)
+                response = LLMResponse(
+                    content=clean_content,
+                    model=response.model,
+                    tokens_used=response.tokens_used,
+                    partial=response.partial,
+                    tool_calls=response.tool_calls,
+                    gemini_parts=response.gemini_parts,
+                )
+
             # Use exclusively native or text-based tool calls based on user-provided mode
             native_tool_call_objects: list[NativeToolCall] | None = None
             if use_native_tools:
@@ -818,7 +1127,7 @@ async def run_agent_graph(
                 # Check if the response is a truncated JSON tool call (hit max_tokens)
                 if not use_native_tools and _looks_like_truncated_json(response.content):
                     emit("warn", {"message": "truncated JSON tool call detected — asking LLM to retry"})
-                    messages.append(LLMMessage(role="assistant", content=response.content))
+                    messages.append(LLMMessage(role="assistant", content=response.content, thinking=_thinking_content))
                     messages.append(LLMMessage(
                         role="user",
                         content=(
@@ -833,12 +1142,20 @@ async def run_agent_graph(
                         response_text=response.content or "",
                         model=response.model,
                         tokens_used=response.tokens_used,
+                        thinking=_thinking_content,
                     )
-                state.result = response.content
+                state.result = _sanitize_assistant_text(response.content)
                 state.status = "done"
                 state.iterations += 1
-                emit("final_content", {"content": response.content})
-                messages.append(LLMMessage(role="assistant", content=response.content))
+                emit("final_content", {"content": state.result})
+                messages.append(LLMMessage(role="assistant", content=response.content, thinking=_thinking_content))
+                break
+
+            if loop_tracker.is_circuit_broken():
+                emit("warn", {"message": f"circuit breaker tripped ({loop_tracker._no_progress_count} no-progress calls) — breaking"})
+                state.status = "done"
+                state.result = "Circuit breaker: too many tool calls with no progress. Stopping."
+                state.iterations += 1
                 break
 
             if loop_tracker.is_hard_looping_batch(tool_calls):
@@ -846,6 +1163,14 @@ async def run_agent_graph(
                 emit("warn", {"message": f"tool loop detected ({names}) — breaking"})
                 state.status = "done"
                 state.result = f"Tool loop detected ({names}). Stopping."
+                state.iterations += 1
+                break
+
+            if loop_tracker.is_ping_ponging():
+                recent_unique = list(set(loop_tracker._history[-6:]))
+                emit("warn", {"message": f"ping-pong oscillation detected ({' ↔ '.join(recent_unique)}) — breaking"})
+                state.status = "done"
+                state.result = "Ping-pong loop detected between tools. Stopping."
                 state.iterations += 1
                 break
 
@@ -916,6 +1241,10 @@ async def run_agent_graph(
                     "preview": preview,
                 })
 
+                # Record result hash for no-progress / circuit breaker detection
+                if isinstance(tool_output, str):
+                    loop_tracker.record_result(call.tool_name, call.args, tool_output)
+
                 # ── Failure tracking + trajectory ──
                 if failure_tracker:
                     failure_tracker.record(tool_result.success, call.tool_name)
@@ -939,6 +1268,7 @@ async def run_agent_graph(
                             error=tool_result.error if not tool_result.success else None,
                         )],
                         observation_context=obs_ctx,
+                        thinking=_thinking_content,
                     )
 
                 # Use proper tool role messages when native tools are enabled
@@ -948,6 +1278,7 @@ async def run_agent_graph(
                         content=response.content or "",
                         tool_calls_meta=[{"id": native_tc.tool_call_id, "name": call.tool_name, "args": call.args}],
                         gemini_parts=getattr(response, "gemini_parts", None),
+                        thinking=_thinking_content,
                     ))
                     tool_content = f"{tool_output}" if isinstance(tool_output, str) else json.dumps(tool_output)
                     messages.append(LLMMessage(
@@ -957,7 +1288,7 @@ async def run_agent_graph(
                     ))
                 else:
                     messages.append(
-                        LLMMessage(role="assistant", content=f'{{"tool": "{call.tool_name}", "args": {json.dumps(call.args)}}}')
+                        LLMMessage(role="assistant", content=f'{{"tool": "{call.tool_name}", "args": {json.dumps(call.args)}}}', thinking=_thinking_content)
                     )
                     user_content = f"[Tool Result] {tool_output}" if isinstance(tool_output, str) else tool_output
                     messages.append(
@@ -965,20 +1296,29 @@ async def run_agent_graph(
                     )
 
                 # ── Rethink injection on consecutive failures ──
-                if failure_tracker and failure_tracker.should_rethink():
-                    n = failure_tracker.consecutive_failures
-                    rethink_num = failure_tracker.bump_rethink()
-                    emit("warn", {"message": f"rethink #{rethink_num}: {n} consecutive tool failures"})
-                    rethink_msg = _RETHINK_MESSAGE.format(n=n)
-                    if learn:
-                        from clawagents.trajectory.lessons import build_rethink_with_lessons
-                        fmt_count = sum(1 for t in (recorder.turns if recorder else []) for tc in t.tool_calls if not tc.success and tc.failure_type == "format")
-                        logic_count = sum(1 for t in (recorder.turns if recorder else []) for tc in t.tool_calls if not tc.success and tc.failure_type == "logic")
-                        rethink_msg = build_rethink_with_lessons(rethink_msg, fmt_count, logic_count)
-                    messages.append(LLMMessage(
-                        role="user",
-                        content=rethink_msg,
-                    ))
+                if failure_tracker:
+                    # Feature F: update threshold dynamically based on progress
+                    try:
+                        from clawagents.trajectory.verifier import compute_adaptive_rethink_threshold
+                        failure_tracker._threshold = compute_adaptive_rethink_threshold(
+                            _task_type, round_idx, state.tool_calls
+                        )
+                    except Exception:
+                        pass
+                    if failure_tracker.should_rethink():
+                        n = failure_tracker.consecutive_failures
+                        rethink_num = failure_tracker.bump_rethink()
+                        emit("warn", {"message": f"rethink #{rethink_num}: {n} consecutive failures (threshold={failure_tracker._threshold})"})
+                        rethink_msg = _RETHINK_MESSAGE.format(n=n)
+                        if learn:
+                            from clawagents.trajectory.lessons import build_rethink_with_lessons
+                            fmt_count = sum(1 for t in (recorder.turns if recorder else []) for tc in t.tool_calls if not tc.success and tc.failure_type == "format")
+                            logic_count = sum(1 for t in (recorder.turns if recorder else []) for tc in t.tool_calls if not tc.success and tc.failure_type == "logic")
+                            rethink_msg = build_rethink_with_lessons(rethink_msg, fmt_count, logic_count)
+                        messages.append(LLMMessage(
+                            role="user",
+                            content=rethink_msg,
+                        ))
 
             else:
                 # ── before_tool hook (parallel) — filter out rejected calls ──
@@ -1056,6 +1396,11 @@ async def run_agent_graph(
                         call_summaries.append(json.dumps(output))
                         tool_outputs.append(json.dumps(output))
 
+                # Record result hashes for no-progress / circuit breaker detection
+                for c_rec, out_rec in zip(approved_calls, tool_outputs):
+                    if isinstance(out_rec, str):
+                        loop_tracker.record_result(c_rec.tool_name, c_rec.args, out_rec)
+
                 # ── Failure tracking + trajectory (parallel) ──
                 if failure_tracker:
                     failure_tracker.record_batch([
@@ -1085,6 +1430,7 @@ async def run_agent_graph(
                         tokens_used=response.tokens_used,
                         tool_calls=tc_records,
                         observation_context=obs_ctx,
+                        thinking=_thinking_content,
                     )
 
                 # Use proper tool role messages when native tools are enabled
@@ -1100,6 +1446,7 @@ async def run_agent_graph(
                         content=response.content or "",
                         tool_calls_meta=tc_meta,
                         gemini_parts=getattr(response, "gemini_parts", None),
+                        thinking=_thinking_content,
                     ))
                     for idx, (call, output_str) in enumerate(zip(approved_calls, tool_outputs)):
                         ntc = native_tc_map.get(idx)
@@ -1114,7 +1461,7 @@ async def run_agent_graph(
                         {"tool": c.tool_name, "args": c.args} for c in approved_calls
                     ])
                     messages.append(
-                        LLMMessage(role="assistant", content=tool_call_str)
+                        LLMMessage(role="assistant", content=tool_call_str, thinking=_thinking_content)
                     )
                     messages.append(
                         LLMMessage(
@@ -1124,20 +1471,29 @@ async def run_agent_graph(
                     )
 
                 # ── Rethink injection on consecutive failures (parallel) ──
-                if failure_tracker and failure_tracker.should_rethink():
-                    n = failure_tracker.consecutive_failures
-                    rethink_num = failure_tracker.bump_rethink()
-                    emit("warn", {"message": f"rethink #{rethink_num}: {n} consecutive tool failures"})
-                    rethink_msg = _RETHINK_MESSAGE.format(n=n)
-                    if learn:
-                        from clawagents.trajectory.lessons import build_rethink_with_lessons
-                        fmt_count = sum(1 for t in (recorder.turns if recorder else []) for tc in t.tool_calls if not tc.success and tc.failure_type == "format")
-                        logic_count = sum(1 for t in (recorder.turns if recorder else []) for tc in t.tool_calls if not tc.success and tc.failure_type == "logic")
-                        rethink_msg = build_rethink_with_lessons(rethink_msg, fmt_count, logic_count)
-                    messages.append(LLMMessage(
-                        role="user",
-                        content=rethink_msg,
-                    ))
+                if failure_tracker:
+                    # Feature F: update threshold dynamically
+                    try:
+                        from clawagents.trajectory.verifier import compute_adaptive_rethink_threshold
+                        failure_tracker._threshold = compute_adaptive_rethink_threshold(
+                            _task_type, round_idx, state.tool_calls
+                        )
+                    except Exception:
+                        pass
+                    if failure_tracker.should_rethink():
+                        n = failure_tracker.consecutive_failures
+                        rethink_num = failure_tracker.bump_rethink()
+                        emit("warn", {"message": f"rethink #{rethink_num}: {n} consecutive failures (threshold={failure_tracker._threshold})"})
+                        rethink_msg = _RETHINK_MESSAGE.format(n=n)
+                        if learn:
+                            from clawagents.trajectory.lessons import build_rethink_with_lessons
+                            fmt_count = sum(1 for t in (recorder.turns if recorder else []) for tc in t.tool_calls if not tc.success and tc.failure_type == "format")
+                            logic_count = sum(1 for t in (recorder.turns if recorder else []) for tc in t.tool_calls if not tc.success and tc.failure_type == "logic")
+                            rethink_msg = build_rethink_with_lessons(rethink_msg, fmt_count, logic_count)
+                        messages.append(LLMMessage(
+                            role="user",
+                            content=rethink_msg,
+                        ))
 
         else:
             emit("warn", {"message": f"reached max {effective_max_rounds} tool rounds"})
@@ -1169,6 +1525,24 @@ async def run_agent_graph(
         run_summary = recorder.finalize(outcome)
         state.trajectory_file = run_summary.trajectory_file
         emit("context", {"message": f"trajectory saved to {run_summary.trajectory_file}"})
+
+    # ── Feature G: LLM-as-Judge verification ──
+    if learn and recorder and run_summary:
+        try:
+            from dataclasses import asdict
+            from clawagents.trajectory.judge import judge_run
+            summary_dict = asdict(run_summary)
+            turn_dicts = [asdict(t) for t in recorder.turns]
+            judge_result = await judge_run(
+                llm, task, summary_dict, state.result, turn_dicts,
+            )
+            run_summary.judge_score = judge_result.get("judge_score")
+            run_summary.judge_justification = judge_result.get("judge_justification", "")
+            emit("context", {
+                "message": f"LLM Judge: score={run_summary.judge_score}/3 — {run_summary.judge_justification[:80]}"
+            })
+        except Exception:
+            logger.debug("LLM-as-Judge failed", exc_info=True)
 
     # ── PTRL Layer 3: Post-run self-analysis (with quality gate) ──
     if learn and recorder and run_summary:

@@ -8,8 +8,14 @@ from abc import ABC, abstractmethod
 from typing import Any, AsyncIterator, Callable, Coroutine, Literal, TypeVar
 
 from openai import AsyncOpenAI, APIStatusError, APIConnectionError, APITimeoutError
-from google import genai
-from google.genai import types
+try:
+    from google import genai
+    from google.genai import types
+    _HAS_GEMINI = True
+except ImportError:
+    genai = None  # type: ignore
+    types = None  # type: ignore
+    _HAS_GEMINI = False
 
 from clawagents.config.config import EngineConfig
 
@@ -30,12 +36,14 @@ class LLMMessage:
         tool_call_id: str | None = None,
         tool_calls_meta: list[dict[str, Any]] | None = None,
         gemini_parts: list[dict[str, Any]] | None = None,
+        thinking: str | None = None,
     ):
         self.role = role
         self.content = content
         self.tool_call_id = tool_call_id          # For role="tool": the ID this result belongs to
         self.tool_calls_meta = tool_calls_meta    # For role="assistant": list of {id, name, args}
         self.gemini_parts = gemini_parts          # Preserved Gemini response parts (thought/thought_signature)
+        self.thinking = thinking                  # Feature H: preserved <think> block content
 
 
 class NativeToolSchema:
@@ -84,6 +92,36 @@ class LLMResponse:
 OnChunkCallback = (
     Callable[[str], Coroutine[Any, Any, None]] | Callable[[str], None] | None
 )
+
+
+# ─── Feature H: Thinking Token Preservation ────────────────────────────────
+
+import re as _re
+
+_THINK_BLOCK_RE = _re.compile(r"<think>(.*?)</think>", _re.DOTALL)
+
+
+def strip_thinking_tokens(content: str) -> tuple[str, str | None]:
+    """Extract <think>...</think> blocks and return (clean_content, thinking).
+
+    Handles models like Qwen3, DeepSeek that wrap chain-of-thought in <think> tags.
+    Returns the content with thinking removed, and the thinking text separately.
+    """
+    if not content or "<think>" not in content:
+        return content, None
+    thinking_parts: list[str] = []
+    for m in _THINK_BLOCK_RE.finditer(content):
+        thinking_parts.append(m.group(1).strip())
+    clean = _THINK_BLOCK_RE.sub("", content).strip()
+    thinking = "\n".join(thinking_parts) if thinking_parts else None
+    return clean, thinking
+
+
+def rebuild_thinking_content(content: str, thinking: str | None) -> str:
+    """Re-attach thinking tokens for models that expect them in conversation history."""
+    if not thinking:
+        return content
+    return f"<think>{thinking}</think>\n{content}"
 
 
 class LLMProvider(ABC):
@@ -246,7 +284,7 @@ def _repair_json(text: str) -> Any:
     except Exception:
         pass
 
-    logger.warning("JSON repair failed for tool call arguments — using empty args")
+    logger.warning("JSON repair failed for tool call arguments (input: %s) — using empty args", text[:200])
     return {}
 
 
@@ -328,27 +366,34 @@ def _parse_openai_tool_calls(
 # Those would need a separate ResponsesAPIProvider.
 
 
-# Models that only accept a specific temperature value
+# o-series reasoning models require temperature=1 (API restriction).
+# GPT-5 models accept any temperature — do NOT include them here.
 _FIXED_TEMPERATURE_MODELS: dict[str, float] = {
-    "gpt-5-nano": 1.0,
-    "gpt-5-mini": 1.0,
-    "gpt-5": 1.0,
-    "gpt-5.1": 1.0,
-    "gpt-5.2": 1.0,
     "o1": 1.0,
     "o1-mini": 1.0,
     "o1-preview": 1.0,
     "o3": 1.0,
     "o3-mini": 1.0,
     "o4-mini": 1.0,
+    "gpt-5-nano": 1.0,
+    "gpt-5-mini": 1.0,
+    "gpt-5-turbo": 1.0,
+}
+
+_NON_REASONING_MODELS: set[str] = {
+    "gpt-5-micro", "gpt-4o", "gpt-4o-mini",
 }
 
 
 def _resolve_temperature(model: str, requested: float) -> float:
     """Return the fixed temperature if the model requires it, else the requested value."""
+    if model in _NON_REASONING_MODELS:
+        return requested
     for prefix, fixed in _FIXED_TEMPERATURE_MODELS.items():
         if model == prefix or model.startswith(prefix + "-"):
             return fixed
+    if model == "gpt-5" or model.startswith("gpt-5-2") or model.startswith("gpt-5."):
+        return 1.0
     return requested
 
 
@@ -356,7 +401,28 @@ class OpenAIProvider(LLMProvider):
     name = "openai"
 
     def __init__(self, config: EngineConfig):
-        self.client = AsyncOpenAI(api_key=config.openai_api_key)
+        base_url = config.openai_base_url or None
+        api_version = config.openai_api_version or None
+        api_key = config.openai_api_key or ("not-needed" if base_url else "")
+
+        api_type = (config.openai_api_type or "").lower()
+        is_azure = api_type == "azure" or (api_version and base_url and "azure" in base_url.lower())
+        if is_azure and api_version and base_url:
+            try:
+                from openai import AsyncAzureOpenAI
+                self.client = AsyncAzureOpenAI(
+                    api_key=api_key,
+                    azure_endpoint=base_url,
+                    api_version=api_version,
+                )
+            except ImportError:
+                self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        else:
+            client_kwargs: dict[str, Any] = {"api_key": api_key}
+            if base_url:
+                client_kwargs["base_url"] = base_url
+            self.client = AsyncOpenAI(**client_kwargs)
+
         self.model = config.openai_model
         self._max_tokens = config.max_tokens
         self._temperature = _resolve_temperature(config.openai_model, config.temperature)
@@ -550,6 +616,8 @@ class GeminiProvider(LLMProvider):
     name = "gemini"
 
     def __init__(self, config: EngineConfig):
+        if not _HAS_GEMINI:
+            raise ImportError("google-genai not installed. Install with: pip install clawagents[gemini]")
         self.client = genai.Client(api_key=config.gemini_api_key)
         self.model = config.gemini_model
         self._max_tokens = config.max_tokens
@@ -638,6 +706,8 @@ class GeminiProvider(LLMProvider):
         self,
         user_contents: list[dict[str, Any]],
         gemini_config: types.GenerateContentConfig,
+        *,
+        _malformed_retry: bool = False,
     ) -> LLMResponse:
         resp = await self.client.aio.models.generate_content(
             model=self.model,
@@ -646,8 +716,10 @@ class GeminiProvider(LLMProvider):
         )
         fn_calls: list[NativeToolCall] | None = None
         raw_parts = None
+        finish_reason = None
         candidates = getattr(resp, "candidates", None)
         if candidates:
+            finish_reason = getattr(candidates[0], "finish_reason", None)
             parts = getattr(candidates[0].content, "parts", None) if candidates[0].content else None
             if parts:
                 raw_parts = _serialize_gemini_parts(parts)
@@ -669,6 +741,18 @@ class GeminiProvider(LLMProvider):
                 getattr(p, "text", "") for p in parts
                 if getattr(p, "text", None) and not getattr(p, "thought", False)
             )
+
+        fr_str = str(finish_reason) if finish_reason else ""
+        if not _malformed_retry and "MALFORMED_FUNCTION_CALL" in fr_str and not fn_calls:
+            logger.warning("  [gemini] MALFORMED_FUNCTION_CALL detected — retrying with mode=ANY")
+            retry_opts: dict[str, Any] = {}
+            for attr in ("max_output_tokens", "temperature", "system_instruction", "tools"):
+                val = getattr(gemini_config, attr, None)
+                if val is not None:
+                    retry_opts[attr] = val
+            retry_opts["tool_config"] = {"function_calling_config": {"mode": "ANY"}}
+            retry_config = types.GenerateContentConfig(**retry_opts)
+            return await self._request_once(user_contents, retry_config, _malformed_retry=True)
 
         return LLMResponse(
             content=extracted_text,
@@ -704,6 +788,7 @@ class GeminiProvider(LLMProvider):
             final_tokens = 0
             fn_calls: list[NativeToolCall] = []
             all_stream_parts: list[Any] = []
+            last_finish_reason: Any = None
 
             try:
                 stream = await self.client.aio.models.generate_content_stream(
@@ -729,6 +814,9 @@ class GeminiProvider(LLMProvider):
                             await _invoke_callback(on_chunk, chunk.text)
                         if hasattr(chunk, "candidates") and chunk.candidates:
                             for candidate in chunk.candidates:
+                                fr = getattr(candidate, "finish_reason", None)
+                                if fr is not None:
+                                    last_finish_reason = fr
                                 if hasattr(candidate, "content") and candidate.content and hasattr(candidate.content, "parts"):
                                     for p in candidate.content.parts:
                                         all_stream_parts.append(p)
@@ -744,6 +832,18 @@ class GeminiProvider(LLMProvider):
                             final_tokens = chunk.usage_metadata.candidates_token_count or 0
                     except Exception:
                         pass  # malformed chunk — skip
+
+                fr_str = str(last_finish_reason) if last_finish_reason else ""
+                if "MALFORMED_FUNCTION_CALL" in fr_str and not fn_calls:
+                    logger.warning("  [gemini] MALFORMED_FUNCTION_CALL in stream — retrying with mode=ANY (non-stream)")
+                    retry_opts: dict[str, Any] = {}
+                    for attr in ("max_output_tokens", "temperature", "system_instruction", "tools"):
+                        val = getattr(gemini_config, attr, None)
+                        if val is not None:
+                            retry_opts[attr] = val
+                    retry_opts["tool_config"] = {"function_calling_config": {"mode": "ANY"}}
+                    retry_config = types.GenerateContentConfig(**retry_opts)
+                    return await self._request_once(user_contents, retry_config, _malformed_retry=True)
 
                 return LLMResponse(
                     content="".join(chunks),
@@ -774,19 +874,203 @@ class GeminiProvider(LLMProvider):
         raise last_error  # type: ignore[misc]
 
 
-# ─── Fallback Provider ────────────────────────────────────────────────────
+# ─── Anthropic Provider ───────────────────────────────────────────────────
+
+try:
+    import anthropic as _anthropic_mod
+    _HAS_ANTHROPIC = True
+except ImportError:
+    _anthropic_mod = None  # type: ignore
+    _HAS_ANTHROPIC = False
+
+
+class AnthropicProvider(LLMProvider):
+    name = "anthropic"
+
+    def __init__(self, config: EngineConfig):
+        if not _HAS_ANTHROPIC:
+            raise ImportError(
+                "anthropic package not installed. Install with: pip install clawagents[anthropic]"
+            )
+        self.client = _anthropic_mod.AsyncAnthropic(api_key=config.anthropic_api_key)
+        self.model = config.anthropic_model
+        self._max_tokens = config.max_tokens
+        self._temperature = config.temperature
+
+    async def chat(
+        self,
+        messages: list[LLMMessage],
+        on_chunk: OnChunkCallback = None,
+        cancel_event: asyncio.Event | None = None,
+        tools: list[NativeToolSchema] | None = None,
+    ) -> LLMResponse:
+        system_parts = []
+        api_messages = []
+
+        for m in messages:
+            if m.role == "system":
+                system_parts.append(m.content if isinstance(m.content, str) else str(m.content))
+            elif m.role == "tool" and m.tool_call_id:
+                api_messages.append({
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": m.tool_call_id, "content": m.content}],
+                })
+            elif m.role == "assistant" and m.tool_calls_meta:
+                content_blocks = []
+                if m.content:
+                    content_blocks.append({"type": "text", "text": m.content})
+                for tc in m.tool_calls_meta:
+                    content_blocks.append({
+                        "type": "tool_use",
+                        "id": tc["id"],
+                        "name": tc["name"],
+                        "input": tc["args"],
+                    })
+                api_messages.append({"role": "assistant", "content": content_blocks})
+            else:
+                role = "assistant" if m.role == "assistant" else "user"
+                api_messages.append({"role": role, "content": m.content})
+
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "max_tokens": self._max_tokens,
+            "messages": api_messages,
+        }
+        if system_parts:
+            kwargs["system"] = "\n".join(system_parts)
+        if self._temperature > 0:
+            kwargs["temperature"] = self._temperature
+        if tools:
+            kwargs["tools"] = [
+                {
+                    "name": s.name,
+                    "description": s.description,
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            k: {"type": v.get("type", "string"), "description": v.get("description", "")}
+                            for k, v in s.parameters.items()
+                        },
+                        "required": [k for k, v in s.parameters.items() if v.get("required")],
+                    },
+                }
+                for s in tools
+            ]
+
+        if not on_chunk:
+            return await _with_retry("anthropic", lambda: self._request_once(kwargs))
+        return await self._stream_with_retry(kwargs, on_chunk, cancel_event)
+
+    async def _request_once(self, kwargs: dict[str, Any]) -> LLMResponse:
+        resp = await self.client.messages.create(**kwargs)
+        text_parts = []
+        tool_calls = []
+        for block in resp.content:
+            if block.type == "text":
+                text_parts.append(block.text)
+            elif block.type == "tool_use":
+                tool_calls.append(NativeToolCall(
+                    tool_name=block.name,
+                    args=dict(block.input) if block.input else {},
+                    tool_call_id=block.id,
+                ))
+
+        return LLMResponse(
+            content="".join(text_parts),
+            model=self.model,
+            tokens_used=(resp.usage.input_tokens + resp.usage.output_tokens) if resp.usage else 0,
+            tool_calls=tool_calls if tool_calls else None,
+        )
+
+    async def _stream_with_retry(
+        self,
+        kwargs: dict[str, Any],
+        on_chunk: OnChunkCallback,
+        cancel_event: asyncio.Event | None,
+    ) -> LLMResponse:
+        last_error: BaseException | None = None
+
+        for attempt in range(_MAX_RETRIES + 1):
+            if attempt > 0:
+                delay = _jittered_delay(attempt - 1)
+                logger.warning("  [anthropic] Retry %d/%d after %.1fs", attempt, _MAX_RETRIES, delay)
+                await asyncio.sleep(delay)
+
+            chunks: list[str] = []
+            tool_calls: list[NativeToolCall] = []
+            current_tool: dict[str, Any] | None = None
+            final_tokens = 0
+
+            try:
+                async with self.client.messages.stream(**kwargs) as stream:
+                    async for event in stream:
+                        if cancel_event and cancel_event.is_set():
+                            return LLMResponse(
+                                content="".join(chunks), model=self.model,
+                                tokens_used=final_tokens, partial=True,
+                            )
+
+                        if event.type == "content_block_start":
+                            if hasattr(event.content_block, "type"):
+                                if event.content_block.type == "tool_use":
+                                    current_tool = {
+                                        "id": event.content_block.id,
+                                        "name": event.content_block.name,
+                                        "input_json": "",
+                                    }
+                        elif event.type == "content_block_delta":
+                            if hasattr(event.delta, "text"):
+                                chunks.append(event.delta.text)
+                                await _invoke_callback(on_chunk, event.delta.text)
+                            elif hasattr(event.delta, "partial_json") and current_tool:
+                                current_tool["input_json"] += event.delta.partial_json
+                        elif event.type == "content_block_stop":
+                            if current_tool:
+                                tool_calls.append(NativeToolCall(
+                                    tool_name=current_tool["name"],
+                                    args=_repair_json(current_tool["input_json"] or "{}"),
+                                    tool_call_id=current_tool["id"],
+                                ))
+                                current_tool = None
+                        elif event.type == "message_delta":
+                            if hasattr(event.usage, "output_tokens"):
+                                final_tokens = event.usage.output_tokens
+
+                return LLMResponse(
+                    content="".join(chunks),
+                    model=self.model,
+                    tokens_used=final_tokens,
+                    tool_calls=tool_calls if tool_calls else None,
+                )
+
+            except Exception as exc:
+                last_error = exc
+                if chunks:
+                    return LLMResponse(
+                        content="".join(chunks), model=self.model,
+                        tokens_used=final_tokens, partial=True,
+                    )
+                if not _is_retryable(exc):
+                    break
+
+        raise last_error  # type: ignore[misc]
 
 
 # ─── Factory ──────────────────────────────────────────────────────────────
 
 
 def create_provider(model_name: str, config: EngineConfig) -> LLMProvider:
-    """
-    Create a single LLM provider. The provider is inferred from the model name:
-    names starting with "gemini" → GeminiProvider, everything else → OpenAIProvider.
-    """
-    if model_name.lower().startswith("gemini"):
+    """Create a single LLM provider inferred from model name."""
+    lower = model_name.lower()
+    if lower.startswith("gemini"):
+        if not _HAS_GEMINI:
+            raise ImportError(
+                "google-genai package not installed. Install with: pip install clawagents[gemini]"
+            )
         config.gemini_model = model_name
         return GeminiProvider(config)
+    if lower.startswith("claude") or lower.startswith("anthropic"):
+        config.anthropic_model = model_name
+        return AnthropicProvider(config)
     config.openai_model = model_name
     return OpenAIProvider(config)

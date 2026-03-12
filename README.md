@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-5.14.0-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-5.21.0-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -11,25 +11,110 @@
 
 ---
 
-ClawAgents is a **production-ready agentic framework** that gives LLMs the ability to read, write, and execute code — with built-in planning, memory, sandboxing, and a gateway server. It supports **OpenAI GPT-5** and **Google Gemini** out of the box, with a pluggable provider architecture for any LLM.
+ClawAgents is a **production-ready agentic framework** that gives LLMs the ability to read, write, and execute code — with built-in planning, memory, sandboxing, and a gateway server. It supports **OpenAI GPT-5**, **Google Gemini**, and **Anthropic Claude** out of the box, with a pluggable provider architecture for any LLM.
 
 Built by extracting and unifying the best architectural patterns from [OpenClaw](https://github.com/anthropics/openclaw) (~5,800 files) and [DeepAgents](https://github.com/langchain-ai/deepagents) (~1,400 LOC core), ClawAgents delivers **the same power at a fraction of the complexity**.
 
 ## Installation
 
 ```bash
-pip install clawagents
+pip install clawagents              # Core (OpenAI only)
+pip install clawagents[gemini]      # + Google Gemini support
+pip install clawagents[anthropic]   # + Anthropic Claude support
+pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 5.14.0** — Latest stable release (February 2026)
+> **Version 5.21.0** — Latest stable release (March 2026)
 
 ---
 
-## Quick Start
+## 30-Second Quick Start
+
+The fastest way to get going — scaffolds a `.env`, a `run_agent.py` starter script, and an `AGENTS.md` memory file:
+
+```bash
+pip install clawagents
+cd ~/my-project         # any project directory
+clawagents --init       # creates .env, run_agent.py, AGENTS.md
+```
+
+Then edit `.env` with your API key and run:
+
+```bash
+python run_agent.py
+```
+
+That's it. The generated `run_agent.py` includes commented-out examples for every provider (OpenAI, Gemini, Azure, Ollama, vLLM).
+
+### Where does `.env` go?
+
+ClawAgents loads `.env` from **the directory you run the command from** (your current working directory). Different projects can have different configurations.
+
+```
+~/my-project/
+├── .env              ← ClawAgents reads this when you run from ~/my-project/
+├── run_agent.py
+├── AGENTS.md
+└── src/
+```
+
+**Four ways to configure** (in priority order):
+
+1. **`create_claw_agent()` parameters** — highest priority, overrides everything
+2. **Shell environment variables** — `export OPENAI_API_KEY=sk-...` in `~/.zshrc` (works globally)
+3. **`CLAWAGENTS_ENV_FILE`** — set this env var to point to an explicit `.env` file path (useful for CI/Docker/multi-project)
+4. **`.env` file** — project-level config, loaded from `cwd/.env` or `cwd/../.env`
+
+A ready-to-use template is included in the repo:
+
+```bash
+cp .env.example .env   # then fill in your API key
+```
+
+Or run `clawagents --init` to generate one interactively.
+
+### CLI One-Liner
+
+```bash
+clawagents --task "List all Python files and summarize the project"
+```
+
+### Minimal Python Code
+
+```python
+import asyncio
+from clawagents import create_claw_agent
+
+async def main():
+    agent = create_claw_agent("gpt-5-mini")  # or "gemini-3-flash", "llama3.1", etc.
+    result = await agent.invoke("List all Python files in src/")
+    print(result.result)
+
+asyncio.run(main())
+```
+
+### Examples
+
+See the [`examples/`](examples/) directory for ready-to-run scripts:
+
+| File | Provider |
+|:---|:---|
+| [`01_openai.py`](examples/01_openai.py) | OpenAI (GPT-5, GPT-4o) |
+| [`02_gemini.py`](examples/02_gemini.py) | Google Gemini |
+| [`03_azure.py`](examples/03_azure.py) | Azure OpenAI |
+| [`04_local_ollama.py`](examples/04_local_ollama.py) | Ollama (local) |
+| [`05_local_vllm.py`](examples/05_local_vllm.py) | vLLM (local) |
+| [`06_bedrock.py`](examples/06_bedrock.py) | AWS Bedrock (via gateway) |
+| [`07_with_custom_tools.py`](examples/07_with_custom_tools.py) | Custom tools |
+| [`08_compare_samples.py`](examples/08_compare_samples.py) | Multi-sample comparison |
+
+---
+
+## Configuration
 
 ### 1. Configure your environment
 
-Create a `.env` file:
+Create a `.env` file (or run `clawagents --init` to generate one):
 
 ```env
 PROVIDER=gemini                    # or "openai"
@@ -56,7 +141,7 @@ OPENAI_MODEL=gpt-5-nano
 STREAMING=1
 CONTEXT_WINDOW=1000000
 MAX_TOKENS=8192
-TEMPERATURE=1                      # GPT-5 family requires temperature=1
+TEMPERATURE=0                      # 0 for deterministic output
 CLAW_TRAJECTORY=1
 CLAW_RETHINK=1
 CLAW_LEARN=1
@@ -108,11 +193,129 @@ result = await agent.invoke("Build the data pipeline")
 # Next run: lessons injected into system prompt automatically
 ```
 
-### 5. CLI mode
+### 6. Multi-Sample Comparison (GRPO-inspired)
+
+```python
+agent = create_claw_agent("gpt-5-mini", rethink=True)
+# Run the task 3 times, pick the best based on objective scoring
+result = await agent.compare("Fix the bug in app.py", n_samples=3)
+print(result["best_result"])   # best answer
+print(result["best_score"])    # objective score
+print(result["all_scores"])    # all samples with scores
+```
+
+### 7. Azure OpenAI
+
+```python
+agent = create_claw_agent(
+    "gpt-4o",                    # your Azure deployment name
+    api_key="your-azure-key",
+    base_url="https://myresource.openai.azure.com/",
+    api_version="2024-12-01-preview",
+    learn=True,
+)
+result = await agent.invoke("Analyze the codebase")
+```
+
+Or via `.env`:
+
+```env
+PROVIDER=openai
+OPENAI_API_KEY=your-azure-key
+OPENAI_MODEL=gpt-4o
+OPENAI_BASE_URL=https://myresource.openai.azure.com/
+OPENAI_API_VERSION=2024-12-01-preview
+```
+
+### 8. AWS Bedrock (via OpenAI-compatible gateway)
+
+Use [Bedrock Access Gateway](https://github.com/aws-samples/bedrock-access-gateway) or [LiteLLM proxy](https://docs.litellm.ai/docs/proxy/quick_start) to expose Bedrock models as an OpenAI-compatible API:
+
+```python
+agent = create_claw_agent(
+    "anthropic.claude-3-sonnet-20240229-v1:0",
+    base_url="http://localhost:8080/v1",
+    api_key="bedrock",           # gateway handles AWS auth
+)
+```
+
+Or via `.env`:
+
+```env
+OPENAI_API_KEY=bedrock
+OPENAI_MODEL=anthropic.claude-3-sonnet-20240229-v1:0
+OPENAI_BASE_URL=http://localhost:8080/v1
+```
+
+### 9. Local Models (Ollama / vLLM / LM Studio)
+
+Any OpenAI-compatible local server works out of the box:
+
+```python
+# Ollama (default port 11434)
+agent = create_claw_agent("llama3.1", base_url="http://localhost:11434/v1")
+
+# vLLM
+agent = create_claw_agent("Qwen/Qwen3-8B", base_url="http://localhost:8000/v1")
+
+# LM Studio
+agent = create_claw_agent("local-model", base_url="http://localhost:1234/v1")
+```
+
+Or via `.env`:
+
+```env
+# No API key needed for local models — just omit OPENAI_API_KEY
+OPENAI_MODEL=llama3.1
+OPENAI_BASE_URL=http://localhost:11434/v1
+```
+
+> **Tip:** For local models that emit `<think>...</think>` tokens (Qwen3, DeepSeek), thinking content is automatically detected, stripped from output, and preserved in trajectory records (Feature H).
+
+### 10. CLI
 
 ```bash
-python -m clawagents --task "Find all TODO comments in the codebase"
+# Scaffold a project (generates .env, run_agent.py, AGENTS.md)
+clawagents --init
+
+# Check your configuration
+clawagents --doctor
+
+# Run a task directly
+clawagents --task "Find all TODO comments in the codebase"
+
+# Inspect past run trajectories
+clawagents --trajectory        # last run
+clawagents --trajectory 5      # last 5 runs
+
+# Start the gateway server
+clawagents --serve --port 3000
+
+# Show all options
+clawagents --help
 ```
+
+### Typical First-Time Flow
+
+```bash
+pip install clawagents           # 1. Install
+clawagents --init                # 2. Scaffold .env, run_agent.py, AGENTS.md
+# edit .env with your API key    # 3. Configure
+clawagents --doctor              # 4. Verify setup
+clawagents --task "hello world"  # 5. Run your first task
+python run_agent.py              # 6. Or use the generated script
+```
+
+### CLI Reference
+
+| Command | Description |
+|:---|:---|
+| `clawagents --init` | Scaffold a starter project: `.env` (config template), `run_agent.py` (starter script with 5 provider options), `AGENTS.md` (memory file). Skips existing files. |
+| `clawagents --doctor` | Check configuration health: `.env` discovery, API keys, active model, LLM settings, PTRL flags, local endpoint reachability, trajectory history, `AGENTS.md` presence. |
+| `clawagents --task "..."` | Run a single task. Prints a startup banner (`provider=X model=Y env=Z ptrl=...`), executes the agent, prints the result to stdout. |
+| `clawagents --trajectory [N]` | Inspect the last N run summaries (default: 1). Shows run ID, model, task, duration, turns, tool calls, score, quality, failure breakdown, verified score, and judge verdict. Requires `CLAW_TRAJECTORY=1`. |
+| `clawagents --serve [--port N]` | Start the HTTP gateway server (default port 3000). Endpoints: `POST /chat`, `POST /chat/stream` (SSE), `GET /queue`, `GET /health`. |
+| `clawagents --help` | Show all options with examples. |
 
 ---
 
@@ -182,7 +385,7 @@ Traditional Stack (DeepAgents):           ClawAgents:
 
 ## Feature Matrix
 
-| Feature | ClawAgents v5.13 | DeepAgents | OpenClaw |
+| Feature | ClawAgents v5.20 | DeepAgents | OpenClaw |
 |:---|:---:|:---:|:---:|
 | ReAct loop | ✅ | ✅ | ✅ |
 | Tool loop detection | ✅ **soft + hard** | ❌ | ✅ |
@@ -211,6 +414,13 @@ Traditional Stack (DeepAgents):           ClawAgents:
 | Model-specific temperature override | ✅ | ❌ | ❌ |
 | Gemini 3 thought_signature support | ✅ | ❌ | ❌ |
 | Prompt-Time RL (PTRL) — learn from past runs | ✅ | ❌ | ❌ |
+| Deterministic verification (exit codes, tests) | ✅ | ❌ | ❌ |
+| GRPO-inspired multi-sample comparison | ✅ | ❌ | ❌ |
+| Task-type-aware verification | ✅ | ❌ | ❌ |
+| RFT-ready transition export | ✅ | ❌ | ❌ |
+| Adaptive rethink threshold | ✅ | ❌ | ❌ |
+| LLM-as-Judge verification | ✅ | ❌ | ❌ |
+| Thinking token preservation (`<think>`) | ✅ | ❌ | ❌ |
 
 ---
 
@@ -646,25 +856,50 @@ The agent **decides on its own** when to use a skill. If you ask it to "write a 
 
 ### `create_claw_agent(model, instruction, ...)`
 
-| Param | Type | Default | Description |
-|:---|:---|:---|:---|
-| `model` | `str \| LLMProvider \| None` | `None` | Model name or provider instance. `None` = auto-detect from env |
-| `instruction` | `str` | `None` | System instruction for the agent |
-| `tools` | `list` | `None` | Additional tools (built-in tools always included) |
-| `skills` | `str \| list` | auto-discover | Skill directories to load |
-| `memory` | `str \| list` | auto-discover | Memory files to inject |
-| `streaming` | `bool` | `True` | Enable streaming responses |
-| `sandbox` | `SandboxBackend` | `LocalBackend` | Pluggable sandbox for file/shell operations |
-| `context_window` | `int \| None` | from env / `1000000` | Token budget for compaction |
-| `max_tokens` | `int \| None` | from env / `8192` | Max output tokens per response |
-| `temperature` | `float \| None` | from env / `0.0` | LLM temperature (model-specific overrides apply) |
-| `trajectory` | `bool \| None` | from `CLAW_TRAJECTORY` / `False` | Enable trajectory logging + run scoring |
-| `rethink` | `bool \| None` | from `CLAW_RETHINK` / `False` | Enable consecutive-failure detection |
-| `learn` | `bool \| None` | from `CLAW_LEARN` / `False` | Enable PTRL: post-run self-analysis, pre-run lesson injection, enhanced rethink. Implies `trajectory=True` |
-| `max_iterations` | `int \| None` | from `MAX_ITERATIONS` / `200` | Max tool rounds before the agent stops |
-| `preview_chars` | `int \| None` | from `CLAW_PREVIEW_CHARS` / `120` | Max chars for tool-output previews in trajectory logs |
-| `response_chars` | `int \| None` | from `CLAW_RESPONSE_CHARS` / `500` | Max chars for LLM response text in trajectory records |
-| `on_event` | `callable` | `None` | Event callback |
+All parameters are **optional** — zero-config usage (`create_claw_agent()`) works if you have a `.env` with at least one API key.
+
+**Model & Provider**
+
+| Param | Type | Default | Required? | Description |
+|:---|:---|:---|:---:|:---|
+| `model` | `str \| LLMProvider \| None` | `None` | No | Model name (e.g. `"gpt-5-mini"`, `"gemini-3-flash"`, `"llama3.1"`), a pre-built `LLMProvider` instance, or `None` to auto-detect from env |
+| `api_key` | `str \| None` | `None` | No | API key. Auto-routed to OpenAI or Gemini based on model name. Falls back to `OPENAI_API_KEY` / `GEMINI_API_KEY` env vars. For local models: omit entirely (a placeholder is used automatically) |
+| `base_url` | `str \| None` | `None` | No | Custom endpoint URL for OpenAI-compatible APIs. Set this for **Azure OpenAI**, **AWS Bedrock** (via gateway), **Ollama**, **vLLM**, **LM Studio**, or any OpenAI-compatible server. Falls back to `OPENAI_BASE_URL` env var. Omit to use `api.openai.com` |
+| `api_version` | `str \| None` | `None` | No | API version string. **Only needed for Azure OpenAI** (e.g. `"2024-12-01-preview"`). Falls back to `OPENAI_API_VERSION` env var. Ignored for all other providers |
+
+**Agent Behavior**
+
+| Param | Type | Default | Required? | Description |
+|:---|:---|:---|:---:|:---|
+| `instruction` | `str \| None` | `None` | No | System prompt — what the agent should do and how it should behave |
+| `tools` | `list \| None` | `None` | No | Additional tools to register. Built-in tools (filesystem, exec, grep, etc.) are always included |
+| `skills` | `str \| list \| None` | auto-discover | No | Skill directories to load. Default: checks `./skills`, `./.skills`. Built-in ByteRover skill is always included. |
+| `memory` | `str \| list \| None` | auto-discover | No | Memory files to inject into system prompt. Default: checks `./AGENTS.md`, `./CLAWAGENTS.md` |
+| `sandbox` | `SandboxBackend` | `LocalBackend()` | No | Pluggable sandbox backend for file/shell operations. Use `InMemoryBackend` for testing |
+| `streaming` | `bool` | `True` | No | Enable streaming responses |
+| `use_native_tools` | `bool` | `True` | No | Use provider native function calling. Set `False` for text-based JSON tool calls |
+| `on_event` | `callable \| None` | `None` | No | Callback for agent events (tool calls, errors, context messages, etc.) |
+
+**LLM Tuning**
+
+| Param | Type | Default | Required? | Description |
+|:---|:---|:---|:---:|:---|
+| `context_window` | `int \| None` | env `CONTEXT_WINDOW` / `1000000` | No | Token budget. When messages exceed this, older turns are compacted |
+| `max_tokens` | `int \| None` | env `MAX_TOKENS` / `8192` | No | Max output tokens per LLM response. Sent as `max_completion_tokens` (OpenAI) or `max_output_tokens` (Gemini) |
+| `temperature` | `float \| None` | env `TEMPERATURE` / `0.0` | No | LLM sampling temperature. Automatically overridden for reasoning models (o1/o3/o4-mini, gpt-5/gpt-5-mini/gpt-5-turbo → 1.0). Non-reasoning models (gpt-5-nano, gpt-5-micro, gpt-4o) respect the configured value |
+| `max_iterations` | `int \| None` | env `MAX_ITERATIONS` / `200` | No | Max tool rounds before the agent stops and returns |
+
+**PTRL & Trajectory**
+
+| Param | Type | Default | Required? | Description |
+|:---|:---|:---|:---:|:---|
+| `trajectory` | `bool \| None` | env `CLAW_TRAJECTORY` / `False` | No | Enable trajectory logging. Records every turn as NDJSON to `.clawagents/trajectories/` and scores each run |
+| `rethink` | `bool \| None` | env `CLAW_RETHINK` / `False` | No | Enable consecutive-failure detection. Injects a "rethink" prompt with adaptive threshold after repeated tool failures |
+| `learn` | `bool \| None` | env `CLAW_LEARN` / `False` | No | Enable Prompt-Time Reinforcement Learning. Includes: post-run self-analysis, pre-run lesson injection, LLM-as-Judge verification (Feature G), and thinking token preservation (Feature H). Implies `trajectory=True` |
+| `preview_chars` | `int \| None` | env `CLAW_PREVIEW_CHARS` / `120` | No | Max chars for tool-output previews in trajectory logs |
+| `response_chars` | `int \| None` | env `CLAW_RESPONSE_CHARS` / `500` | No | Max chars for LLM response text in trajectory records |
+
+> **Priority:** Explicit parameter > environment variable > default value. You never need to set both.
 
 ### Hooks & Access Control
 
@@ -692,6 +927,17 @@ agent.before_tool = lambda name, args: True          # return False to block
 agent.after_tool = lambda name, args, result: result # modify tool results
 ```
 
+### Instance Methods
+
+| Method | Description |
+|:---|:---|
+| `await agent.invoke(task, max_iterations=None)` | Run the agent on a task. Returns `AgentState` with `.result`, `.status`, `.iterations`, `.tool_calls` |
+| `await agent.compare(task, n_samples=3, max_iterations=None)` | Run the task N times and return the best result based on objective scoring (GRPO-inspired). Returns `{"best_result", "best_score", "best_index", "all_scores"}` |
+| `agent.block_tools(*names)` | Block specific tools at runtime |
+| `agent.allow_only_tools(*names)` | Whitelist-only mode — all other tools blocked |
+| `agent.inject_context(text)` | Inject extra context into every LLM call |
+| `agent.truncate_output(max_chars)` | Limit tool output size |
+
 ---
 
 ## Auto-Discovery
@@ -701,7 +947,7 @@ The agent factory automatically discovers project files:
 | What | Default locations checked |
 |:---|:---|
 | **Memory** | `./AGENTS.md`, `./CLAWAGENTS.md` |
-| **Skills** | `./skills`, `./.skills`, `./skill`, `./.skill`, `./Skills` |
+| **Skills** | `./skills`, `./.skills`, `./skill`, `./.skill`, `./Skills`. Built-in [ByteRover](https://clawhub.ai/byteroverinc/byterover) skill is always included. **CLI:** when the agent runs `brv`, it is executed via `npx byterover-cli` so Node/npx is sufficient (no global install required). |
 
 Override with explicit paths:
 ```python
@@ -723,7 +969,7 @@ Loads `AGENTS.md` files and injects content into every LLM call. Use for project
 When the conversation exceeds **75% of `CONTEXT_WINDOW`**:
 1. Full history **offloaded** to `.clawagents/history/compacted_*.json`
 2. Older messages **summarized** into `[Compacted History]`
-3. Last 6 messages kept intact
+3. Last 20 messages kept intact
 
 This provides **unlimited conversation length** with full audit trail preservation.
 
@@ -779,23 +1025,45 @@ snapshot = mem.snapshot()  # deterministic state capture
 
 ## Environment Variables
 
-| Variable | Default | Description |
-|:---|:---|:---|
-| `PROVIDER` | auto-detect | `openai` or `gemini` |
-| `OPENAI_API_KEY` | — | OpenAI API key |
-| `OPENAI_MODEL` | `gpt-5-nano` | OpenAI model |
-| `GEMINI_API_KEY` | — | Gemini API key |
-| `GEMINI_MODEL` | `gemini-3-flash-preview` | Gemini model |
-| `STREAMING` | `1` | `1` = enabled, `0` = disabled |
-| `CONTEXT_WINDOW` | `1000000` | Token budget for compaction |
-| `MAX_TOKENS` | `8192` | Max output tokens per response (sent as `max_completion_tokens` for OpenAI, `max_output_tokens` for Gemini) |
-| `TEMPERATURE` | `0.0` | LLM temperature. Automatically overridden for models that require a fixed value (e.g. GPT-5 family → 1.0, o1/o3 series → 1.0) |
-| `CLAW_TRAJECTORY` | `0` | `1` = enable trajectory logging. Logs every turn and scores each run to `.clawagents/trajectories/runs.jsonl` |
-| `CLAW_RETHINK` | `0` | `1` = enable consecutive-failure detection. Injects a "rethink" prompt after 3 consecutive meaningful tool failures |
-| `CLAW_LEARN` | `0` | `1` = enable Prompt-Time Reinforcement Learning. Post-run self-analysis extracts lessons to `.clawagents/lessons.md`; pre-run injection + enhanced rethink use them. Implies `CLAW_TRAJECTORY=1` |
-| `MAX_ITERATIONS` | `200` | Max tool rounds before the agent stops. Override per-run via `agent.invoke(task, max_iterations=N)` |
-| `CLAW_PREVIEW_CHARS` | `120` | Max chars for tool-output previews in trajectory logs and events |
-| `CLAW_RESPONSE_CHARS` | `500` | Max chars for LLM response text stored in trajectory records |
+All environment variables are **optional**. They serve as defaults when the corresponding `create_claw_agent()` parameter is not provided. Explicit parameters always take priority.
+
+**General**
+
+| Variable | Default | Required? | Description |
+|:---|:---|:---:|:---|
+| `CLAWAGENTS_ENV_FILE` | *(unset)* | No | Explicit path to a `.env` file. Overrides default `cwd/.env` discovery. Useful for CI, Docker, or multi-project setups |
+
+**Provider & Model** — set at least one API key (or `OPENAI_BASE_URL` for local models)
+
+| Variable | Default | Required? | Description |
+|:---|:---|:---:|:---|
+| `PROVIDER` | auto-detect | No | Hint: `"openai"` or `"gemini"`. Auto-detected from which API key is set |
+| `OPENAI_API_KEY` | — | **Yes** *(for OpenAI/Azure)* | OpenAI or Azure API key. **Not needed for local models** — when `OPENAI_BASE_URL` is set, a placeholder is used automatically |
+| `OPENAI_MODEL` | `gpt-5-nano` | No | Model name, Azure deployment name, or local model ID (e.g. `llama3.1`) |
+| `OPENAI_BASE_URL` | *(unset)* | No | Custom endpoint for OpenAI-compatible APIs: Azure, Bedrock gateway, Ollama, vLLM, LM Studio. Omit to use `api.openai.com` |
+| `OPENAI_API_VERSION` | *(unset)* | No | **Azure only.** API version string (e.g. `2024-12-01-preview`). Ignored by all other providers |
+| `GEMINI_API_KEY` | — | **Yes** *(for Gemini)* | Google Gemini API key |
+| `GEMINI_MODEL` | `gemini-3-flash-preview` | No | Gemini model name |
+
+**LLM Tuning**
+
+| Variable | Default | Required? | Description |
+|:---|:---|:---:|:---|
+| `STREAMING` | `1` | No | `1` = streaming enabled, `0` = disabled |
+| `CONTEXT_WINDOW` | `1000000` | No | Token budget. Older messages are compacted when exceeded |
+| `MAX_TOKENS` | `8192` | No | Max output tokens per response (`max_completion_tokens` for OpenAI, `max_output_tokens` for Gemini) |
+| `TEMPERATURE` | `0.0` | No | Sampling temperature. Auto-overridden for reasoning models (o-series + gpt-5/gpt-5-mini/gpt-5-turbo → 1.0). Non-reasoning models (gpt-5-nano, gpt-5-micro, gpt-4o) use the configured value |
+| `MAX_ITERATIONS` | `200` | No | Max tool rounds before the agent stops. Override per-run: `agent.invoke(task, max_iterations=N)` |
+
+**PTRL & Trajectory Flags** — all off by default, opt-in with `1`/`true`/`yes`
+
+| Variable | Default | Required? | Description |
+|:---|:---|:---:|:---|
+| `CLAW_TRAJECTORY` | `0` | No | Enable trajectory logging. Records every turn + scores each run to `.clawagents/trajectories/` |
+| `CLAW_RETHINK` | `0` | No | Enable consecutive-failure detection + adaptive rethink injection |
+| `CLAW_LEARN` | `0` | No | Enable full PTRL: lesson extraction, injection, LLM-as-Judge, and thinking token preservation. Implies `CLAW_TRAJECTORY=1` |
+| `CLAW_PREVIEW_CHARS` | `120` | No | Max chars for tool-output previews in trajectory logs |
+| `CLAW_RESPONSE_CHARS` | `500` | No | Max chars for LLM response text in trajectory records |
 
 ---
 
@@ -815,6 +1083,107 @@ python -m pytest tests/ -v -m benchmark
 ---
 
 ## Changelog
+
+### v5.21.0 — Context Engine, Loop Detection & Compaction Overhaul
+
+8 improvements inspired by the latest OpenClaw architecture:
+
+| Feature | Description |
+|:---|:---|
+| **Chunked compaction with retry** | Compaction now splits old messages into ~30K-token chunks, summarizes each separately with up to 3 retries (exponential backoff), and explicitly preserves file paths, function names, error messages, and commands verbatim |
+| **Better loop detection** | Result hashing detects "different args, same result" stalls; ping-pong detection catches A→B→A→B oscillation; global circuit breaker hard-stops at 30 no-progress calls |
+| **Context pruning (soft-trim)** | New `_soft_trim_messages` runs at 60% context usage (before the 75% compaction trigger). Trims old tool results >1000 chars, removes duplicates, and stubs stale image data |
+| **Skill eligibility gating** | Skills can declare `requires:` in YAML frontmatter (`os`, `bins`, `env`). Ineligible skills are filtered at load time |
+| **Skill prompt budget** | Max 20 skills / 4000 chars injected into the system prompt. Full list accessible via `list_skills` |
+| **Control token sanitization** | Strips leaked model control tokens (`<\|assistant\|>`, `<\|endoftext\|>`, full-width variants) from final output |
+| **Head+tail truncation** | Eviction fallback and content preview now use head+tail (preserving error messages at the end). Also fixes a bug where few-line, huge-character content bypassed preview truncation |
+| **Pluggable context engine** | New `ContextEngine` ABC with `after_turn`, `compact`, `bootstrap`, `cleanup` lifecycle hooks. `DefaultContextEngine` is a no-op pass-through. Registry: `register_context_engine()` / `resolve_context_engine()` |
+
+### v5.20.4 — Gemini MALFORMED_FUNCTION_CALL Retry
+
+| Feature | Description |
+|:---|:---|
+| **Gemini malformed FC retry** | When Gemini returns `finish_reason=MALFORMED_FUNCTION_CALL` with 0 parts (common with complex parallel tool calls), the provider now automatically retries with `tool_config.mode=ANY` instead of stopping the agent |
+| **Streaming + non-streaming** | Fix applied to both streaming (`_stream_with_retry`) and non-streaming (`_request_once`) code paths |
+| **Recursion guard** | `_malformed_retry` flag prevents infinite retry loops if mode=ANY also fails |
+
+### v5.20.3 — GPT-5 Temperature Corrections
+
+| Feature | Description |
+|:---|:---|
+| **GPT-5-nano temperature** | Live API tests confirmed `gpt-5-nano` requires `temperature=1` (not 0). Fixed in `_FIXED_TEMPERATURE_MODELS` |
+
+### v5.20.0 — Temperature & Compaction Fixes
+
+| Feature | Description |
+|:---|:---|
+| **Temperature fix** | GPT-5 models no longer forced to `temperature=1.0`. Only o-series models (o1, o3, o4-mini) retain the fixed override. This restores deterministic behavior when `TEMPERATURE=0` is set |
+| **Compaction overhaul** | Context compaction no longer causes the agent to "forget" what it was doing. Five improvements: (1) `RECENT_MESSAGES_TO_KEEP` increased from 6 → 20, (2) tool call/result pairs are never split, (3) summary prompt now includes original task + structured preservation instructions, (4) compacted summary inserted as `role="user"` with `[System — Compacted History]` prefix instead of `role="assistant"`, (5) text log for summarization includes structured `[TOOL CALLS]` and `[TOOL RESULT]` markers |
+| **Debug cleanup** | All development instrumentation removed from production code |
+
+### v5.19.0 — Anthropic Provider, Security, Architecture Overhaul
+
+| Feature | Description |
+|:---|:---|
+| **Anthropic/Claude provider** | First-class support for Claude models via `ANTHROPIC_API_KEY`. Install with `pip install clawagents[anthropic]` |
+| **Optional Gemini** | `google-genai` is now an optional dependency. Install with `pip install clawagents[gemini]` or `pip install clawagents[all]` |
+| **`py.typed` + `__version__`** | PEP 561 type stub marker and `clawagents.__version__` export for downstream tools |
+| **Lazy config loading** | No more module-level side effects — `.env` discovery happens on first `load_config()` call |
+| **Lazy `Path.cwd()`** | All module-level `Path.cwd()` calls replaced with lazy functions — safe for import from any directory |
+| **Gateway authentication** | `GATEWAY_API_KEY` env var enables Bearer token auth on POST endpoints |
+| **CORS support** | Gateway now supports `GATEWAY_CORS_ORIGINS` for cross-origin requests |
+| **Improved blocked patterns** | Expanded dangerous command detection with regex matching |
+| **API key masking** | `clawagents --doctor` now masks keys (shows `********...last4`) |
+| **Azure detection** | New `OPENAI_API_TYPE=azure` env var for explicit Azure OpenAI configuration |
+| **Global timeout** | `--timeout N` CLI flag and `CLAW_TIMEOUT` env var for agent run time limits |
+| **`--verbose` / `--quiet`** | CLI flags for controlling output verbosity |
+| **`--prune-trajectories N`** | Delete trajectory files older than N days |
+| **Lesson export/import** | `export_lessons()` / `import_lessons()` for sharing lessons between projects |
+| **Trajectory pruning** | `prune_trajectories(max_age_days)` utility function |
+| **`pydantic-settings`** | Now properly listed as a dependency (was missing) |
+| **pyproject.toml metadata** | Added license, authors, classifiers, URLs, optional dependency groups |
+| **New tests** | Tests for `_repair_json`, trajectory recorder, config module |
+
+### v5.18.0 — Doctor, Trajectory Inspector & Config Improvements
+
+| Feature | Description |
+|:---|:---|
+| **`clawagents --doctor`** | New diagnostic command checks `.env` discovery, API keys, active model, LLM settings, PTRL flags, local endpoint reachability, trajectory history, and `AGENTS.md` presence |
+| **`clawagents --trajectory [N]`** | Inspect the last N run summaries: score, quality, failures, judge verdict, duration — human-readable trajectory output |
+| **Startup banner** | Every `--task` and `--serve` now prints `provider=X model=Y env=Z ptrl=...` for instant visibility into active config |
+| **`CLAWAGENTS_ENV_FILE`** | New env var to explicitly point to a `.env` file path. Priority: `CLAWAGENTS_ENV_FILE` > `cwd/.env` > `cwd/../.env`. Useful for CI, Docker, multi-project |
+| **Publish hygiene** | GitHub releases no longer include `.clawagents/`, `.pytest_cache/`, logs, or other runtime artifacts |
+| **Config/docs consistency tests** | 6 pytest tests verify every `EngineConfig` field appears in `.env.example` and `README.md` |
+| **`--port` in TypeScript** | Gateway server port now configurable via `--port N` in TypeScript CLI |
+
+### v5.17.0 — Quick Start Scaffold & Examples
+
+| Feature | Description |
+|:---|:---|
+| **`clawagents --init`** | New CLI command scaffolds a starter project in the current directory: generates `.env` (with all providers commented out), `run_agent.py` (ready-to-run starter script with 5 provider options), and `AGENTS.md` (memory template) |
+| **`clawagents --help`** | Shows usage with examples, quick start instructions |
+| **`clawagents --task`** | Run a single task from the command line |
+| **`clawagents --serve`** | Start the HTTP gateway server from CLI |
+| **Examples directory** | 8 ready-to-run example scripts: OpenAI, Gemini, Azure, Ollama, vLLM, Bedrock, custom tools, and multi-sample comparison |
+| **README overhaul** | New "30-Second Quick Start" section, examples table, clearer onboarding flow |
+
+### v5.16.0 — LLM-as-Judge & Thinking Token Preservation
+
+| Feature | Description |
+|:---|:---|
+| **G. LLM-as-Judge verification** | After each run (when `learn=True`), a separate, focused LLM call evaluates whether the task was actually accomplished. Returns a 0-3 score with justification — more reliable than heuristic scoring. Results stored as `judge_score` and `judge_justification` on `RunSummary` |
+| **H. Thinking token preservation** | Models like Qwen3 and DeepSeek that emit `<think>...</think>` blocks are now fully supported. Thinking content is extracted before tool-call parsing, preserved on messages and trajectory records, and stripped from visible output. Available via `strip_thinking_tokens()` utility |
+
+### v5.15.0 — Deterministic Verification & GRPO-Inspired Comparison
+
+| Feature | Description |
+|:---|:---|
+| **A. Deterministic rewards** | Tool execution results (exit codes, test pass/fail counts) are now used as objective ground truth for scoring, replacing pure LLM self-assessment. Each turn and run summary includes `deterministic_score` and `verified_score` fields |
+| **B. Multi-sample comparison** | New `agent.compare(task, n_samples=3)` method runs the same task N times and picks the best result using objective scoring — inspired by SkyRL's Group Relative Policy Optimization (GRPO) |
+| **C. Task-type-aware verification** | Auto-detects task type (coding/file/search/refactor/general) and applies type-specific verifiers. Coding tasks use test results; file tasks check write success; refactoring checks edits + tests |
+| **D. Progressive context caching** | System prompt token count is computed once and cached, avoiding redundant re-counting on every turn. Logged at startup for budget visibility |
+| **E. RFT-ready transitions** | Each trajectory now exports `{run_id}_rft.json` with (observation, action, reward, done) tuples per step — structured for future Rejection Fine-Tuning pipelines |
+| **F. Adaptive rethink threshold** | Rethink trigger threshold now adjusts dynamically: complex tasks (coding/refactor) get more patience (threshold=5), simple tasks (search/file) trigger sooner (threshold=3), and late in runs threshold drops to minimum (2) |
 
 ### v5.14.0 — SkyRL-Inspired PTRL Improvements
 
@@ -888,7 +1257,7 @@ python -m pytest tests/ -v -m benchmark
 
 | Feature | Description |
 |:---|:---|
-| 🌡️ **Fixed-temperature models** | GPT-5 family and o1/o3/o4 series auto-override to `temperature=1.0` |
+| 🌡️ **Fixed-temperature models** | Reasoning models (o-series, gpt-5, gpt-5-mini, gpt-5-turbo) auto-override to `temperature=1.0`. Non-reasoning models (gpt-5-nano, gpt-5-micro, gpt-4o) respect configured temperature |
 | 🌡️ **Configurable temperature** | `TEMPERATURE` env var + `temperature` parameter on `create_claw_agent` |
 
 ### v5.6.0 — LLM Parameter Fixes

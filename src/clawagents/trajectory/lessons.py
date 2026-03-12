@@ -27,8 +27,11 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-_CLAWAGENTS_DIR = Path.cwd() / ".clawagents"
-_LESSONS_FILE = _CLAWAGENTS_DIR / "lessons.md"
+def _get_clawagents_dir() -> Path:
+    return Path.cwd() / ".clawagents"
+
+def _get_lessons_file() -> Path:
+    return _get_clawagents_dir() / "lessons.md"
 _MAX_LESSONS = 50
 _MAX_LESSONS_CHARS = 4000
 _LESSON_MAX_AGE_RUNS = 50   # Feature 2: drop lessons older than this many runs
@@ -41,10 +44,12 @@ concise, actionable lessons.
 
 ## Run Summary
 - Task: {task}
+- Task type: {task_type}
 - Outcome: {outcome}
 - Finish reason: {finish_reason}
 - Run score: {run_score}/3  (3=clean, 2=efficient, 1=messy success, 0=ambiguous, -1=failed)
 - Quality: {quality}
+- Verified score: {verified_score} (objective, from tool outputs; confidence={verified_confidence}, method={verified_method})
 - Total turns: {total_turns}
 - Mid-run failures: {mid_run_failures}
 - Format errors: {format_failures} (bad JSON, wrong params, unknown tools)
@@ -60,6 +65,7 @@ Based on this trajectory:
 2. Were failures FORMAT errors (fixable by correcting syntax) or LOGIC errors (need new strategy)?
 3. What worked? (successful approaches, efficient patterns)
 4. What should the agent do differently next time?
+5. If the verified score differs from the self-assessed run score, explain why (the verified score is objective ground truth from actual tool outputs).
 
 Respond with a markdown list of 2-5 concise lessons. Each lesson should be a \
 single line starting with "- ". Focus on ACTIONABLE advice, not vague platitudes.
@@ -130,12 +136,17 @@ async def extract_lessons(
     from clawagents.providers.llm import LLMMessage
 
     key_turns = _extract_key_turns(turns)
+    v_score = summary.get("verified_score")
     prompt = _SELF_ANALYSIS_PROMPT.format(
         task=summary.get("task", "unknown"),
+        task_type=summary.get("task_type", "general"),
         outcome=summary.get("outcome", "unknown"),
         finish_reason=summary.get("finish_reason", "unknown"),
         run_score=summary.get("run_score", 0),
         quality=summary.get("quality", "unknown"),
+        verified_score=f"{v_score:.2f}" if v_score is not None else "N/A",
+        verified_confidence=summary.get("verified_confidence", "N/A"),
+        verified_method=summary.get("verified_method", "N/A"),
         total_turns=summary.get("total_turns", 0),
         mid_run_failures=summary.get("mid_run_failures", 0),
         format_failures=summary.get("format_failures", 0),
@@ -165,12 +176,22 @@ def should_extract_lessons(summary: dict[str, Any]) -> bool:
     SkyRL-inspired: only extract lessons when the trajectory has contrast
     (both successes and failures), not when it's uniformly good or bad.
     Zero-variance runs carry no learning signal.
+
+    Feature A: When verified_score is available and disagrees with run_score,
+    that's a high-signal run worth learning from.
     """
     quality = summary.get("quality", "")
     run_score = summary.get("run_score", 0)
     has_mixed = summary.get("has_mixed_outcomes", False)
     mid_run_failures = summary.get("mid_run_failures", 0)
     total_turns = summary.get("total_turns", 0)
+    verified_score = summary.get("verified_score")
+
+    # Feature A: score disagreement is high signal
+    if verified_score is not None:
+        run_normalized = run_score / 3.0
+        if abs(run_normalized - verified_score) > 0.4:
+            return True
 
     # Always extract from failed runs with at least some turns (negative examples)
     if run_score <= -1 and total_turns >= 3:
@@ -206,7 +227,7 @@ def save_lessons(
 ) -> None:
     """Append new lessons to .clawagents/lessons.md with staleness metadata."""
     try:
-        _CLAWAGENTS_DIR.mkdir(parents=True, exist_ok=True)
+        _get_clawagents_dir().mkdir(parents=True, exist_ok=True)
 
         # Feature 2: tag with timestamp and model for staleness decay
         ts = int(time.time())
@@ -215,8 +236,9 @@ def save_lessons(
         entry = header + new_lessons.strip() + "\n"
 
         existing = ""
-        if _LESSONS_FILE.exists():
-            existing = _LESSONS_FILE.read_text(encoding="utf-8")
+        lessons_file = _get_lessons_file()
+        if lessons_file.exists():
+            existing = lessons_file.read_text(encoding="utf-8")
 
         combined = existing + "\n" + entry
 
@@ -226,8 +248,8 @@ def save_lessons(
         if len("\n".join(lines)) > _MAX_LESSONS_CHARS * 3:
             lines = lines[-((_MAX_LESSONS * 3)):]
 
-        _LESSONS_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        logger.debug("PTRL: saved lessons to %s", _LESSONS_FILE)
+        lessons_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        logger.debug("PTRL: saved lessons to %s", lessons_file)
     except Exception:
         logger.debug("PTRL: failed to save lessons", exc_info=True)
 
@@ -241,9 +263,10 @@ def load_lessons(max_chars: int = _MAX_LESSONS_CHARS, max_age_s: int = 0) -> str
     Returns empty string if no lessons exist or file is not readable.
     """
     try:
-        if not _LESSONS_FILE.exists():
+        lessons_file = _get_lessons_file()
+        if not lessons_file.exists():
             return ""
-        text = _LESSONS_FILE.read_text(encoding="utf-8").strip()
+        text = lessons_file.read_text(encoding="utf-8").strip()
         if not text:
             return ""
 
@@ -330,3 +353,41 @@ def build_rethink_with_lessons(
         )
 
     return "\n".join(parts)
+
+
+def export_lessons(output_path: str | Path | None = None) -> str:
+    """Export current lessons to a JSON file. Returns the file path."""
+    lessons = load_lessons(max_chars=999999)
+    path = Path(output_path) if output_path else _get_clawagents_dir() / "lessons_export.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {
+        "version": 1,
+        "exported_at": int(time.time()),
+        "lessons_md": lessons,
+    }
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    return str(path)
+
+
+def import_lessons(input_path: str | Path) -> bool:
+    """Import lessons from a JSON export file. Returns True on success."""
+    try:
+        path = Path(input_path)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if data.get("version") != 1 or not data.get("lessons_md"):
+            logger.warning("Invalid lessons export format")
+            return False
+
+        _get_clawagents_dir().mkdir(parents=True, exist_ok=True)
+        lessons_file = _get_lessons_file()
+
+        existing = ""
+        if lessons_file.exists():
+            existing = lessons_file.read_text(encoding="utf-8")
+
+        combined = existing + "\n\n## Imported Lessons\n" + data["lessons_md"]
+        lessons_file.write_text(combined.strip() + "\n", encoding="utf-8")
+        return True
+    except Exception:
+        logger.debug("Failed to import lessons", exc_info=True)
+        return False

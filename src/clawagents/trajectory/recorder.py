@@ -24,7 +24,8 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_TRAJECTORIES_DIR = Path.cwd() / ".clawagents" / "trajectories"
+def _get_trajectories_dir() -> Path:
+    return Path.cwd() / ".clawagents" / "trajectories"
 
 # Tools whose results are not meaningful reward signals (gameable / no side effects)
 _SCORELESS_TOOLS: frozenset[str] = frozenset({
@@ -62,6 +63,10 @@ class TurnRecord:
     cumulative_score: int = 0
     observation_context: str = ""       # what agent saw before deciding (Feature 4)
     productivity_score: float = 0.0     # per-step productivity: -1.0 to 1.0 (Feature 4)
+    deterministic_score: float | None = None  # objective score from exec tools (Feature A)
+    prompt_token_count: int = 0         # tokens in prompt at this step (Feature E: RFT-ready)
+    response_token_count: int = 0       # tokens in response at this step (Feature E: RFT-ready)
+    thinking: str | None = None         # preserved <think> content (Feature H)
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -83,6 +88,12 @@ class RunSummary:
     logic_failures: int = 0   # count of logic-type failures (Feature 3)
     has_mixed_outcomes: bool = False    # True if run had both successes and failures (Feature 1)
     finish_reason: str = ""   # why the run ended (Feature 4)
+    task_type: str = ""       # auto-detected: "coding"|"file"|"search"|"refactor"|"general" (Feature C)
+    verified_score: float | None = None  # deterministic score from tool outputs (Feature A)
+    verified_confidence: str = ""        # "high"|"medium"|"low" (Feature A)
+    verified_method: str = ""            # how the score was computed (Feature A)
+    judge_score: int | None = None       # LLM-as-Judge score 0-3 (Feature G)
+    judge_justification: str = ""        # LLM judge's reasoning (Feature G)
     duration_s: float = 0.0
     tokens_total: int = 0
     trajectory_file: str = ""
@@ -238,13 +249,13 @@ class TrajectoryRecorder:
         self._mid_run_failures = 0
         self._has_successes = False
         self._has_failures = False
-        self._path = _TRAJECTORIES_DIR / f"{self.run_id}.jsonl"
+        self._path = _get_trajectories_dir() / f"{self.run_id}.jsonl"
         self._t0 = time.monotonic()
         self._ensure_dir()
 
     def _ensure_dir(self) -> None:
         try:
-            _TRAJECTORIES_DIR.mkdir(parents=True, exist_ok=True)
+            _get_trajectories_dir().mkdir(parents=True, exist_ok=True)
         except Exception:
             logger.debug("Failed to create trajectories directory", exc_info=True)
 
@@ -256,6 +267,9 @@ class TrajectoryRecorder:
         tool_calls: list[ToolCallRecord] | None = None,
         metadata: dict[str, Any] | None = None,
         observation_context: str = "",
+        prompt_token_count: int = 0,
+        response_token_count: int = 0,
+        thinking: str | None = None,
     ) -> TurnRecord:
         if model and not self.model:
             self.model = model
@@ -278,6 +292,17 @@ class TrajectoryRecorder:
         # Feature 4: per-step productivity
         productivity = _compute_productivity(calls, self._cumulative_score, len(self._turns))
 
+        # Feature A: deterministic score from execution tools
+        det_score = None
+        try:
+            from clawagents.trajectory.verifier import compute_deterministic_score
+            call_dicts = [{"tool_name": c.tool_name, "success": c.success,
+                           "output_preview": c.output_preview, "error": c.error}
+                          for c in calls]
+            det_score = compute_deterministic_score(call_dicts)
+        except Exception:
+            pass
+
         self._cumulative_score += score
         self._total_tokens += tokens_used
 
@@ -293,6 +318,10 @@ class TrajectoryRecorder:
             cumulative_score=self._cumulative_score,
             observation_context=observation_context[:300] if observation_context else "",
             productivity_score=productivity,
+            deterministic_score=det_score,
+            prompt_token_count=prompt_token_count,
+            response_token_count=response_token_count,
+            thinking=thinking[:500] if thinking else None,
             metadata=metadata or {},
         )
         self._turns.append(turn)
@@ -339,6 +368,22 @@ class TrajectoryRecorder:
         }
         finish_reason = finish_reason_map.get(outcome, outcome)
 
+        # Feature C: task-type detection + Feature A: deterministic verification
+        task_type = ""
+        verified_score = None
+        verified_confidence = ""
+        verified_method = ""
+        try:
+            from clawagents.trajectory.verifier import detect_task_type, verify_task_outcome
+            task_type = detect_task_type(self.task)
+            turn_dicts = [asdict(t) for t in self._turns]
+            result = verify_task_outcome(task_type, turn_dicts, outcome)
+            verified_score = result.get("verified_score")
+            verified_confidence = result.get("confidence", "")
+            verified_method = result.get("method", "")
+        except Exception:
+            logger.debug("Verification failed", exc_info=True)
+
         summary = RunSummary(
             run_id=self.run_id,
             task=self.task[:200],
@@ -356,6 +401,10 @@ class TrajectoryRecorder:
             logic_failures=logic_failures,
             has_mixed_outcomes=has_mixed,
             finish_reason=finish_reason,
+            task_type=task_type,
+            verified_score=verified_score,
+            verified_confidence=verified_confidence,
+            verified_method=verified_method,
             duration_s=round(elapsed, 2),
             tokens_total=self._total_tokens,
             trajectory_file=str(self._path),
@@ -366,13 +415,92 @@ class TrajectoryRecorder:
 
     def _write_summary(self, summary: RunSummary) -> None:
         try:
-            runs_file = _TRAJECTORIES_DIR / "runs.jsonl"
+            runs_file = _get_trajectories_dir() / "runs.jsonl"
             data = asdict(summary)
             with open(runs_file, "a", encoding="utf-8") as f:
                 f.write(json.dumps(data, default=str) + "\n")
         except Exception:
             logger.debug("Failed to write run summary", exc_info=True)
 
+        # Feature E: export RFT-ready transitions
+        try:
+            rft_file = _get_trajectories_dir() / f"{self.run_id}_rft.json"
+            transitions = self.export_rft_transitions()
+            rft_file.write_text(json.dumps({
+                "run_id": self.run_id,
+                "task": self.task,
+                "model": self.model,
+                "outcome": summary.outcome,
+                "run_score": summary.run_score,
+                "quality": summary.quality,
+                "verified_score": summary.verified_score,
+                "task_type": summary.task_type,
+                "transitions": transitions,
+            }, indent=2, default=str), encoding="utf-8")
+        except Exception:
+            logger.debug("Failed to write RFT transitions", exc_info=True)
+
     @property
     def turns(self) -> list[TurnRecord]:
         return list(self._turns)
+
+    def export_rft_transitions(self) -> list[dict[str, Any]]:
+        """Export turns as RFT-ready (observation, action, reward, done) transitions.
+
+        Feature E: Structured format compatible with future Rejection Fine-Tuning
+        pipelines. Each transition contains:
+          - observation: what the agent saw (context + previous tool results)
+          - action: what the agent did (response text + tool calls)
+          - reward: per-step score (deterministic if available, else heuristic)
+          - done: whether this was the final turn
+          - metadata: model, tokens, timestamps for provenance
+        """
+        transitions: list[dict[str, Any]] = []
+        for i, turn in enumerate(self._turns):
+            is_last = (i == len(self._turns) - 1)
+            reward = turn.deterministic_score if turn.deterministic_score is not None else turn.productivity_score
+
+            transitions.append({
+                "observation": turn.observation_context,
+                "action": {
+                    "response_text": turn.response_text,
+                    "tool_calls": [
+                        {
+                            "tool_name": tc.tool_name,
+                            "args": tc.args,
+                            "success": tc.success,
+                            "output_preview": tc.output_preview,
+                            "failure_type": tc.failure_type,
+                        }
+                        for tc in turn.tool_calls
+                    ],
+                },
+                "reward": round(reward, 3) if reward is not None else 0.0,
+                "done": is_last,
+                "step_index": turn.turn_index,
+                "timestamp": turn.timestamp,
+                "model": turn.model,
+                "prompt_tokens": turn.prompt_token_count,
+                "response_tokens": turn.response_token_count,
+                "heuristic_score": turn.score,
+                "cumulative_score": turn.cumulative_score,
+            })
+        return transitions
+
+
+def prune_trajectories(max_age_days: int = 30) -> int:
+    """Delete trajectory files older than max_age_days. Returns count of files removed."""
+    import time as _time
+    traj_dir = _get_trajectories_dir()
+    if not traj_dir.exists():
+        return 0
+    cutoff = _time.time() - max_age_days * 86400
+    removed = 0
+    for f in traj_dir.iterdir():
+        if f.is_file() and f.stat().st_mtime < cutoff:
+            try:
+                f.unlink()
+                removed += 1
+            except Exception:
+                pass
+    return removed
