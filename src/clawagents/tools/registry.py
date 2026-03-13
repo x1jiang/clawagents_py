@@ -29,6 +29,9 @@ class Tool(Protocol):
     async def execute(self, args: Dict[str, Any]) -> ToolResult:
         ...
 
+    # Optional attribute — set ``cacheable = True`` to enable result caching.
+    # Not required by Protocol; checked via getattr at runtime.
+
 
 class ParsedToolCall:
     __slots__ = ("tool_name", "args")
@@ -69,10 +72,24 @@ _FENCE_RE = re.compile(r"```(?:json)?\s*\n?([\s\S]*?)\n?\s*```")
 
 
 class ToolRegistry:
-    def __init__(self, tool_timeout_s: float = DEFAULT_TOOL_TIMEOUT_S):
+    def __init__(
+        self,
+        tool_timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+        cache_max_size: int = 256,
+        cache_ttl_s: float = 60.0,
+        validate_args: bool = True,
+    ):
         self.tools: Dict[str, Tool] = {}
         self._description_cache: Optional[str] = None
         self._tool_timeout_s = tool_timeout_s
+        self._validate_args = validate_args
+
+        from clawagents.tools.cache import ResultCacheManager
+        self._result_cache = ResultCacheManager(max_size=cache_max_size, default_ttl_s=cache_ttl_s)
+
+    @property
+    def result_cache(self):
+        return self._result_cache
 
     def register(self, tool: Tool) -> None:
         self.tools[tool.name] = tool
@@ -169,16 +186,42 @@ class ToolRegistry:
         tool = self.get(tool_name)
         if not tool:
             return ToolResult(success=False, output="", error=f"Unknown tool: {tool_name}")
+
+        # Parameter validation with lenient coercion
+        effective_args = args
+        if self._validate_args:
+            from clawagents.tools.validate import validate_tool_args, format_validation_errors
+            validation = validate_tool_args(tool, args)
+            if not validation.valid:
+                return ToolResult(
+                    success=False, output="",
+                    error=f"Invalid parameters:\n{format_validation_errors(validation.errors)}",
+                )
+            effective_args = validation.coerced
+
+        # Cache lookup for cacheable tools
+        is_cacheable = getattr(tool, "cacheable", False)
+        if is_cacheable:
+            cached = self._result_cache.get(tool_name, effective_args)
+            if cached is not None:
+                return cached
+
         try:
             result = await asyncio.wait_for(
-                tool.execute(args),
+                tool.execute(effective_args),
                 timeout=self._tool_timeout_s,
             )
-            return ToolResult(
+            truncated = ToolResult(
                 success=result.success,
                 output=truncate_tool_output(result.output),
                 error=result.error,
             )
+
+            # Cache successful results for cacheable tools
+            if is_cacheable and truncated.success:
+                self._result_cache.set(tool_name, effective_args, truncated)
+
+            return truncated
         except asyncio.TimeoutError:
             return ToolResult(
                 success=False, output="",

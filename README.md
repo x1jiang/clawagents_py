@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-5.21.0-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-5.22.0-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -24,7 +24,7 @@ pip install clawagents[anthropic]   # + Anthropic Claude support
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 5.21.0** — Latest stable release (March 2026)
+> **Version 5.22.0** — Latest stable release (March 2026)
 
 ---
 
@@ -385,7 +385,7 @@ Traditional Stack (DeepAgents):           ClawAgents:
 
 ## Feature Matrix
 
-| Feature | ClawAgents v5.20 | DeepAgents | OpenClaw |
+| Feature | ClawAgents v5.22 | DeepAgents | OpenClaw |
 |:---|:---:|:---:|:---:|
 | ReAct loop | ✅ | ✅ | ✅ |
 | Tool loop detection | ✅ **soft + hard** | ❌ | ✅ |
@@ -421,6 +421,9 @@ Traditional Stack (DeepAgents):           ClawAgents:
 | Adaptive rethink threshold | ✅ | ❌ | ❌ |
 | LLM-as-Judge verification | ✅ | ❌ | ❌ |
 | Thinking token preservation (`<think>`) | ✅ | ❌ | ❌ |
+| Tool result caching (LRU) | ✅ | ❌ | ❌ |
+| JSON Schema param validation + coercion | ✅ | ❌ | ❌ |
+| ComposeTool (deterministic pipelines) | ✅ | ❌ | ❌ |
 
 ---
 
@@ -1083,6 +1086,16 @@ python -m pytest tests/ -v -m benchmark
 ---
 
 ## Changelog
+
+### v5.22.0 — Tool Result Caching, Parameter Validation & ComposeTool
+
+3 features inspired by ToolUniverse's tool management patterns:
+
+| Feature | Description |
+|:---|:---|
+| **Tool result caching** | LRU in-memory cache (`ResultCacheManager`) avoids redundant tool calls. Tools opt in with `cacheable = True`. Per-tool TTL overrides via `result_cache.set_tool_ttl()`. Built-in cacheable tools: `read_file`, `grep`, `web_fetch`. Default: 256 entries, 60s TTL |
+| **Parameter validation + coercion** | `validate_tool_args()` checks required params and type-matches before execution. Lenient coercion handles common LLM quirks: `"42"` → `42`, `"true"` → `True`, JSON strings → objects/arrays. Enabled by default on `ToolRegistry` |
+| **ComposeTool** | `create_compose_tool()` chains multiple tools in a deterministic pipeline without an LLM in the loop. Lighter than sub-agents for predictable workflows. Steps receive previous results and a `call_tool` helper. Failures short-circuit with clear error messages |
 
 ### v5.21.0 — Context Engine, Loop Detection & Compaction Overhaul
 

@@ -76,6 +76,7 @@ class LsTool:
 
 class ReadFileTool:
     name = "read_file"
+    cacheable = True
     description = "Read file contents with line numbers. Supports offset/limit for pagination."
     parameters = {
         "path": {"type": "string", "description": "Path to the file to read", "required": True},
@@ -200,6 +201,7 @@ class EditFileTool:
 
 class GrepTool:
     name = "grep"
+    cacheable = True
     description = "Search for a text pattern in files. Supports recursive multi-file search with glob filtering."
     parameters = {
         "path": {"type": "string", "description": "File or directory to search", "required": True},
