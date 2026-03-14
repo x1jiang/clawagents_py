@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-5.23.0-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-5.24.0-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -24,7 +24,7 @@ pip install clawagents[anthropic]   # + Anthropic Claude support
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 5.23.0** — Latest stable release (March 2026)
+> **Version 5.24.0** — Latest stable release (March 2026)
 
 ---
 
@@ -1089,6 +1089,15 @@ python -m pytest tests/ -v -m benchmark
 ---
 
 ## Changelog
+
+### v5.24.0 — Zero-Config Channel Auto-Detection
+
+| Feature | Description |
+|:---|:---|
+| **Auto-detect channels from env vars** | `clawagents --serve` now reads `TELEGRAM_BOT_TOKEN`, `WHATSAPP_AUTH_DIR`, `SIGNAL_ACCOUNT` from `.env` and auto-starts the ChannelRouter — zero code required |
+| **`--doctor` channel status** | `clawagents --doctor` reports which messaging channels are configured |
+| **`.env.example` updated** | All channel env vars documented with inline comments |
+| **`--init` scaffold** | `clawagents --init` generates `.env` with channel variables pre-commented |
 
 ### v5.23.0 — WebSocket Gateway, Multi-Channel Messaging (Telegram, WhatsApp, Signal)
 
