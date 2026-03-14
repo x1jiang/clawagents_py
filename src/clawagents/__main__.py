@@ -56,6 +56,12 @@ _ENV_TEMPLATE = dedent("""\
     # CLAW_TRAJECTORY=1
     # CLAW_RETHINK=1
     # CLAW_LEARN=1
+
+    # ── Optional: Messaging Channels (auto-detected by --serve) ───────
+    # TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
+    # WHATSAPP_AUTH_DIR=.whatsapp-auth
+    # SIGNAL_ACCOUNT=+1234567890
+    # CHANNEL_DEBOUNCE_MS=500
 """)
 
 _EXAMPLE_SCRIPT = dedent('''\
@@ -263,6 +269,16 @@ def cmd_doctor():
     else:
         _check("AGENTS.md", True, "not found (optional — create one with project context)")
 
+    # 11. Messaging channels
+    from clawagents.channels.auto import detect_channels, describe_channels
+    channels = detect_channels()
+    if channels:
+        ch_list = ", ".join(describe_channels(channels))
+        _check("Messaging channels", True, ch_list)
+    else:
+        _check("Messaging channels", True,
+               "none configured (set TELEGRAM_BOT_TOKEN, WHATSAPP_AUTH_DIR, or SIGNAL_ACCOUNT)")
+
     # Summary
     sys.stderr.write("\n" + "=" * 40 + "\n")
     if issues == 0:
@@ -375,11 +391,38 @@ def cmd_trajectory(n: int = 1):
 # ─── Gateway Server ──────────────────────────────────────────────────────
 
 def cmd_serve(port: int):
-    """Start the HTTP gateway server."""
-    from clawagents.gateway.server import start_gateway
+    """Start the HTTP + WS gateway server, plus any auto-detected channels."""
+    from clawagents.gateway.server import create_app, start_gateway
+    from clawagents.channels.auto import detect_channels, describe_channels, start_channel_router
+    import uvicorn
+
     banner = _build_banner()
-    sys.stderr.write(f"{banner} | gateway on port {port}\n")
-    start_gateway(port)
+    channels = detect_channels()
+
+    if channels:
+        ch_desc = ", ".join(describe_channels(channels))
+        sys.stderr.write(f"{banner} | gateway on port {port} | channels: {ch_desc}\n")
+
+        app, llm, active_model = create_app()
+
+        async def _run():
+            router = await start_channel_router(llm)
+            config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="warning")
+            server = uvicorn.Server(config)
+            try:
+                await server.serve()
+            finally:
+                if router:
+                    await router.stop_all()
+
+        gateway_api_key = os.getenv("GATEWAY_API_KEY", "")
+        auth_status = "enabled" if gateway_api_key else "disabled (set GATEWAY_API_KEY to enable)"
+        sys.stderr.write(f"   Auth: {auth_status}\n")
+        sys.stderr.write(f"   Endpoints: POST /chat | POST /chat/stream | WS /ws | GET /queue | GET /health\n\n")
+        asyncio.run(_run())
+    else:
+        sys.stderr.write(f"{banner} | gateway on port {port}\n")
+        start_gateway(port)
 
 
 # ─── Trajectory Pruning ───────────────────────────────────────────────
@@ -414,6 +457,11 @@ def main():
               clawagents --trajectory              Show last run's trajectory summary
               clawagents --trajectory 5            Show last 5 runs
               clawagents --serve --port 3000       Start the HTTP gateway server
+
+            Messaging channels (auto-detected from .env):
+              TELEGRAM_BOT_TOKEN=...          → starts Telegram bot
+              WHATSAPP_AUTH_DIR=.wa-auth      → starts WhatsApp (Baileys QR pairing)
+              SIGNAL_ACCOUNT=+1234567890      → starts Signal (via signal-cli)
 
             Quick start:
               pip install clawagents
