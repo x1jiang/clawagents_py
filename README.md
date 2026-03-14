@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-5.22.0-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-5.23.0-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -24,7 +24,7 @@ pip install clawagents[anthropic]   # + Anthropic Claude support
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 5.22.0** — Latest stable release (March 2026)
+> **Version 5.23.0** — Latest stable release (March 2026)
 
 ---
 
@@ -385,7 +385,7 @@ Traditional Stack (DeepAgents):           ClawAgents:
 
 ## Feature Matrix
 
-| Feature | ClawAgents v5.22 | DeepAgents | OpenClaw |
+| Feature | ClawAgents v5.23 | DeepAgents | OpenClaw |
 |:---|:---:|:---:|:---:|
 | ReAct loop | ✅ | ✅ | ✅ |
 | Tool loop detection | ✅ **soft + hard** | ❌ | ✅ |
@@ -424,6 +424,9 @@ Traditional Stack (DeepAgents):           ClawAgents:
 | Tool result caching (LRU) | ✅ | ❌ | ❌ |
 | JSON Schema param validation + coercion | ✅ | ❌ | ❌ |
 | ComposeTool (deterministic pipelines) | ✅ | ❌ | ❌ |
+| WebSocket gateway | ✅ | ❌ | ✅ |
+| Multi-channel messaging (Telegram, WhatsApp, Signal) | ✅ | ❌ | ✅ |
+| Per-session message serialization | ✅ | ❌ | ✅ |
 
 ---
 
@@ -1086,6 +1089,33 @@ python -m pytest tests/ -v -m benchmark
 ---
 
 ## Changelog
+
+### v5.23.0 — WebSocket Gateway, Multi-Channel Messaging (Telegram, WhatsApp, Signal)
+
+Full multi-platform messaging support inspired by OpenClaw's channel architecture:
+
+| Feature | Description |
+|:---|:---|
+| **WebSocket gateway** | FastAPI native WebSocket endpoint at `/ws` alongside existing HTTP. Methods: `chat.send` (streaming events), `chat.history`, `chat.inject`, `ping`. Auth via `?token=` query param |
+| **Channel adapter interface** | `ChannelAdapter` protocol + `ChannelMessage` dataclass — standard contract for any messaging platform |
+| **Telegram adapter** | Uses [python-telegram-bot](https://python-telegram-bot.org/). Config: `{"bot_token": "..."}` |
+| **WhatsApp adapter** | Baileys subprocess (Node.js) or WhatsApp Business API. Config: `{"mode": "baileys", "auth_dir": ".whatsapp-auth"}` |
+| **Signal adapter** | Uses [signal-cli](https://github.com/AsamK/signal-cli) subprocess with JSON-RPC. Config: `{"account": "+1234567890"}` |
+| **Channel router** | `ChannelRouter` dispatches inbound messages to agents, routes replies back. Per-session serialization via `KeyedAsyncQueue`, optional debouncer, hooks |
+
+```python
+from clawagents import create_claw_agent, ChannelRouter
+from clawagents.channels.telegram import TelegramAdapter
+from clawagents.channels.whatsapp import WhatsAppAdapter
+
+router = ChannelRouter(lambda: create_claw_agent("gpt-5-mini"))
+router.register(TelegramAdapter())
+router.register(WhatsAppAdapter())
+await router.start_all({
+    "telegram": {"bot_token": "123456:ABC..."},
+    "whatsapp": {"mode": "baileys", "auth_dir": ".whatsapp-auth"},
+})
+```
 
 ### v5.22.0 — Tool Result Caching, Parameter Validation & ComposeTool
 

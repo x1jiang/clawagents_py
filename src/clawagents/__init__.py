@@ -1,4 +1,4 @@
-__version__ = "5.22.0"
+__version__ = "5.23.0"
 
 from clawagents.agent import ClawAgent, create_claw_agent
 from clawagents.graph.agent_loop import (
@@ -13,4 +13,7 @@ from clawagents.trajectory import (
 from clawagents.context import (
     ContextEngine, ContextEngineConfig, DefaultContextEngine,
     register_context_engine, resolve_context_engine, list_context_engines,
+)
+from clawagents.channels import (
+    ChannelMessage, ChannelAdapter, ChannelRouter, KeyedAsyncQueue,
 )

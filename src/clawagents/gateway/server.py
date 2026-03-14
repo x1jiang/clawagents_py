@@ -17,6 +17,7 @@ from clawagents.process.command_queue import (
 )
 from clawagents.process.lanes import CommandLane
 from clawagents.agent import create_claw_agent
+from clawagents.gateway.ws import attach_websocket
 
 VALID_LANES = {"main", "cron", "subagent", "nested"}
 _GATEWAY_API_KEY = os.getenv("GATEWAY_API_KEY", "")
@@ -177,6 +178,8 @@ def create_app() -> tuple:
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
         )
 
+    attach_websocket(app, llm, _GATEWAY_API_KEY)
+
     return app, llm, active_model
 
 
@@ -187,6 +190,6 @@ def start_gateway(port: int = 3000):
     print(f"   Provider: {llm.name}")
     print(f"   Model: {active_model}")
     print(f"   Auth: {auth_status}")
-    print("   Endpoints: POST /chat | POST /chat/stream | GET /queue | GET /health\n")
+    print("   Endpoints: POST /chat | POST /chat/stream | WS /ws | GET /queue | GET /health\n")
 
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
