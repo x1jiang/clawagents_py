@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-5.24.0-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-5.25.0-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -24,7 +24,7 @@ pip install clawagents[anthropic]   # + Anthropic Claude support
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 5.24.0** — Latest stable release (March 2026)
+> **Version 5.25.0** — Latest stable release (March 2026)
 
 ---
 
@@ -1089,6 +1089,13 @@ python -m pytest tests/ -v -m benchmark
 ---
 
 ## Changelog
+
+### v5.25.0 — Gemini Streaming Fix
+
+| Feature | Description |
+|:---|:---|
+| **Fix Gemini SDK warning** | Eliminated "non-text parts in the response" warning by iterating `candidates[].content.parts[]` instead of accessing the `.text` property on streaming chunks containing function calls |
+| **Consistent text extraction** | Streaming path now uses the same parts-based extraction as the non-streaming `_request_once`, filtering out thought parts |
 
 ### v5.24.0 — Zero-Config Channel Auto-Detection
 

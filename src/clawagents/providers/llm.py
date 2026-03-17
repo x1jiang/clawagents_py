@@ -809,9 +809,17 @@ class GeminiProvider(LLMProvider):
                         )
 
                     try:
-                        if hasattr(chunk, "text") and chunk.text:
-                            chunks.append(chunk.text)
-                            await _invoke_callback(on_chunk, chunk.text)
+                        _chunk_text_parts: list[str] = []
+                        if hasattr(chunk, "candidates") and chunk.candidates:
+                            for _cand in chunk.candidates:
+                                if hasattr(_cand, "content") and _cand.content and hasattr(_cand.content, "parts"):
+                                    for _p in _cand.content.parts:
+                                        if getattr(_p, "text", None) and not getattr(_p, "thought", False):
+                                            _chunk_text_parts.append(_p.text)
+                        if _chunk_text_parts:
+                            _joined = "".join(_chunk_text_parts)
+                            chunks.append(_joined)
+                            await _invoke_callback(on_chunk, _joined)
                         if hasattr(chunk, "candidates") and chunk.candidates:
                             for candidate in chunk.candidates:
                                 fr = getattr(candidate, "finish_reason", None)
