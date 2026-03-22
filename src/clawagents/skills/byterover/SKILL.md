@@ -7,7 +7,7 @@ description: "Knowledge management for AI agents. Use the `brv` CLI to store and
 
 Use the `brv` CLI to manage your project's long-term memory.
 
-**Install:** Optional. When using ClawAgents (Python), the agent runs `brv` via `npx byterover-cli`, so Node/npx is sufficient. You can also install globally: `npm install -g byterover-cli`.
+**Install:** Optional. With npm, `byterover-cli` is an optional dependency of ClawAgents (so `brv` is available from the project's `node_modules/.bin`). With Python, the agent runs `brv` via `npx byterover-cli`, so Node/npx is sufficient. You can also install globally: `npm install -g byterover-cli`.
 
 Knowledge is stored in `.brv/context-tree/` as human-readable Markdown. No authentication needed for query/curate; login only for cloud sync.
 
@@ -24,6 +24,13 @@ Use when the user wants recall, your context lacks needed info, or before an act
 
 ```bash
 brv query "How is authentication implemented?"
+brv query "What are the API rate limits?"
+```
+
+Headless mode with JSON output (for automation):
+
+```bash
+brv query "How does auth work?" --headless --format json
 ```
 
 ### Curate context
@@ -38,38 +45,36 @@ With source files (max 5):
 
 ```bash
 brv curate "Authentication middleware details" -f src/middleware/auth.ts
+brv curate "JWT implementation" --files src/auth/jwt.ts --files docs/auth.md
 ```
 
-View curate history:
+Curate an entire folder:
 
 ```bash
-brv curate view
-brv curate view cur-1739700001000
-brv curate view detail
+brv curate --folder src/auth/
+brv curate "Analyze authentication module" -d src/auth/
 ```
 
-### Provider setup
+### Project setup
 
-Default provider (no API key):
+Initialize ByteRover for the current project:
 
 ```bash
-brv providers connect byterover
+brv init
+brv init --force
 ```
 
-Use your own LLM:
+### Authentication (for cloud sync)
 
 ```bash
-brv providers list
-brv providers connect openai --api-key sk-xxx --model gpt-4.1
+brv login --api-key YOUR_KEY
 ```
 
 ### Cloud sync (optional)
 
 ```bash
-brv login --api-key YOUR_KEY
-brv space list
-brv space switch --team TEAM --name SPACE
 brv pull
+brv pull --branch feature-branch
 brv push
 ```
 
@@ -81,16 +86,19 @@ brv status
 
 ## Error handling
 
-- "No provider connected" → `brv providers connect byterover`
-- "Not authenticated" → only needed for push/pull; run `brv login --help` if required
+- "No ByteRover instance is running" → run `brv` in a separate terminal first
+- "Not logged in" → only needed for push/pull; run `brv login --api-key <key>`
 - "Maximum 5 files allowed" → use ≤5 `-f` flags
 - "File does not exist" → verify path from project root
+- "Sandbox environment detected" → run `brv` outside the sandbox/IDE terminal
 
 ## Best practices
 
 - Query before starting work; curate after completing work.
 - Use precise queries and concise, specific curate text.
 - Attach files with `-f` instead of pasting content.
+- Use `-d` to curate an entire folder when multiple related files changed.
 - Mark outdated knowledge as OUTDATED when replacing it.
+- Use `--headless --format json` for automation pipelines.
 
 Source: [ByteRover on ClawHub](https://clawhub.ai/byteroverinc/byterover)

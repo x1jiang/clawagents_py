@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-5.25.0-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-5.26.0-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -24,7 +24,7 @@ pip install clawagents[anthropic]   # + Anthropic Claude support
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 5.25.0** — Latest stable release (March 2026)
+> **Version 5.26.0** — Latest stable release (March 2026)
 
 ---
 
@@ -879,7 +879,7 @@ All parameters are **optional** — zero-config usage (`create_claw_agent()`) wo
 |:---|:---|:---|:---:|:---|
 | `instruction` | `str \| None` | `None` | No | System prompt — what the agent should do and how it should behave |
 | `tools` | `list \| None` | `None` | No | Additional tools to register. Built-in tools (filesystem, exec, grep, etc.) are always included |
-| `skills` | `str \| list \| None` | auto-discover | No | Skill directories to load. Default: checks `./skills`, `./.skills`. Built-in ByteRover skill is always included. |
+| `skills` | `str \| list \| None` | auto-discover | No | Skill directories to load. Default: checks `./skills`, `./.skills`. Bundled skills (ByteRover, OpenViking) are always included when eligible. |
 | `memory` | `str \| list \| None` | auto-discover | No | Memory files to inject into system prompt. Default: checks `./AGENTS.md`, `./CLAWAGENTS.md` |
 | `sandbox` | `SandboxBackend` | `LocalBackend()` | No | Pluggable sandbox backend for file/shell operations. Use `InMemoryBackend` for testing |
 | `streaming` | `bool` | `True` | No | Enable streaming responses |
@@ -953,7 +953,29 @@ The agent factory automatically discovers project files:
 | What | Default locations checked |
 |:---|:---|
 | **Memory** | `./AGENTS.md`, `./CLAWAGENTS.md` |
-| **Skills** | `./skills`, `./.skills`, `./skill`, `./.skill`, `./Skills`. Built-in [ByteRover](https://clawhub.ai/byteroverinc/byterover) skill is always included. **CLI:** when the agent runs `brv`, it is executed via `npx byterover-cli` so Node/npx is sufficient (no global install required). |
+| **Skills** | `./skills`, `./.skills`, `./skill`, `./.skill`, `./Skills`. Bundled skills are auto-included based on eligibility (see below). |
+
+### Bundled Skills
+
+ClawAgents ships with two complementary bundled skills that work together:
+
+| Skill | Purpose | Prerequisite | Auto-enabled? |
+|:---|:---|:---|:---:|
+| **[ByteRover](https://clawhub.ai/byteroverinc/byterover)** | **Write** decisions, patterns, and rules to local Markdown files | Node/npx (`brv` runs via `npx byterover-cli`) | Always |
+| **[OpenViking](https://github.com/volcengine/OpenViking)** | **Read** context from repos, docs, and large knowledge bases with tiered L0/L1/L2 loading | `pip install openviking` + running `openviking-server` | Only when `ov` CLI is on PATH |
+
+**How they complement each other:**
+
+- **ByteRover** is a fast, serverless notebook for the agent. Use `brv curate` to persist decisions ("We chose Postgres for ACID compliance") and `brv query` to recall them. No infrastructure needed — context is stored as Markdown in `.brv/context-tree/`.
+- **OpenViking** is a structured context database. Use `ov add-resource` to ingest entire repos or doc sites, then `ov find` for semantic search across all indexed content. Results are organized in a virtual filesystem (`viking://`) with three tiers: **L0** (abstract, ~100 tokens), **L1** (overview, ~2k tokens), **L2** (full content) — the agent loads only what it needs, saving tokens.
+
+**Typical workflow:** OpenViking **retrieves** context → agent works on the task → ByteRover **curates** the decisions made.
+
+**OpenViking prerequisites:**
+1. Install: `pip install openviking --upgrade`
+2. Configure: create `~/.openviking/ov.conf` with embedding model and VLM settings (see [OpenViking docs](https://github.com/volcengine/OpenViking))
+3. Start server: `openviking-server`
+4. The `ov` CLI must be on your PATH — the skill auto-enables when detected |
 
 Override with explicit paths:
 ```python
@@ -1089,6 +1111,14 @@ python -m pytest tests/ -v -m benchmark
 ---
 
 ## Changelog
+
+### v5.26.0 — Bundled OpenViking Skill, Updated ByteRover Skill
+
+| Feature | Description |
+|:---|:---|
+| **OpenViking skill** | Bundled `skills/openviking/SKILL.md` teaches the agent to use the `ov` CLI for tiered context retrieval (L0/L1/L2). Auto-enabled when `ov` is on PATH |
+| **ByteRover skill updated** | Refreshed to match `byterover-cli` v1.8.0 — added `--headless`, `--folder`, removed obsolete commands |
+| **Generic bundled skill loader** | Skill loader now scans the entire bundled `skills/` directory instead of hardcoding individual skills |
 
 ### v5.25.0 — Gemini Streaming Fix
 

@@ -360,8 +360,8 @@ def create_claw_agent(
     # ── Auto-discover skills from default locations ─────────────────────
     skill_summaries: Optional[str] = None
     base_skill_dirs = _to_list(skills) if skills is not None else _auto_discover_skills()
-    _byterover_dir = _get_bundled_byterover_skill_dir()
-    skill_dirs = (base_skill_dirs + [_byterover_dir]) if (_byterover_dir and os.path.isdir(_byterover_dir)) else base_skill_dirs
+    _bundled = _get_bundled_skills_dir()
+    skill_dirs = (base_skill_dirs + [_bundled]) if (_bundled and os.path.isdir(_bundled)) else base_skill_dirs
     if skill_dirs:
         from clawagents.tools.skills import SkillStore, create_skill_tools
 
@@ -481,9 +481,9 @@ def _to_list(value) -> list:
     return list(value)
 
 
-def _get_bundled_byterover_skill_dir() -> str:
-    """Path to the bundled ByteRover skill (ClawHub byteroverinc/byterover)."""
-    return str(Path(__file__).resolve().parent / "skills" / "byterover")
+def _get_bundled_skills_dir() -> str:
+    """Path to all bundled skills (byterover, openviking, etc.)."""
+    return str(Path(__file__).resolve().parent / "skills")
 
 
 # Default locations for auto-discovery
