@@ -118,6 +118,7 @@ class ClawAgent:
         task: str,
         max_iterations: Optional[int] = None,
         on_event: Optional[OnEvent] = None,
+        timeout_s: float = 0,
         features: Optional[dict[str, bool]] = None,
     ) -> AgentState:
         """

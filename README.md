@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-5.27.0-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-5.27.1-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -26,7 +26,7 @@ pip install clawagents[anthropic]   # + Anthropic Claude support
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 5.26.0** — Latest stable release (March 2026)
+> **Version 5.27.1** — Latest stable release (March 2026)
 
 ---
 
@@ -1127,6 +1127,9 @@ python -m pytest tests/ -v -m benchmark
 ---
 
 ## Changelog
+
+### v5.27.1 — Timeout Bugfix
+- **Fixed NameError** — Added `timeout_s` parameter to `ClawAgent.invoke` to prevent an exception when a global timeout is not provided.
 
 ### v5.27.0 — Claude Code Architectural Patterns
 
