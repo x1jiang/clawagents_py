@@ -15,16 +15,7 @@ ClawAgents is a **production-ready agentic framework** that gives LLMs the abili
 
 Built by extracting and unifying the best architectural patterns from [OpenClaw](https://github.com/anthropics/openclaw) (~5,800 files) and [DeepAgents](https://github.com/langchain-ai/deepagents) (~1,400 LOC core), ClawAgents delivers **the same power at a fraction of the complexity**.
 
-## 🚀 What's New in 5.27.0 (Claude Code Patterns)
-We just ported 10 production-grade architectural patterns from Anthropic's Claude Code directly into ClawAgents! These features are controllable via environment variables or constructor injection:
-- **Micro-Compact Memory**: Aggressively clears giant tool results to save context.
-- **File History Snapshots**: Safely backs up files to `.clawagents/snapshots/` before writing.
-- **Prompt Cache Tracking**: Real-time stats on Anthropic/OpenAI prompt cache hits.
-- **Typed Memory Taxonomy**: Auto-parses `project`, `user`, and `feedback` memories via frontmatter.
-- **Write-Ahead Logging (WAL)**: Crash-resilient interaction logging.
-- **Granular Permission Rules**: Define glob-based `Allow`/`Deny` execution policies.
-- **Background Memory Extraction**: Periodically scans conversations and extracts metadata.
-- **Orchestration**: Access to `run_forked_agent` and `run_coordinator` (swarm routing).
+
 
 ## Installation
 
@@ -1122,6 +1113,21 @@ python -m pytest tests/ -v -m benchmark
 ---
 
 ## Changelog
+
+### v5.27.0 — Claude Code Architectural Patterns
+
+Ported 10 production-grade architectural patterns from Anthropic's Claude Code directly into ClawAgents. These features are controllable via environment variables or constructor injection:
+
+| Feature | Description |
+|:---|:---|
+| **Micro-Compact Memory** | Aggressively clears giant tool results to save context. |
+| **File History Snapshots** | Safely backs up files to `.clawagents/snapshots/` before writing. |
+| **Prompt Cache Tracking** | Real-time stats on Anthropic/OpenAI prompt cache hits. |
+| **Typed Memory Taxonomy** | Auto-parses `project`, `user`, and `feedback` memories via frontmatter. |
+| **Write-Ahead Logging (WAL)** | Crash-resilient interaction logging. |
+| **Granular Permission Rules** | Define glob-based `Allow`/`Deny` execution policies. |
+| **Background Memory Extraction** | Periodically scans conversations and extracts metadata. |
+| **Orchestration** | Access to `run_forked_agent` and `run_coordinator` (swarm routing). |
 
 ### v5.26.0 — Bundled OpenViking Skill, Updated ByteRover Skill
 
