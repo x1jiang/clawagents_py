@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-5.27.2-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-5.27.3-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -26,7 +26,7 @@ pip install clawagents[anthropic]   # + Anthropic Claude support
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 5.27.2** — Latest stable release (March 2026)
+> **Version 5.27.3** — Latest stable release (March 2026)
 
 ---
 
@@ -1127,6 +1127,10 @@ python -m pytest tests/ -v -m benchmark
 ---
 
 ## Changelog
+
+### v5.27.3 — Gemini Signature Regression Coverage
+- **Gemini signature regression test** — Added targeted tests for `_serialize_gemini_parts` to ensure `thought_signature` is propagated to sibling parallel `function_call` parts.
+- **Parallel integration test reliability** — Fixed integration test fixture validation mismatch so large-output parallel execution is validated correctly.
 
 ### v5.27.2 — Gemini 3 Thought Signature Fix
 - **Gemini 3 Propagation** — Propagated `thought_signature` to all parallel `function_call` parts in the response, preventing `400 INVALID_ARGUMENT` during multi-tool execution.

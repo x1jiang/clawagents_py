@@ -21,9 +21,7 @@ class MockTool:
     def __init__(self, name: str, delay_s: float = 0, fail: bool = False, output_size: int = 0):
         self.name = name
         self.description = f"Test tool: {name}"
-        self.parameters: Dict[str, Dict[str, Any]] = {
-            "path": {"type": "string", "description": "a path", "required": True}
-        }
+        self.parameters: Dict[str, Dict[str, Any]] = {}
         self._delay = delay_s
         self._fail = fail
         self._output_size = output_size
