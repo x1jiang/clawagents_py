@@ -75,7 +75,26 @@ class ClawAgent:
         max_iterations: int = 200,
         preview_chars: int = 120,
         response_chars: int = 500,
+        features: Optional[dict[str, bool]] = None,
     ):
+        """
+        Initialize a ClawAgent.
+
+        Args:
+            llm: The initialized LLM provider
+            tools: The registry containing all available tools
+            system_prompt: Optional base system instruction
+            streaming: Whether to stream responses from the LLM
+            use_native_tools: Instruct the LLM to use native structured tool calls (if supported)
+            context_window: Maximum allowed tokens before oldest messages are compacted
+            trajectory: Whether to log full trajectory data
+            rethink: Enables logic to backtrack on consecutive execution failures
+            learn: Whether to use post-trajectory reflection to extract permanent lessons
+            max_iterations: Maximum loop turns before returning early
+            preview_chars: Number of characters to log in console output for tool results
+            response_chars: Number of characters to log from LLM free-text response
+            features: Dictionary to override global architectural variables (e.g. {"micro_compact": False, "wal": True})
+        """
         self.llm = llm
         self.tools = tools
         self.system_prompt = system_prompt
@@ -92,14 +111,28 @@ class ClawAgent:
         self.max_iterations = max_iterations
         self.preview_chars = preview_chars
         self.response_chars = response_chars
+        self.features = features
 
     async def invoke(
         self,
         task: str,
         max_iterations: Optional[int] = None,
         on_event: Optional[OnEvent] = None,
-        timeout_s: float = 0,
+        features: Optional[dict[str, bool]] = None,
     ) -> AgentState:
+        """
+        Start the ReAct agent loop for a specific task.
+        
+        Args:
+            task: The user's query or instruction payload
+            max_iterations: Override for the maximum loop turns
+            on_event: Runtime callback for event streams
+            timeout_s: Optional hard timeout in seconds
+            features: Dictionary to override the global/class-level architectural feature flags
+            
+        Returns:
+            The final AgentState upon completion or max iteration
+        """
         return await run_agent_graph(
             task=task,
             llm=self.llm,
@@ -119,6 +152,7 @@ class ClawAgent:
             preview_chars=self.preview_chars,
             response_chars=self.response_chars,
             timeout_s=timeout_s,
+            features=features if features is not None else self.features,
         )
 
     # ── Convenience hook methods ──────────────────────────────────────

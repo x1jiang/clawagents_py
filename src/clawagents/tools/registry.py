@@ -57,6 +57,44 @@ _TRUNCATION_TAIL = 2_000
 DEFAULT_TOOL_TIMEOUT_S = 120
 
 
+# ─── File Snapshots (learned from Claude Code: fileHistoryMakeSnapshot) ────
+# Before write tools modify a file, snapshot it for undo/rollback capability.
+
+_WRITE_TOOLS: frozenset[str] = frozenset({
+    "write_file", "edit_file", "create_file", "replace_in_file",
+    "insert_in_file", "patch_file",
+})
+
+
+def _snapshot_before_write(tool_name: str, args: Dict[str, Any]) -> None:
+    """Snapshot a file before a write tool modifies it."""
+    from clawagents.config.features import is_enabled
+    if not is_enabled("file_snapshots"):
+        return
+    if tool_name not in _WRITE_TOOLS:
+        return
+
+    import shutil
+    import time
+    from pathlib import Path
+
+    # Extract file path from common arg names
+    path_str = args.get("path") or args.get("file_path") or args.get("target_path") or ""
+    if not path_str:
+        return
+
+    file_path = Path(path_str)
+    if not file_path.exists() or not file_path.is_file():
+        return
+
+    try:
+        snap_dir = Path.cwd() / ".clawagents" / "snapshots" / str(int(time.time()))
+        snap_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(file_path), str(snap_dir / file_path.name))
+    except Exception:
+        pass  # Snapshot failure should never block tool execution
+
+
 def truncate_tool_output(output: str | list[dict[str, Any]], max_chars: int = MAX_TOOL_OUTPUT_CHARS) -> str | list[dict[str, Any]]:
     if not isinstance(output, str):
         return output
@@ -207,6 +245,9 @@ class ToolRegistry:
                 return cached
 
         try:
+            # File snapshot before write tools (Claude Code pattern: fileHistoryMakeSnapshot)
+            _snapshot_before_write(tool_name, effective_args)
+
             result = await asyncio.wait_for(
                 tool.execute(effective_args),
                 timeout=self._tool_timeout_s,

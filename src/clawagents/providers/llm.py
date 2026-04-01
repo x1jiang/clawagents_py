@@ -80,6 +80,9 @@ class LLMResponse:
         partial: bool = False,
         tool_calls: list[NativeToolCall] | None = None,
         gemini_parts: list[dict[str, Any]] | None = None,
+        cache_creation_tokens: int = 0,
+        cache_read_tokens: int = 0,
+        prompt_tokens: int = 0,
     ):
         self.content = content
         self.model = model
@@ -87,6 +90,10 @@ class LLMResponse:
         self.partial = partial
         self.tool_calls = tool_calls
         self.gemini_parts = gemini_parts          # Preserved Gemini response parts (thought/thought_signature)
+        # Prompt cache tracking (Claude Code pattern)
+        self.cache_creation_tokens = cache_creation_tokens
+        self.cache_read_tokens = cache_read_tokens
+        self.prompt_tokens = prompt_tokens
 
 
 OnChunkCallback = (

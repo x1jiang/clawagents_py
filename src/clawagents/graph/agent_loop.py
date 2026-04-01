@@ -570,6 +570,93 @@ def _preflight_context_check(
     return messages, tool_desc, native_schemas
 
 
+# ─── Micro-Compact: clear old tool results (learned from Claude Code) ─────
+# Unlike soft-trim which truncates, micro-compact completely replaces old tool
+# result content with a placeholder. The model still sees the tool_use →
+# tool_result structure (knows *what* it did) but not the raw output.
+# This can effectively double the usable context window with zero LLM overhead.
+
+_COMPACTABLE_TOOLS: frozenset[str] = frozenset({
+    "read_file", "execute", "execute_command", "bash", "run_command",
+    "grep", "glob", "ls", "tree", "web_fetch", "web_search",
+    "search_files", "list_dir", "find_files",
+})
+
+_MICRO_COMPACT_KEEP_RECENT = 3  # keep last N compactable tool results intact
+
+
+def _micro_compact_tool_results(
+    messages: list[LLMMessage],
+    keep_recent: int = _MICRO_COMPACT_KEEP_RECENT,
+) -> list[LLMMessage]:
+    """Clear old tool result content for compactable tools (keep last N).
+
+    The model still sees the tool_use → tool_result pairs, just not the raw
+    50KB grep/file output. This preserves the agent's sense of *what* it did
+    while freeing massive amounts of context.
+    """
+    from clawagents.config.features import is_enabled
+    if not is_enabled("micro_compact"):
+        return messages
+
+    # Collect compactable tool call IDs in order
+    compactable_ids: list[str] = []
+    # For text-based tool calls, track by message index
+    compactable_text_indices: list[int] = []
+
+    for i, msg in enumerate(messages):
+        if msg.role == "assistant":
+            # Native tool calls
+            if msg.tool_calls_meta:
+                for tc in msg.tool_calls_meta:
+                    if tc.get("name", "") in _COMPACTABLE_TOOLS:
+                        compactable_ids.append(tc["id"])
+            # Text-based tool calls
+            elif isinstance(msg.content, str):
+                try:
+                    import json as _json
+                    parsed = _json.loads(msg.content)
+                    if isinstance(parsed, dict) and parsed.get("tool") in _COMPACTABLE_TOOLS:
+                        compactable_text_indices.append(i)
+                    elif isinstance(parsed, list):
+                        if any(isinstance(item, dict) and item.get("tool") in _COMPACTABLE_TOOLS for item in parsed):
+                            compactable_text_indices.append(i)
+                except (ValueError, TypeError):
+                    pass
+
+    # Keep the most recent N compactable tool results
+    keep_ids = set(compactable_ids[-keep_recent:])
+    keep_text_indices = set(compactable_text_indices[-keep_recent:])
+
+    # Clear old compactable tool results
+    result: list[LLMMessage] = []
+    cleared = 0
+    for i, msg in enumerate(messages):
+        # Native tool results
+        if msg.role == "tool" and msg.tool_call_id:
+            if msg.tool_call_id in compactable_ids and msg.tool_call_id not in keep_ids:
+                result.append(LLMMessage(
+                    role="tool",
+                    content="[Old tool result cleared to save context]",
+                    tool_call_id=msg.tool_call_id,
+                ))
+                cleared += 1
+                continue
+        # Text-based tool results (user message following assistant tool call)
+        elif msg.role == "user" and isinstance(msg.content, str) and msg.content.startswith("[Tool Result]"):
+            if i > 0 and (i - 1) in compactable_text_indices and (i - 1) not in keep_text_indices:
+                result.append(LLMMessage(
+                    role="user",
+                    content="[Tool Result] [Old tool result cleared to save context]",
+                ))
+                cleared += 1
+                continue
+
+        result.append(msg)
+
+    return result
+
+
 # ─── Soft-Trim: prune stale/low-value content before compaction ───────────
 
 _SOFT_TRIM_RATIO = 0.60
@@ -861,6 +948,36 @@ def _offload_history(messages: list[LLMMessage]) -> str | None:
         return None
 
 
+# ─── Write-Ahead Log (learned from Claude Code) ──────────────────────────
+# Persist the latest message before each LLM API call so that if the process
+# crashes mid-call, the user's last message isn't lost.
+
+
+def _wal_write(messages: list[LLMMessage]) -> None:
+    """Append the latest message to the WAL file for crash recovery."""
+    from clawagents.config.features import is_enabled
+    if not is_enabled("wal"):
+        return
+
+    try:
+        wal_path = Path.cwd() / ".clawagents" / "wal.jsonl"
+        wal_path.parent.mkdir(parents=True, exist_ok=True)
+        last_msg = messages[-1] if messages else None
+        if not last_msg:
+            return
+        content = last_msg.content if isinstance(last_msg.content, str) else str(last_msg.content)
+        entry = json.dumps({
+            "role": last_msg.role,
+            "content": content[:500],
+            "ts": time.time(),
+            "msg_count": len(messages),
+        })
+        with open(wal_path, "a") as f:
+            f.write(entry + "\n")
+    except Exception:
+        pass  # WAL failure should never block the agent loop
+
+
 # ─── Helpers ──────────────────────────────────────────────────────────────
 
 
@@ -926,8 +1043,13 @@ async def run_agent_graph(
     preview_chars: int = 120,
     response_chars: int = 500,
     timeout_s: float = 0,
+    features: Optional[dict[str, bool]] = None,
 ) -> AgentState:
     """Single ReAct loop: LLM → tools → LLM → tools → ... → final answer."""
+    if features is not None:
+        from clawagents.config.features import set_overrides
+        set_overrides(features)
+
     registry = tools or ToolRegistry()
     native_schemas: list[NativeToolSchema] | None = (
         registry.to_native_schemas() if use_native_tools and tools else None
@@ -958,6 +1080,7 @@ async def run_agent_graph(
     token_multiplier = 1.0
     resolved_model_name: Optional[str] = None
     _cached_sys_tokens: int = 0  # Feature D: cache system prompt token count
+    _last_memory_extraction_turn: int = 0  # Background memory extraction cursor
 
     prompt_to_use = system_prompt or BASE_SYSTEM_PROMPT
 
@@ -1032,8 +1155,12 @@ async def run_agent_graph(
                 state.result = str(te)
                 break
 
+            # Write-ahead log: persist last message before API call (Claude Code pattern)
+            _wal_write(messages)
+
             # Patch dangling tool calls before sending to LLM
             messages = _patch_dangling_tool_calls(messages)
+            messages = _micro_compact_tool_results(messages)  # Claude Code pattern: clear old tool results
             messages = _soft_trim_messages(messages, context_window, token_multiplier, emit, resolved_model_name)
             messages = await _compact_if_needed(
                 messages, context_window, llm, emit, token_multiplier, resolved_model_name,
@@ -1059,6 +1186,14 @@ async def run_agent_graph(
                 )
                 if not resolved_model_name and response.model:
                     resolved_model_name = response.model
+
+                # Prompt cache tracking (Claude Code pattern)
+                from clawagents.config.features import is_enabled as _is_feat_enabled
+                if _is_feat_enabled("cache_tracking") and response.prompt_tokens > 0:
+                    cache_pct = (response.cache_read_tokens / response.prompt_tokens * 100) if response.prompt_tokens > 0 else 0
+                    emit("context", {
+                        "message": f"cache: {cache_pct:.0f}% hit ({response.cache_read_tokens}/{response.prompt_tokens} prompt tokens, {response.cache_creation_tokens} created)"
+                    })
             except Exception as err:
                 err_msg = str(err).lower()
                 if "context" in err_msg or "token" in err_msg:
@@ -1494,6 +1629,16 @@ async def run_agent_graph(
                             role="user",
                             content=rethink_msg,
                         ))
+
+                # ── Continuous background memory extraction (Claude Code pattern) ──
+                if learn and recorder:
+                    try:
+                        from clawagents.trajectory.background_memory import maybe_extract_memories
+                        _last_memory_extraction_turn = await maybe_extract_memories(
+                            llm, messages, round_idx, _last_memory_extraction_turn,
+                        )
+                    except Exception:
+                        pass  # Background extraction failure should never block the loop
 
         else:
             emit("warn", {"message": f"reached max {effective_max_rounds} tool rounds"})
