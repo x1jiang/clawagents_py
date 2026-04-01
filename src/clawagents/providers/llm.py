@@ -616,6 +616,15 @@ def _serialize_gemini_parts(parts: Any) -> list[dict[str, Any]] | None:
                 d["thought_signature"] = p.thought_signature
         if d:
             serialized.append(d)
+            
+    # Propagate thought_signature to all function_call parts (Gemini 3 requirement)
+    if serialized:
+        first_sig = next((d["thought_signature"] for d in serialized if "thought_signature" in d), None)
+        if first_sig:
+            for d in serialized:
+                if "function_call" in d and "thought_signature" not in d:
+                    d["thought_signature"] = first_sig
+
     return serialized if serialized else None
 
 
