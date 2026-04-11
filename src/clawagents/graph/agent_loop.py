@@ -56,12 +56,18 @@ def _patch_dangling_tool_calls(messages: list[LLMMessage]) -> list[LLMMessage]:
     if not messages:
         return messages
 
+    # Build set of all tool_call_ids that have a matching role="tool" response
+    responded_ids: set[str] = set()
+    for msg in messages:
+        if msg.role == "tool" and msg.tool_call_id:
+            responded_ids.add(msg.tool_call_id)
+
     patched: list[LLMMessage] = []
     for i, msg in enumerate(messages):
         patched.append(msg)
 
-        # Look for assistant messages with JSON tool calls without a following [Tool Result]
-        if msg.role == "assistant" and msg.content.startswith('{"tool":'):
+        # Text-mode: look for assistant messages with JSON tool calls without a following [Tool Result]
+        if msg.role == "assistant" and isinstance(msg.content, str) and msg.content.startswith('{"tool":'):
             has_result = (
                 i + 1 < len(messages)
                 and messages[i + 1].role == "user"
@@ -73,6 +79,19 @@ def _patch_dangling_tool_calls(messages: list[LLMMessage]) -> list[LLMMessage]:
                     role="user",
                     content="[Tool Result] Tool call was cancelled — the agent was interrupted before it could complete.",
                 ))
+
+        # Native tool calls: inject synthetic role="tool" for any missing responses
+        elif msg.role == "assistant" and msg.tool_calls_meta:
+            for tc in msg.tool_calls_meta:
+                tc_id = tc.get("id")
+                if tc_id and tc_id not in responded_ids:
+                    patched.append(LLMMessage(
+                        role="tool",
+                        content="Tool call was cancelled — the agent was interrupted before it could complete.",
+                        tool_call_id=tc_id,
+                    ))
+                    responded_ids.add(tc_id)
+
     return patched
 
 
@@ -185,8 +204,24 @@ OnEvent = Callable[[EventKind, dict[str, Any]], None]
 
 # Hook types for extensibility without middleware overhead
 BeforeLLMHook = Callable[[list["LLMMessage"]], list["LLMMessage"]]
-BeforeToolHook = Callable[[str, dict[str, Any]], bool]
 AfterToolHook = Callable[[str, dict[str, Any], "ToolResult"], "ToolResult"]
+
+
+@dataclass
+class HookResult:
+    """Rich result from a BeforeToolHook.
+
+    Allows hooks to deny execution with a reason, rewrite tool arguments,
+    or inject messages into the conversation — instead of a bare bool.
+    """
+    allowed: bool = True
+    reason: str = ""
+    updated_args: dict[str, Any] | None = None
+    messages: list[Any] | None = None  # list[LLMMessage] — forward-ref safe
+
+
+# BeforeToolHook is backward-compatible: old hooks returning bool still work.
+BeforeToolHook = Callable[[str, dict[str, Any]], "bool | HookResult"]
 
 
 def _default_on_event(kind: EventKind, data: dict[str, Any]) -> None:
@@ -660,7 +695,7 @@ def _micro_compact_tool_results(
 
 # ─── Soft-Trim: prune stale/low-value content before compaction ───────────
 
-_SOFT_TRIM_RATIO = 0.60
+_SOFT_TRIM_BUDGET_FRACTION = 0.75  # soft-trim at 75% of the compaction budget_ratio
 _SOFT_TRIM_RESULT_MAX_CHARS = 1000
 _SOFT_TRIM_RESULT_KEEP_CHARS = 500
 _SOFT_TRIM_RECENT_PROTECTED = 10
@@ -676,12 +711,12 @@ def _soft_trim_messages(
     model_name: Optional[str] = None,
 ) -> list[LLMMessage]:
     """Remove stale/low-value content from context before hitting compaction threshold."""
-    effective_window, _ratio = (
+    effective_window, budget_ratio = (
         _resolve_context_budget(model_name, context_window)
         if model_name
         else (context_window, _CONTEXT_BUDGET_RATIO)
     )
-    soft_budget = int(effective_window * _SOFT_TRIM_RATIO)
+    soft_budget = int(effective_window * budget_ratio * _SOFT_TRIM_BUDGET_FRACTION)
     current_tokens = _estimate_messages_tokens(messages, token_multiplier)
 
     if current_tokens <= soft_budget:
@@ -858,15 +893,17 @@ async def _compact_if_needed(
     older = non_system[:split_idx]
     recent = non_system[split_idx:]
 
-    offload_path = _offload_history(older)
-    if offload_path:
-        emit("context", {"message": f"offloaded {len(older)} messages to {offload_path}"})
-
     task_context = ""
     for m in non_system:
         if m.role == "user" and not (isinstance(m.content, str) and m.content.startswith("[Tool Result]")):
             task_context = m.content[:500] if isinstance(m.content, str) else ""
             break
+
+    _archive_pre_compact_transcript(older, task_context)
+
+    offload_path = _offload_history(older)
+    if offload_path:
+        emit("context", {"message": f"offloaded {len(older)} messages to {offload_path}"})
 
     text_parts: list[str] = []
     for m in older:
@@ -930,9 +967,34 @@ async def _compact_if_needed(
 # ─── History Offloading ───────────────────────────────────────────────────
 
 
-
 def _get_history_dir() -> Path:
     return Path.cwd() / ".clawagents" / "history"
+
+
+def _archive_pre_compact_transcript(older_messages: list[LLMMessage], task_context: str) -> None:
+    """Archive full messages to a markdown file before compaction (feature-gated)."""
+    from clawagents.config.features import is_enabled
+    if not is_enabled("transcript_archival"):
+        return
+
+    try:
+        transcript_dir = Path.cwd() / ".clawagents" / "transcripts"
+        transcript_dir.mkdir(parents=True, exist_ok=True)
+        ts = int(time.time())
+        path = transcript_dir / f"pre_compact_{ts}_{len(older_messages)}msgs.md"
+
+        lines: list[str] = [
+            "## Pre-Compact Transcript\n",
+            f"\nTask: {task_context}\n",
+            "\n### Messages\n\n",
+        ]
+        for m in older_messages:
+            content = m.content if isinstance(m.content, str) else str(m.content)
+            lines.append(f"**{m.role}**: {content[:2000]}\n\n")
+
+        path.write_text("".join(lines), "utf-8")
+    except Exception:
+        logger.debug("Pre-compact transcript archival failed", exc_info=True)
 
 
 def _offload_history(messages: list[LLMMessage]) -> str | None:
@@ -1427,14 +1489,26 @@ async def run_agent_graph(
                         emit("warn", {"message": f"external pre_tool_use hook error: {hook_err}"})
 
                 if before_tool:
-                    approved = False
+                    hook_approved = True
+                    hook_reason = "rejected by before_tool hook"
                     try:
-                        approved = bool(before_tool(call.tool_name, call.args))
+                        hook_raw = before_tool(call.tool_name, call.args)
+                        if isinstance(hook_raw, HookResult):
+                            hook_approved = hook_raw.allowed
+                            if hook_raw.reason:
+                                hook_reason = hook_raw.reason
+                            if hook_raw.allowed and hook_raw.updated_args is not None:
+                                call = ParsedToolCall(tool_name=call.tool_name, args=hook_raw.updated_args)
+                            if hook_raw.messages:
+                                messages.extend(hook_raw.messages)
+                        else:
+                            hook_approved = bool(hook_raw)
                     except Exception as hook_err:
                         emit("warn", {"message": f"before_tool hook error: {hook_err}"})
-                    if not approved:
-                        emit("tool_skipped", {"name": call.tool_name, "reason": "rejected by before_tool hook"})
-                        messages.append(LLMMessage(role="user", content=f"[Tool Skipped] {call.tool_name} was not approved."))
+                        hook_approved = False
+                    if not hook_approved:
+                        emit("tool_skipped", {"name": call.tool_name, "reason": hook_reason})
+                        messages.append(LLMMessage(role="user", content=f"[Tool Skipped] {call.tool_name} was not approved: {hook_reason}"))
                         continue
 
                 loop_tracker.record(call.tool_name, call.args)
@@ -1576,16 +1650,33 @@ async def run_agent_graph(
                 # ── before_tool hook (parallel) — filter out rejected calls ──
                 approved_calls = tool_calls
                 if before_tool:
-                    def _safe_check(c):
+                    def _apply_hook(c):
+                        """Return (approved_call_or_None, reason) after running the hook."""
                         try:
-                            return bool(before_tool(c.tool_name, c.args))
+                            hook_raw = before_tool(c.tool_name, c.args)
+                            if isinstance(hook_raw, HookResult):
+                                if not hook_raw.allowed:
+                                    return None, hook_raw.reason or "rejected by before_tool hook"
+                                if hook_raw.messages:
+                                    messages.extend(hook_raw.messages)
+                                if hook_raw.updated_args is not None:
+                                    c = ParsedToolCall(tool_name=c.tool_name, args=hook_raw.updated_args)
+                                return c, ""
+                            else:
+                                if not bool(hook_raw):
+                                    return None, "rejected by before_tool hook"
+                                return c, ""
                         except Exception as hook_err:
                             emit("warn", {"message": f"before_tool hook error: {hook_err}"})
-                            return False
-                    approved_calls = [c for c in tool_calls if _safe_check(c)]
-                    skipped = [c for c in tool_calls if c not in approved_calls]
-                    for c in skipped:
-                        emit("tool_skipped", {"name": c.tool_name, "reason": "rejected by before_tool hook"})
+                            return None, "hook error"
+
+                    approved_calls = []
+                    for c in tool_calls:
+                        result_call, reason = _apply_hook(c)
+                        if result_call is None:
+                            emit("tool_skipped", {"name": c.tool_name, "reason": reason})
+                        else:
+                            approved_calls.append(result_call)
                     if not approved_calls:
                         messages.append(LLMMessage(role="user", content="[Tool Skipped] All tool calls were not approved."))
                         continue

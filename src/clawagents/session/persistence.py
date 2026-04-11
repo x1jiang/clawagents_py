@@ -54,8 +54,13 @@ class SessionWriter:
         event = {"type": event_type, "ts": time.time()}
         if data:
             event.update(data)
-        with open(self.path, "a") as f:
-            f.write(json.dumps(event, default=str) + "\n")
+        from clawagents.utils.atomic_write import atomic_write_text
+        existing = ""
+        try:
+            existing = self.path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            pass
+        atomic_write_text(self.path, existing + json.dumps(event, default=str) + "\n")
 
     def write_system_prompt(self, content: str) -> None:
         self.append("system_prompt", {"content": content})

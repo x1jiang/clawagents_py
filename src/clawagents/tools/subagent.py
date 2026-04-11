@@ -7,6 +7,7 @@ Supports typed SubAgentSpec for per-agent configuration (name, prompt, etc.)
 """
 
 import asyncio
+import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -14,6 +15,12 @@ from clawagents.providers.llm import LLMProvider
 from clawagents.tools.registry import Tool, ToolRegistry, ToolResult
 from clawagents.process.command_queue import enqueue_command_in_lane
 from clawagents.process.lanes import CommandLane
+from clawagents.config.features import is_enabled
+
+# Keys that must NOT be inherited by child agents — prevents parent context leakage.
+EXCLUDED_STATE_KEYS: frozenset[str] = frozenset({
+    "messages", "todos", "trajectory", "lessons", "session"
+})
 
 
 @dataclass
@@ -38,6 +45,15 @@ class SubAgentSpec:
 
     use_native_tools: bool = True
     """Whether to use native tool calling for this sub-agent."""
+
+    credential_proxy: bool = False
+    """When True (and the ``credential_proxy`` feature flag is on), start a
+    local credential proxy so the sub-agent never receives raw API keys.
+
+    The sub-agent's environment will have ``OPENAI_BASE_URL`` /
+    ``ANTHROPIC_BASE_URL`` pointed at the proxy, and real key env-vars
+    will be stripped from its environment.
+    """
 
 
 class TaskTool:
@@ -99,17 +115,68 @@ class TaskTool:
         effective_max_iter = spec.max_iterations if spec else max_iter
         effective_prompt = spec.system_prompt if spec else None
         effective_native_tools = spec.use_native_tools if spec else True
+        use_cred_proxy = bool(spec and spec.credential_proxy and is_enabled("credential_proxy"))
 
         async def do_run() -> ToolResult:
-            state = await run_agent_graph(
-                task=description,
-                llm=self._llm,
-                tools=self._tools,
-                system_prompt=effective_prompt,
-                max_iterations=effective_max_iter,
-                streaming=False,
-                use_native_tools=effective_native_tools,
-            )
+            from clawagents.sandbox.credential_proxy import CredentialProxy
+
+            # Optionally wrap with credential proxy so the sub-agent never
+            # sees raw API keys. The proxy injects credentials at the HTTP
+            # transport layer; the sub-agent gets a safe localhost URL.
+            proxy: Optional[CredentialProxy] = None
+            proxy_env_overrides: Dict[str, str] = {}
+            if use_cred_proxy:
+                cred_headers: Dict[str, str] = {}
+                for env_key, header_name in (
+                    ("OPENAI_API_KEY", "Authorization"),
+                    ("ANTHROPIC_API_KEY", "x-api-key"),
+                ):
+                    val = os.environ.get(env_key)
+                    if val:
+                        if env_key == "OPENAI_API_KEY":
+                            cred_headers[header_name] = f"Bearer {val}"
+                        else:
+                            cred_headers[header_name] = val
+                if cred_headers:
+                    proxy = CredentialProxy(cred_headers)
+                    proxy_url = proxy.start()
+                    proxy_env_overrides = {
+                        "OPENAI_BASE_URL": proxy_url,
+                        "ANTHROPIC_BASE_URL": proxy_url,
+                        # Strip real keys so the sub-agent can't use them directly
+                        "OPENAI_API_KEY": "proxy",
+                        "ANTHROPIC_API_KEY": "proxy",
+                    }
+
+            # Restore original env after run
+            _old_env: Dict[str, Optional[str]] = {}
+            for k, v in proxy_env_overrides.items():
+                _old_env[k] = os.environ.get(k)
+                os.environ[k] = v
+
+            try:
+                # Build kwargs, stripping any parent-context keys to keep the
+                # child agent isolated (M1: subagent state isolation).
+                run_kwargs: Dict[str, Any] = {
+                    k: v for k, v in {
+                        "task": description,
+                        "llm": self._llm,
+                        "tools": self._tools,
+                        "system_prompt": effective_prompt,
+                        "max_iterations": effective_max_iter,
+                        "streaming": False,
+                        "use_native_tools": effective_native_tools,
+                    }.items() if k not in EXCLUDED_STATE_KEYS
+                }
+                state = await run_agent_graph(**run_kwargs)
+            finally:
+                for k, orig in _old_env.items():
+                    if orig is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = orig
+                if proxy is not None:
+                    proxy.stop()
 
             if state.status == "error":
                 return ToolResult(

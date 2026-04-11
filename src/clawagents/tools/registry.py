@@ -109,6 +109,33 @@ def truncate_tool_output(output: str | list[dict[str, Any]], max_chars: int = MA
 _FENCE_RE = re.compile(r"```(?:json)?\s*\n?([\s\S]*?)\n?\s*```")
 
 
+class LazyTool:
+    """Deferred tool — the backing module is imported only on first execute()."""
+
+    def __init__(
+        self,
+        name: str,
+        description: str,
+        parameters: Dict[str, Dict[str, Any]],
+        module_path: str,
+        class_name: str,
+    ):
+        self.name = name
+        self.description = description
+        self.parameters = parameters
+        self._module_path = module_path
+        self._class_name = class_name
+        self._resolved: Optional[Tool] = None
+
+    async def execute(self, args: Dict[str, Any]):
+        if self._resolved is None:
+            import importlib
+            mod = importlib.import_module(self._module_path)
+            cls = getattr(mod, self._class_name)
+            self._resolved = cls()
+        return await self._resolved.execute(args)
+
+
 class ToolRegistry:
     def __init__(
         self,
@@ -131,6 +158,25 @@ class ToolRegistry:
 
     def register(self, tool: Tool) -> None:
         self.tools[tool.name] = tool
+        self._description_cache = None
+
+    def register_lazy(
+        self,
+        name: str,
+        description: str,
+        parameters: Dict[str, Dict[str, Any]],
+        module_path: str,
+        class_name: str,
+    ) -> None:
+        """Register a tool that will be imported only when first executed."""
+        lazy = LazyTool(
+            name=name,
+            description=description,
+            parameters=parameters,
+            module_path=module_path,
+            class_name=class_name,
+        )
+        self.tools[name] = lazy  # type: ignore[assignment]
         self._description_cache = None
 
     def get(self, name: str) -> Optional[Tool]:

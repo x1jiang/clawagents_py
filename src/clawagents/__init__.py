@@ -1,9 +1,9 @@
-__version__ = "5.28.0"
+__version__ = "6.0.0"
 
 from clawagents.agent import ClawAgent, create_claw_agent
 from clawagents.graph.agent_loop import (
     AgentState, OnEvent, EventKind,
-    BeforeLLMHook, BeforeToolHook, AfterToolHook,
+    BeforeLLMHook, BeforeToolHook, AfterToolHook, HookResult,
 )
 from clawagents.trajectory import (
     TrajectoryRecorder, TurnRecord, RunSummary,

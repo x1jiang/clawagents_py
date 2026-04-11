@@ -18,6 +18,7 @@ class QueueEntry:
     enqueued_at: float
     warn_after_ms: int
     on_wait: Optional[Callable[[float, int], None]] = None
+    is_barrier: bool = False
 
 
 @dataclass
@@ -56,22 +57,30 @@ def drain_lane(lane: str):
     def pump():
         global next_task_id
         while len(state.active_task_ids) < state.max_concurrent and state.queue:
-            entry = state.queue.pop(0)
+            entry = state.queue[0]
+
+            # Barrier: wait until all active tasks finish before dispatching.
+            if entry.is_barrier and state.active_task_ids:
+                break
+
+            state.queue.pop(0)
             waited_ms = (time.time() - entry.enqueued_at) * 1000
 
             if waited_ms >= entry.warn_after_ms:
                 if entry.on_wait:
                     entry.on_wait(waited_ms, len(state.queue))
                 diag.warn(f"lane wait exceeded: lane={lane} waitedMs={int(waited_ms)} queueAhead={len(state.queue)}")
-            
+
             log_lane_dequeue(lane, waited_ms, len(state.queue))
-            
+
             task_id = next_task_id
             next_task_id += 1
             task_generation = state.generation
             state.active_task_ids.add(task_id)
 
-            async def _run_task(entry=entry, task_id=task_id, task_generation=task_generation):
+            is_barrier_entry = entry.is_barrier
+
+            async def _run_task(entry=entry, task_id=task_id, task_generation=task_generation, is_barrier_entry=is_barrier_entry):
                 start_time = time.time()
                 try:
                     result = await entry.task()
@@ -93,6 +102,10 @@ def drain_lane(lane: str):
 
             # Fire and forget the background execution
             asyncio.create_task(_run_task())
+
+            # After dispatching a barrier, don't dispatch anything else until it finishes.
+            if is_barrier_entry:
+                break
 
         state.draining = False
 
@@ -185,6 +198,34 @@ def reset_all_lanes():
 
 def get_active_task_count() -> int:
     return sum(len(s.active_task_ids) for s in lanes.values())
+
+
+async def enqueue_barrier(
+    lane: str,
+    task: Callable[[], Coroutine[Any, Any, Any]],
+    warn_after_ms: int = 2000,
+    on_wait: Optional[Callable[[float, int], None]] = None,
+) -> Any:
+    """Enqueue a barrier task that runs only after all currently active tasks complete."""
+    cleaned = lane.strip() or CommandLane.Main.value
+    state = get_lane_state(cleaned)
+
+    loop = asyncio.get_running_loop()
+    future = loop.create_future()
+
+    state.queue.append(QueueEntry(
+        task=task,
+        future=future,
+        enqueued_at=time.time(),
+        warn_after_ms=warn_after_ms,
+        on_wait=on_wait,
+        is_barrier=True,
+    ))
+
+    log_lane_enqueue(cleaned, len(state.queue) + len(state.active_task_ids))
+    drain_lane(cleaned)
+
+    return await future
 
 
 async def wait_for_active_tasks(timeout_ms: int) -> Dict[str, bool]:

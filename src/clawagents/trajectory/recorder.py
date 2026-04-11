@@ -415,18 +415,25 @@ class TrajectoryRecorder:
 
     def _write_summary(self, summary: RunSummary) -> None:
         try:
+            from clawagents.utils.atomic_write import atomic_write_text
             runs_file = _get_trajectories_dir() / "runs.jsonl"
             data = asdict(summary)
-            with open(runs_file, "a", encoding="utf-8") as f:
-                f.write(json.dumps(data, default=str) + "\n")
+            # Read existing lines, append new one, then write atomically.
+            existing = ""
+            try:
+                existing = runs_file.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                pass
+            atomic_write_text(runs_file, existing + json.dumps(data, default=str) + "\n")
         except Exception:
             logger.debug("Failed to write run summary", exc_info=True)
 
         # Feature E: export RFT-ready transitions
         try:
+            from clawagents.utils.atomic_write import atomic_write_text
             rft_file = _get_trajectories_dir() / f"{self.run_id}_rft.json"
             transitions = self.export_rft_transitions()
-            rft_file.write_text(json.dumps({
+            atomic_write_text(rft_file, json.dumps({
                 "run_id": self.run_id,
                 "task": self.task,
                 "model": self.model,

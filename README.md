@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-5.28.0-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.0.0-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -26,7 +26,7 @@ pip install clawagents[anthropic]   # + Anthropic Claude support
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 5.28.0** — Latest stable release (April 2026)
+> **Version 6.0.0** — Latest stable release (April 2026)
 
 ---
 
@@ -1147,6 +1147,39 @@ python -m pytest tests/ -v -m benchmark
 ---
 
 ## Changelog
+
+### v6.0.0 — Production Hardening: 17 Improvements from 10 Reference Codebases
+
+Major release incorporating patterns from OpenClaw, DeepAgents, NanoClaw, Claw-Code, ToolUniverse, SkyRL, CUDA-Agent, and OpenClaw-RL.
+
+**High Priority**
+
+| Feature | Description |
+|:---|:---|
+| **Native Tool Call Patching (H1)** | `_patch_dangling_tool_calls` now handles native function calling (`tool_calls_meta`), not just text-mode JSON. Injects synthetic cancelled responses for orphaned tool_call IDs. Prevents 400 API errors in HITL scenarios. |
+| **Three-Tier Provider Fallback (H2)** | New `FallbackProvider` wraps any LLM with `primary → named fallback → global fallback` chain. Quarantines providers after consecutive failures, periodic health-check restores. Config via `fallback_models` param or `CLAWAGENTS_FALLBACK_MODELS` env var. |
+| **Credential Proxy (H3)** | New `CredentialProxy` — local HTTP proxy that injects API keys into outbound requests so sandboxed sub-agents never see raw credentials. Opt-in via `CLAW_FEATURE_CREDENTIAL_PROXY=1`. |
+| **Rich Hook Result Model (H4)** | `BeforeToolHook` now accepts `HookResult` return (backward-compatible with bool). Hooks can block with reason, redirect args, inject messages. New `HookResult` dataclass exported from public API. |
+| **Fraction-Based Summarization (H5)** | Soft-trim threshold now derives from per-model `budget_ratio` instead of hardcoded 0.60. GPT=0.60, Gemini=0.675, Claude=0.6375. Auto-adapts to any model's context window. |
+| **Lazy Static Tool Registry (H7)** | New `LazyTool` class + `ToolRegistry.register_lazy()`. Tools are imported only on first `execute()` call. Fast startup with large tool sets. |
+
+**Medium Priority**
+
+| Feature | Description |
+|:---|:---|
+| **Subagent State Isolation (M1)** | `EXCLUDED_STATE_KEYS` prevents parent state (messages, todos, trajectory, lessons, session) from leaking into child sub-agents. |
+| **SKILL.md Constraint Documents (M4)** | Skills now support `forbidden-actions`, `workspace-layout`, `success-criteria`, `workflow-steps` in YAML frontmatter. Structured constraints for sandboxed code execution. |
+| **Pre-Compact Transcript Archival (M5)** | Before context compaction, full transcript is archived to `.clawagents/transcripts/`. Opt-in via `CLAW_FEATURE_TRANSCRIPT_ARCHIVAL=1`. |
+| **Atomic File Writes (M7)** | Trajectory recorder and session persistence now use temp-then-rename pattern via `atomic_write_text()`. Prevents corruption on crash. |
+| **Barrier-Based Scheduling (M8)** | Command queue now supports barrier entries. Destructive ops wait for active tasks to complete before executing. |
+| **Session Heartbeat (M9)** | New `SessionHeartbeat` class auto-releases stale sessions after timeout. Resource management for multi-user deployments. |
+| **Cross-Provider Test Suite (M10)** | 14 conformance tests (7 per backend) ensuring `LocalBackend` and `InMemoryBackend` both satisfy the `SandboxBackend` protocol. |
+
+**New files:** `providers/fallback.py`, `sandbox/credential_proxy.py`, `utils/atomic_write.py`, `session/heartbeat.py`, `tests/test_cross_provider.py`
+
+**New feature flags:** `transcript_archival` (off), `credential_proxy` (off)
+
+**New exports:** `HookResult`, `FallbackProvider`, `CredentialProxy`, `SessionHeartbeat`, `LazyTool`, `atomic_write_text`, `atomic_write_bytes`
 
 ### v5.28.0 — Error Taxonomy, Prompt Caching, Session Persistence & External Hooks
 

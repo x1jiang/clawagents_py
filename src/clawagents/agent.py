@@ -247,6 +247,7 @@ def create_claw_agent(
     instruction: Optional[str] = None,
     tools: Optional[List] = None,
     skills: Union[str, List[Union[str, os.PathLike]], None] = None,
+    fallback_models: Optional[List[str]] = None,
     memory: Union[str, List[Union[str, os.PathLike]], None] = None,
     sandbox: Any = None,
     streaming: bool = True,
@@ -303,6 +304,14 @@ def create_claw_agent(
                         Default: from CLAW_PREVIEW_CHARS env / 120.
         response_chars: Max chars for LLM response text in trajectory logs.
                         Default: from CLAW_RESPONSE_CHARS env / 500.
+        fallback_models: Ordered list of model name strings to try when the primary
+                        provider fails. Wraps the primary in a FallbackProvider.
+                        Also read from CLAWAGENTS_FALLBACK_MODELS env var
+                        (comma-separated). Priority is controlled by
+                        CLAWAGENTS_PROVIDER_CONFIG_MODE:
+                          "env_override" — env var takes precedence (default),
+                          "default"      — constructor argument takes precedence,
+                          "fallback"     — env var is last resort.
 
     Examples:
         # Zero-config (uses env vars)
@@ -359,6 +368,17 @@ def create_claw_agent(
 
     # ── Resolve model → LLMProvider ────────────────────────────────────
     llm = _resolve_model(model, streaming, api_key, context_window, max_tokens, temperature, base_url, api_version)
+
+    # ── Resolve fallback providers ──────────────────────────────────────
+    llm = _apply_fallback_providers(
+        llm,
+        fallback_models=fallback_models,
+        streaming=streaming,
+        context_window=context_window,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        on_event=on_event,
+    )
 
     # ── Resolve sandbox backend ────────────────────────────────────────
     if sandbox is None:
@@ -544,6 +564,51 @@ def _auto_discover_skills() -> list:
         if os.path.isdir(path):
             found.append(path)
     return found
+
+
+def _apply_fallback_providers(
+    primary: LLMProvider,
+    fallback_models: Optional[List[str]],
+    streaming: bool,
+    context_window: Optional[int],
+    max_tokens: Optional[int],
+    temperature: Optional[float],
+    on_event: Any,
+) -> LLMProvider:
+    """Resolve fallback model list respecting CLAWAGENTS_PROVIDER_CONFIG_MODE,
+    build fallback LLMProvider instances, and wrap *primary* in a FallbackProvider.
+
+    CLAWAGENTS_PROVIDER_CONFIG_MODE values:
+      "env_override"  — env var CLAWAGENTS_FALLBACK_MODELS takes precedence (default)
+      "default"       — constructor argument takes precedence
+      "fallback"      — env var is last resort (appended after constructor list)
+    """
+    env_raw = os.environ.get("CLAWAGENTS_FALLBACK_MODELS", "")
+    env_models: List[str] = [m.strip() for m in env_raw.split(",") if m.strip()] if env_raw else []
+    config_mode = os.environ.get("CLAWAGENTS_PROVIDER_CONFIG_MODE", "env_override").lower()
+
+    if config_mode == "env_override":
+        resolved_fallbacks = env_models or (fallback_models or [])
+    elif config_mode == "default":
+        resolved_fallbacks = fallback_models or env_models
+    else:  # "fallback"
+        resolved_fallbacks = (fallback_models or []) + [m for m in env_models if m not in (fallback_models or [])]
+
+    if not resolved_fallbacks:
+        return primary
+
+    from clawagents.providers.fallback import FallbackProvider
+
+    fallback_providers: List[LLMProvider] = [
+        _resolve_model(m, streaming, None, context_window, max_tokens, temperature, None, None)
+        for m in resolved_fallbacks
+    ]
+
+    return FallbackProvider(
+        primary=primary,
+        fallbacks=fallback_providers,
+        on_event=on_event,
+    )
 
 
 def _compose_before_llm(

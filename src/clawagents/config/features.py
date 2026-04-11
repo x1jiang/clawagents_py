@@ -40,6 +40,8 @@ _FEATURE_DEFAULTS: dict[str, str] = {
     # Complex — opt-in
     "forked_agents":        "0",   # Background forked agent pattern
     "coordinator":          "0",   # Coordinator/swarm orchestration mode
+    "transcript_archival":  "0",   # Archive full messages to markdown before compaction
+    "credential_proxy":     "0",   # Credential proxy for sandboxed sub-agents
 }
 
 # Env var prefix: CLAW_FEATURE_MICRO_COMPACT=1

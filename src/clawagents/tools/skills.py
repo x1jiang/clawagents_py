@@ -22,6 +22,10 @@ class Skill:
     path: str
     allowed_tools: List[str] = field(default_factory=list)
     requires: Optional[SkillRequires] = None
+    forbidden_actions: List[str] = field(default_factory=list)
+    workspace_layout: str = ""
+    success_criteria: str = ""
+    workflow_steps: List[str] = field(default_factory=list)
 
 def parse_skill_file(content: str, file_path: str) -> Skill:
     default_name = Path(file_path).stem
@@ -30,6 +34,10 @@ def parse_skill_file(content: str, file_path: str) -> Skill:
     body = content
     allowed_tools: List[str] = []
     requires: Optional[SkillRequires] = None
+    forbidden_actions: List[str] = []
+    workspace_layout: str = ""
+    success_criteria: str = ""
+    workflow_steps: List[str] = []
 
     frontmatter_match = re.match(r"^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]*)$", content)
     if frontmatter_match:
@@ -68,8 +76,71 @@ def parse_skill_file(content: str, file_path: str) -> Skill:
                 env=_parse_list(env_match.group(1)) if env_match else None,
             )
 
-    return Skill(name=name, description=description, content=body.strip(), path=file_path,
-                 allowed_tools=allowed_tools, requires=requires)
+        def _parse_list(raw: str) -> List[str]:
+            cleaned = re.sub(r'[\[\]"\']', "", raw)
+            return [x.strip() for x in re.split(r"[\s,]+", cleaned) if x.strip()]
+
+        def _parse_block_list(key: str, yaml_src: str) -> Optional[List[str]]:
+            """Parse a YAML key that may have an inline value or a block list of '- item' entries."""
+            # First try: key followed immediately by block list items on next lines
+            block_pattern = re.compile(
+                r"^" + re.escape(key) + r":\s*\n((?:[ \t]+-[^\n]*\n?)+)",
+                re.MULTILINE,
+            )
+            bm = block_pattern.search(yaml_src)
+            if bm:
+                block_raw = bm.group(1)
+                items = re.findall(r"^[ \t]+-\s+(.+)$", block_raw, re.MULTILINE)
+                return [item.strip() for item in items if item.strip()]
+
+            # Second try: inline value on same line
+            inline_pattern = re.compile(
+                r"^" + re.escape(key) + r":\s+(.+)$",
+                re.MULTILINE,
+            )
+            im = inline_pattern.search(yaml_src)
+            if im:
+                return _parse_list(im.group(1).strip())
+
+            return None
+
+        # Parse forbidden-actions: inline or block list
+        fa_items = _parse_block_list("forbidden-actions", yaml_content)
+        if fa_items is not None:
+            forbidden_actions = fa_items
+
+        # Parse workspace-layout: single-line string or literal block scalar
+        layout_match = re.search(r'^workspace-layout:\s*\|?\s*"?([^"|\n][^"]*)"?$', yaml_content, re.MULTILINE)
+        if layout_match:
+            workspace_layout = layout_match.group(1).strip()
+        else:
+            # Literal block scalar (|) — grab indented content
+            layout_block = re.search(r"^workspace-layout:\s*\|\s*\n((?:[ \t]+[^\n]*\n?)+)", yaml_content, re.MULTILINE)
+            if layout_block:
+                workspace_layout = layout_block.group(1)
+
+        # Parse success-criteria: single-line string
+        criteria_match = re.search(r'^success-criteria:\s*"?([^"\n]+)"?$', yaml_content, re.MULTILINE)
+        if criteria_match:
+            success_criteria = criteria_match.group(1).strip()
+
+        # Parse workflow-steps: inline or block list
+        ws_items = _parse_block_list("workflow-steps", yaml_content)
+        if ws_items is not None:
+            workflow_steps = ws_items
+
+    return Skill(
+        name=name,
+        description=description,
+        content=body.strip(),
+        path=file_path,
+        allowed_tools=allowed_tools,
+        requires=requires,
+        forbidden_actions=forbidden_actions,
+        workspace_layout=workspace_layout,
+        success_criteria=success_criteria,
+        workflow_steps=workflow_steps,
+    )
 
 
 def is_skill_eligible(skill: Skill) -> bool:
@@ -165,11 +236,32 @@ def create_skill_tools(store: SkillStore) -> List[Tool]:
         async def execute(self, args: Dict[str, Any]) -> ToolResult:
             name = str(args.get("name", ""))
             skill = store.get(name)
-            
+
             if not skill:
                 available = ", ".join([s.name for s in store.list()])
                 return ToolResult(success=False, output="", error=f"Skill \"{name}\" not found. Available: {available or 'none'}")
-            
-            return ToolResult(success=True, output=f"# Skill: {skill.name}\n\n{skill.content}")
+
+            parts = [f"# Skill: {skill.name}"]
+
+            if skill.forbidden_actions:
+                parts.append("\n## Forbidden Actions")
+                for action in skill.forbidden_actions:
+                    parts.append(f"- {action}")
+
+            if skill.workspace_layout:
+                parts.append("\n## Workspace Layout")
+                parts.append(skill.workspace_layout)
+
+            if skill.success_criteria:
+                parts.append("\n## Success Criteria")
+                parts.append(skill.success_criteria)
+
+            if skill.workflow_steps:
+                parts.append("\n## Workflow Steps")
+                for i, step in enumerate(skill.workflow_steps, 1):
+                    parts.append(f"{i}. {step}")
+
+            parts.append(f"\n{skill.content}")
+            return ToolResult(success=True, output="\n".join(parts))
 
     return [ListSkillsTool(), UseSkillTool()]
