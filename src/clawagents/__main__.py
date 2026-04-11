@@ -443,6 +443,58 @@ def cmd_prune_trajectories(days: int):
     print(f"Pruned {removed} trajectory file(s) older than {days} days.")
 
 
+# ─── Session Commands ─────────────────────────────────────────────────────
+
+def cmd_sessions():
+    """List saved sessions."""
+    from clawagents.session.persistence import list_sessions
+    import time
+    sessions = list_sessions(limit=20)
+    if not sessions:
+        print("No saved sessions found.")
+        print("Enable session persistence: CLAW_FEATURE_SESSION_PERSISTENCE=1")
+        return
+    print(f"{'Session ID':<35} {'Turns':>5}  {'Status':<10}  Task")
+    print("-" * 90)
+    for s in sessions:
+        ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(s.created_ts))
+        print(f"{s.session_id:<35} {s.turn_count:>5}  {s.status:<10}  {s.task[:40]}")
+
+
+async def cmd_resume(session_id: str, timeout_s: int = 0):
+    """Resume a saved session."""
+    from clawagents.session.persistence import list_sessions, SessionReader
+    from clawagents import create_claw_agent
+
+    if session_id == "latest":
+        sessions = list_sessions(limit=1)
+        if not sessions:
+            sys.stderr.write("No sessions found to resume.\n")
+            sys.exit(1)
+        session_id = sessions[0].session_id
+        session_path = sessions[0].path
+    else:
+        from pathlib import Path as P
+        session_path = P.cwd() / ".clawagents" / "sessions" / f"{session_id}.jsonl"
+        if not session_path.exists():
+            sys.stderr.write(f"Session file not found: {session_path}\n")
+            sys.exit(1)
+
+    reader = SessionReader(session_path)
+    task = reader.get_task()
+    initial_messages = reader.reconstruct_messages()
+
+    sys.stderr.write(f"Resuming session {session_id} ({len(initial_messages)} messages, task: {task[:60]})\n")
+
+    agent = create_claw_agent()
+    result = await agent.invoke(
+        task=f"[Resumed session] Continue from where you left off. Original task: {task}",
+        timeout_s=timeout_s,
+    )
+    if result.result:
+        sys.stdout.write(result.result + "\n")
+
+
 # ─── Entry Point ──────────────────────────────────────────────────────────
 
 def main():
@@ -480,10 +532,24 @@ def main():
     parser.add_argument("--quiet", "-q", action="store_true", help="Quiet mode (only show final result)")
     parser.add_argument("--timeout", type=int, default=0, help="Global timeout in seconds (0 = no timeout)")
     parser.add_argument("--prune-trajectories", type=int, metavar="DAYS", help="Delete trajectory files older than N days")
+    parser.add_argument("--sessions", action="store_true", help="List saved sessions")
+    parser.add_argument("--resume", type=str, nargs="?", const="latest", metavar="SESSION_ID", help="Resume a saved session (default: latest)")
     args = parser.parse_args()
 
     if args.prune_trajectories is not None:
         cmd_prune_trajectories(args.prune_trajectories)
+        return
+
+    if args.sessions:
+        cmd_sessions()
+        return
+
+    if args.resume:
+        try:
+            asyncio.run(cmd_resume(args.resume, timeout_s=args.timeout))
+        except KeyboardInterrupt:
+            sys.stderr.write("\nInterrupted.\n")
+            sys.exit(1)
         return
 
     if args.init:

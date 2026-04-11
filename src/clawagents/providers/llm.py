@@ -961,7 +961,19 @@ class AnthropicProvider(LLMProvider):
             "messages": api_messages,
         }
         if system_parts:
-            kwargs["system"] = "\n".join(system_parts)
+            joined = "\n".join(system_parts)
+            # Feature: Cache boundary optimization
+            # Split on __CACHE_BOUNDARY__ marker to create static (cached) + dynamic blocks
+            if "__CACHE_BOUNDARY__" in joined:
+                static_part, dynamic_part = joined.split("__CACHE_BOUNDARY__", 1)
+                system_blocks = [
+                    {"type": "text", "text": static_part.strip(), "cache_control": {"type": "ephemeral"}},
+                ]
+                if dynamic_part.strip():
+                    system_blocks.append({"type": "text", "text": dynamic_part.strip()})
+                kwargs["system"] = system_blocks
+            else:
+                kwargs["system"] = joined
         if self._temperature > 0:
             kwargs["temperature"] = self._temperature
         if tools:
@@ -999,11 +1011,15 @@ class AnthropicProvider(LLMProvider):
                     tool_call_id=block.id,
                 ))
 
+        usage = resp.usage
         return LLMResponse(
             content="".join(text_parts),
             model=self.model,
-            tokens_used=(resp.usage.input_tokens + resp.usage.output_tokens) if resp.usage else 0,
+            tokens_used=(usage.input_tokens + usage.output_tokens) if usage else 0,
             tool_calls=tool_calls if tool_calls else None,
+            cache_creation_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0,
+            cache_read_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
+            prompt_tokens=getattr(usage, "input_tokens", 0) or 0,
         )
 
     async def _stream_with_retry(
@@ -1024,6 +1040,9 @@ class AnthropicProvider(LLMProvider):
             tool_calls: list[NativeToolCall] = []
             current_tool: dict[str, Any] | None = None
             final_tokens = 0
+            cache_creation = 0
+            cache_read = 0
+            prompt_tokens = 0
 
             try:
                 async with self.client.messages.stream(**kwargs) as stream:
@@ -1034,7 +1053,13 @@ class AnthropicProvider(LLMProvider):
                                 tokens_used=final_tokens, partial=True,
                             )
 
-                        if event.type == "content_block_start":
+                        if event.type == "message_start" and hasattr(event, "message"):
+                            u = getattr(event.message, "usage", None)
+                            if u:
+                                prompt_tokens = getattr(u, "input_tokens", 0) or 0
+                                cache_creation = getattr(u, "cache_creation_input_tokens", 0) or 0
+                                cache_read = getattr(u, "cache_read_input_tokens", 0) or 0
+                        elif event.type == "content_block_start":
                             if hasattr(event.content_block, "type"):
                                 if event.content_block.type == "tool_use":
                                     current_tool = {
@@ -1065,6 +1090,9 @@ class AnthropicProvider(LLMProvider):
                     model=self.model,
                     tokens_used=final_tokens,
                     tool_calls=tool_calls if tool_calls else None,
+                    cache_creation_tokens=cache_creation,
+                    cache_read_tokens=cache_read,
+                    prompt_tokens=prompt_tokens,
                 )
 
             except Exception as exc:

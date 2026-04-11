@@ -31,6 +31,12 @@ _FEATURE_DEFAULTS: dict[str, str] = {
     "permission_rules":     "0",   # Declarative tool permission rules
     "background_memory":    "0",   # Continuous memory extraction every N turns
 
+    # New features (inspired by claw-code-main)
+    "cache_boundary":       "1",   # Prompt cache boundary optimization for Anthropic
+    "session_persistence":  "0",   # Session persistence + resume
+    "error_taxonomy":       "1",   # Structured error classification + recovery recipes
+    "external_hooks":       "0",   # External shell hook system
+
     # Complex — opt-in
     "forked_agents":        "0",   # Background forked agent pattern
     "coordinator":          "0",   # Coordinator/swarm orchestration mode

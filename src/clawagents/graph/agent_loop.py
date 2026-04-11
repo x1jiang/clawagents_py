@@ -224,6 +224,7 @@ class AgentState:
     max_iterations: int
     tool_calls: int
     trajectory_file: str = ""
+    session_file: str = ""
 
 
 BASE_SYSTEM_PROMPT = """You are a ClawAgent, an AI assistant that helps users accomplish tasks using tools. You respond with text and tool calls.
@@ -1077,6 +1078,23 @@ async def run_agent_graph(
         from clawagents.trajectory.recorder import TrajectoryRecorder
         recorder = TrajectoryRecorder(task=task, response_chars=response_chars)
 
+    # Feature: Session Persistence — save session as append-only JSONL
+    session_writer = None
+    from clawagents.config.features import is_enabled as _feat_enabled
+    if _feat_enabled("session_persistence"):
+        from clawagents.session.persistence import SessionWriter
+        session_writer = SessionWriter()
+        emit("context", {"message": f"session: {session_writer.session_id} → {session_writer.path}"})
+
+    # Feature: External Hooks — load shell hooks from .clawagents/hooks.json or env
+    ext_hook_runner = None
+    if _feat_enabled("external_hooks"):
+        from clawagents.hooks.external import load_hooks_config, ExternalHookRunner
+        hooks_cfg = load_hooks_config()
+        if hooks_cfg:
+            ext_hook_runner = ExternalHookRunner(hooks_cfg)
+            emit("context", {"message": "external hooks: loaded"})
+
     token_multiplier = 1.0
     resolved_model_name: Optional[str] = None
     _cached_sys_tokens: int = 0  # Feature D: cache system prompt token count
@@ -1092,10 +1110,18 @@ async def run_agent_graph(
             prompt_to_use = prompt_to_use + preamble
             emit("context", {"message": "PTRL: injected lessons from past runs"})
 
+    # Insert __CACHE_BOUNDARY__ between static (instructions + tools) and dynamic content.
+    # The Anthropic provider splits on this marker to enable prompt caching.
+    system_content = f"{prompt_to_use}\n\n{tool_desc}\n__CACHE_BOUNDARY__"
     messages: list[LLMMessage] = [
-        LLMMessage(role="system", content=f"{prompt_to_use}\n\n{tool_desc}"),
+        LLMMessage(role="system", content=system_content),
         LLMMessage(role="user", content=task),
     ]
+
+    # Session: write initial state
+    if session_writer:
+        session_writer.write_system_prompt(system_content)
+
     # Pre-flight: ensure initial payload fits in context window
     messages, tool_desc, native_schemas = _preflight_context_check(
         messages, context_window, tool_desc, native_schemas, registry, emit,
@@ -1147,6 +1173,10 @@ async def run_agent_graph(
                 state.result = state.result or "[cancelled]"
                 break
 
+            # Session: mark turn start
+            if session_writer:
+                session_writer.write_turn_started(round_idx)
+
             try:
                 _check_timeout()
             except TimeoutError as te:
@@ -1165,6 +1195,18 @@ async def run_agent_graph(
             messages = await _compact_if_needed(
                 messages, context_window, llm, emit, token_multiplier, resolved_model_name,
             )
+
+            # External pre_llm hook (runs before programmatic hook)
+            if ext_hook_runner:
+                try:
+                    extra_msgs = await ext_hook_runner.pre_llm(
+                        [{"role": m.role, "content": m.content[:100] if isinstance(m.content, str) else ""} for m in messages[-3:]]
+                    )
+                    if extra_msgs:
+                        for em in extra_msgs:
+                            messages.append(LLMMessage(role=em.get("role", "user"), content=em.get("content", "")))
+                except Exception as hook_err:
+                    emit("warn", {"message": f"external pre_llm hook error: {hook_err}"})
 
             if before_llm:
                 try:
@@ -1187,6 +1229,24 @@ async def run_agent_graph(
                 if not resolved_model_name and response.model:
                     resolved_model_name = response.model
 
+                # Session: write usage
+                if session_writer:
+                    session_writer.write_usage(
+                        response.tokens_used,
+                        cache_read_tokens=response.cache_read_tokens,
+                        cache_creation_tokens=response.cache_creation_tokens,
+                    )
+
+                # External post_llm hook (fire-and-forget)
+                if ext_hook_runner:
+                    try:
+                        await ext_hook_runner.post_llm(
+                            response.content[:500],
+                            len(response.tool_calls or []),
+                        )
+                    except Exception:
+                        pass
+
                 # Prompt cache tracking (Claude Code pattern)
                 from clawagents.config.features import is_enabled as _is_feat_enabled
                 if _is_feat_enabled("cache_tracking") and response.prompt_tokens > 0:
@@ -1195,8 +1255,18 @@ async def run_agent_graph(
                         "message": f"cache: {cache_pct:.0f}% hit ({response.cache_read_tokens}/{response.prompt_tokens} prompt tokens, {response.cache_creation_tokens} created)"
                     })
             except Exception as err:
-                err_msg = str(err).lower()
-                if "context" in err_msg or "token" in err_msg:
+                # Feature: Error Taxonomy — classify and apply recovery recipe
+                from clawagents.errors.taxonomy import classify_error, ErrorClass
+                descriptor = classify_error(err)
+                emit("error", {
+                    "phase": "llm_call",
+                    "message": str(err),
+                    "error_class": descriptor.error_class.value,
+                    "retryable": descriptor.retryable,
+                    "recovery_hint": descriptor.recovery_hint,
+                })
+
+                if descriptor.error_class == ErrorClass.CONTEXT_WINDOW:
                     overflow_retries += 1
                     if overflow_retries > _MAX_OVERFLOW_RETRIES:
                         emit("error", {
@@ -1222,10 +1292,9 @@ async def run_agent_graph(
                     )
                     continue
 
-                logger.exception("LLM call failed at round %d", round_idx)
-                emit("error", {"phase": "llm_call", "message": str(err)})
+                logger.exception("LLM call failed at round %d: [%s] %s", round_idx, descriptor.error_class.value, err)
                 state.status = "error"
-                state.result = str(err)
+                state.result = f"[{descriptor.error_class.value}] {descriptor.recovery_hint}"
                 break
 
             if response.partial and not response.content.strip():
@@ -1329,10 +1398,33 @@ async def run_agent_graph(
                 state.iterations += 1
                 continue
 
+            # Session: write assistant message with tool calls
+            if session_writer:
+                tc_meta = []
+                if native_tool_call_objects:
+                    tc_meta = [{"id": tc.tool_call_id, "name": tc.tool_name, "args": tc.args} for tc in native_tool_call_objects]
+                session_writer.write_assistant_message(
+                    response.content or "",
+                    tool_calls=tc_meta or None,
+                    thinking=_thinking_content,
+                )
+
             if len(tool_calls) == 1:
                 call = tool_calls[0]
                 native_tc = native_tool_call_objects[0] if native_tool_call_objects else None
                 emit("tool_call", {"name": call.tool_name})
+
+                # External pre_tool_use hook
+                if ext_hook_runner:
+                    try:
+                        ext_allowed, ext_args = await ext_hook_runner.pre_tool_use(call.tool_name, call.args)
+                        if not ext_allowed:
+                            emit("tool_skipped", {"name": call.tool_name, "reason": "blocked by external hook"})
+                            messages.append(LLMMessage(role="user", content=f"[Tool Skipped] {call.tool_name} was blocked by external hook."))
+                            continue
+                        call = ParsedToolCall(tool_name=call.tool_name, args=ext_args)
+                    except Exception as hook_err:
+                        emit("warn", {"message": f"external pre_tool_use hook error: {hook_err}"})
 
                 if before_tool:
                     approved = False
@@ -1349,6 +1441,22 @@ async def run_agent_graph(
 
                 tool_result = await registry.execute_tool(call.tool_name, call.args)
                 state.tool_calls += 1
+
+                # External post_tool_use hook
+                if ext_hook_runner:
+                    try:
+                        ext_result = await ext_hook_runner.post_tool_use(
+                            call.tool_name, call.args,
+                            {"success": tool_result.success, "output": str(tool_result.output)[:1000]},
+                        )
+                        if "success" in ext_result and "output" in ext_result:
+                            tool_result = ToolResult(
+                                success=ext_result["success"],
+                                output=ext_result["output"],
+                                error=ext_result.get("error"),
+                            )
+                    except Exception as hook_err:
+                        emit("warn", {"message": f"external post_tool_use hook error: {hook_err}"})
 
                 if after_tool:
                     try:
@@ -1375,6 +1483,15 @@ async def run_agent_graph(
                     "success": tool_result.success,
                     "preview": preview,
                 })
+
+                # Session: write tool result
+                if session_writer:
+                    tc_id = native_tc.tool_call_id if native_tc else ""
+                    session_writer.write_tool_result(
+                        tc_id, call.tool_name, tool_result.success,
+                        str(tool_result.output)[:2000],
+                        error=tool_result.error if not tool_result.success else None,
+                    )
 
                 # Record result hash for no-progress / circuit breaker detection
                 if isinstance(tool_output, str):
@@ -1662,6 +1779,13 @@ async def run_agent_graph(
 
     elapsed = time.monotonic() - t0
     state.messages = messages
+
+    # Session: write final turn_completed
+    if session_writer:
+        session_writer.write_turn_completed(
+            state.iterations, state.tool_calls, state.status,
+        )
+        state.session_file = str(session_writer.path)
 
     # ── Finalize trajectory ──
     run_summary = None

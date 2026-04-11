@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-5.27.3-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-5.28.0-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -26,7 +26,7 @@ pip install clawagents[anthropic]   # + Anthropic Claude support
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 5.27.3** — Latest stable release (March 2026)
+> **Version 5.28.0** — Latest stable release (April 2026)
 
 ---
 
@@ -317,6 +317,8 @@ python run_agent.py              # 6. Or use the generated script
 | `clawagents --task "..."` | Run a single task. Prints a startup banner (`provider=X model=Y env=Z ptrl=...`), executes the agent, prints the result to stdout. |
 | `clawagents --trajectory [N]` | Inspect the last N run summaries (default: 1). Shows run ID, model, task, duration, turns, tool calls, score, quality, failure breakdown, verified score, and judge verdict. Requires `CLAW_TRAJECTORY=1`. |
 | `clawagents --serve [--port N]` | Start the HTTP gateway server (default port 3000). Endpoints: `POST /chat`, `POST /chat/stream` (SSE), `GET /queue`, `GET /health`. |
+| `clawagents --sessions` | List saved sessions (requires `CLAW_FEATURE_SESSION_PERSISTENCE=1`). Shows session ID, turn count, status, and task. |
+| `clawagents --resume [ID\|latest]` | Resume a saved session. Loads messages from JSONL and continues the conversation. Defaults to `latest`. |
 | `clawagents --help` | Show all options with examples. |
 
 ---
@@ -1109,6 +1111,24 @@ All environment variables are **optional**. They serve as defaults when the corr
 | `CLAW_FEATURE_FORKED_AGENTS` | `0` | No | Enable the `run_forked_agent` sandboxed sub-agent API |
 | `CLAW_FEATURE_COORDINATOR` | `0` | No | Enable the `run_coordinator` swarm routing orchestration mode |
 
+**v5.28.0 Features** — inspired by [claw-code-main](https://github.com/anthropics/claw-code) (Rust reference)
+
+| Variable | Default | Required? | Description |
+|:---|:---|:---:|:---|
+| `CLAW_FEATURE_CACHE_BOUNDARY` | `1` | No | Split system prompt at `__CACHE_BOUNDARY__` for Anthropic prompt caching. Static prefix cached, dynamic suffix fresh each turn. |
+| `CLAW_FEATURE_SESSION_PERSISTENCE` | `0` | No | Save sessions as append-only JSONL to `.clawagents/sessions/`. Enables `--sessions` and `--resume`. |
+| `CLAW_FEATURE_ERROR_TAXONOMY` | `1` | No | Classify LLM/tool errors into 7 discrete classes (`context_window`, `provider_auth`, `provider_rate_limit`, etc.) with recovery hints. |
+| `CLAW_FEATURE_EXTERNAL_HOOKS` | `0` | No | Run shell hooks before/after tool calls and LLM calls. Config via `.clawagents/hooks.json` or `CLAW_HOOK_*` env vars. |
+
+**External Hook Env Vars** (requires `CLAW_FEATURE_EXTERNAL_HOOKS=1`)
+
+| Variable | Description |
+|:---|:---|
+| `CLAW_HOOK_PRE_TOOL_USE` | Shell command run before each tool. Receives JSON on stdin, can block or modify args. |
+| `CLAW_HOOK_POST_TOOL_USE` | Shell command run after each tool. Can modify results. |
+| `CLAW_HOOK_PRE_LLM` | Shell command run before each LLM call. Can inject extra messages. |
+| `CLAW_HOOK_POST_LLM` | Shell command run after each LLM response. Fire-and-forget logging. |
+
 ---
 
 ## Testing
@@ -1127,6 +1147,22 @@ python -m pytest tests/ -v -m benchmark
 ---
 
 ## Changelog
+
+### v5.28.0 — Error Taxonomy, Prompt Caching, Session Persistence & External Hooks
+
+Four production-grade features ported from the [claw-code-main](https://github.com/anthropics/claw-code) Rust reference implementation:
+
+| Feature | Description |
+|:---|:---|
+| **Prompt Cache Boundary** | Inserts `__CACHE_BOUNDARY__` marker in system prompt. Anthropic provider splits into static (cached via `cache_control: ephemeral`) + dynamic blocks. Reduces input token costs on multi-turn sessions. ON by default. |
+| **Error Taxonomy & Recovery** | Classifies all LLM/tool errors into 7 discrete classes (`context_window`, `provider_auth`, `provider_rate_limit`, `provider_retry_exhausted`, `provider_internal`, `provider_transport`, `runtime_io`). Each class has `retryable`, `recovery_hint`, and optional `failover_model`. Structured error events emitted via `onEvent`. ON by default. |
+| **Session Persistence** | Saves agent sessions as append-only JSONL to `.clawagents/sessions/`. Events: `system_prompt`, `turn_started`, `assistant_message`, `tool_result`, `usage`, `turn_completed`. New CLI: `--sessions` (list) and `--resume [ID\|latest]` (continue). Opt-in. |
+| **External Hook System** | Shell commands that run before/after tool execution and LLM calls. Config via `.clawagents/hooks.json` or `CLAW_HOOK_*` env vars. Hooks receive JSON on stdin, return JSON on stdout. `pre_tool_use` can block or modify args. 10s timeout, fail-open. Opt-in. |
+
+Also:
+- **Anthropic cache token extraction** — `cache_creation_tokens` and `cache_read_tokens` now populated from both streaming and non-streaming Anthropic responses.
+- **`AgentState.session_file`** — New field tracks the session JSONL path when persistence is enabled.
+- **New public exports** — `ErrorClass`, `ErrorDescriptor`, `classify_error`, `get_recovery_recipe`, `SessionWriter`, `SessionReader`, `list_sessions`, `HooksConfig`, `ExternalHookRunner`, `load_hooks_config`.
 
 ### v5.27.3 — Gemini Signature Regression Coverage
 - **Gemini signature regression test** — Added targeted tests for `_serialize_gemini_parts` to ensure `thought_signature` is propagated to sibling parallel `function_call` parts.

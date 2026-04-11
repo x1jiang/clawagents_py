@@ -1,4 +1,4 @@
-__version__ = "5.26.0"
+__version__ = "5.28.0"
 
 from clawagents.agent import ClawAgent, create_claw_agent
 from clawagents.graph.agent_loop import (
@@ -16,4 +16,14 @@ from clawagents.context import (
 )
 from clawagents.channels import (
     ChannelMessage, ChannelAdapter, ChannelRouter, KeyedAsyncQueue,
+)
+from clawagents.errors import (
+    ErrorClass, ErrorDescriptor, RecoveryRecipe,
+    classify_error, get_recovery_recipe,
+)
+from clawagents.hooks import (
+    HooksConfig, ExternalHookRunner, load_hooks_config,
+)
+from clawagents.session import (
+    SessionWriter, SessionReader, SessionInfo, list_sessions,
 )
