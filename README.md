@@ -389,85 +389,136 @@ Traditional Stack (DeepAgents):           ClawAgents:
 
 ## Feature Matrix
 
-| Feature | ClawAgents v5.23 | DeepAgents | OpenClaw |
+| Feature | ClawAgents v6.0 | DeepAgents | OpenClaw |
 |:---|:---:|:---:|:---:|
+| **Core** | | | |
 | ReAct loop | ✅ | ✅ | ✅ |
-| Tool loop detection | ✅ **soft + hard** | ❌ | ✅ |
+| Tool loop detection (soft + hard + ping-pong) | ✅ | ❌ | ✅ |
+| Circuit breaker (30 no-progress calls) | ✅ | ❌ | ❌ |
 | Efficiency rules (system prompt) | ✅ | ❌ | ❌ |
-| Adaptive token estimation | ✅ | ❌ | ❌ |
+| Adaptive token estimation (tiktoken) | ✅ | ❌ | ❌ |
 | Model-aware context budgeting | ✅ | ❌ | ❌ |
+| Fraction-based summarization triggers | ✅ | ✅ | ❌ |
+| **Tools** | | | |
 | Pluggable sandbox backend | ✅ | ✅ | ✅ |
 | In-memory VFS (testing) | ✅ | ❌ | ❌ |
-| Sub-agent delegation | ✅ | ✅ | ✅ |
-| Planning / TodoList | ✅ | ✅ | ❌ |
-| Persistent memory (AGENTS.md) | ✅ | ✅ | ✅ |
-| Human-in-the-loop | ✅ | ✅ | ✅ |
-| Dangling tool call repair | ✅ | ✅ | ❌ |
-| Auto-summarization + offloading | ✅ | ✅ | ✅ |
-| Lane-based command queue | ✅ | ❌ | ✅ |
-| Gateway HTTP server + SSE | ✅ | ❌ | ✅ |
-| Tool access control | ✅ | ❌ | ❌ |
-| `think` tool (structured reasoning) | ✅ | ❌ | ❌ |
-| LangChain tool adapter | ✅ | N/A | ❌ |
-| Streaming with stall detection | ✅ | ❌ | ✅ |
-| Trajectory logging + run scoring | ✅ | ❌ | ❌ |
-| Consecutive-failure rethink | ✅ | ❌ | ❌ |
-| Discrete reward bands (RL-inspired) | ✅ | ❌ | ❌ |
-| Weighted execution scoring | ✅ | ❌ | ❌ |
-| Truncated JSON repair + retry | ✅ | ❌ | ❌ |
-| Model-specific temperature override | ✅ | ❌ | ❌ |
-| Gemini 3 thought_signature support | ✅ | ❌ | ❌ |
-| Prompt-Time RL (PTRL) — learn from past runs | ✅ | ❌ | ❌ |
-| Deterministic verification (exit codes, tests) | ✅ | ❌ | ❌ |
-| GRPO-inspired multi-sample comparison | ✅ | ❌ | ❌ |
-| Task-type-aware verification | ✅ | ❌ | ❌ |
-| RFT-ready transition export | ✅ | ❌ | ❌ |
-| Adaptive rethink threshold | ✅ | ❌ | ❌ |
-| LLM-as-Judge verification | ✅ | ❌ | ❌ |
-| Thinking token preservation (`<think>`) | ✅ | ❌ | ❌ |
+| Cross-provider conformance tests | ✅ | ✅ | ❌ |
+| Lazy tool registry (deferred imports) | ✅ | ❌ | ❌ |
 | Tool result caching (LRU) | ✅ | ❌ | ❌ |
 | JSON Schema param validation + coercion | ✅ | ❌ | ❌ |
 | ComposeTool (deterministic pipelines) | ✅ | ❌ | ❌ |
+| `think` tool (structured reasoning) | ✅ | ❌ | ❌ |
+| LangChain tool adapter | ✅ | N/A | ❌ |
+| **Agents & Orchestration** | | | |
+| Sub-agent delegation | ✅ | ✅ | ✅ |
+| Subagent state isolation | ✅ | ✅ | ❌ |
+| Coordinator/swarm mode | ✅ | ❌ | ✅ |
+| Barrier-based request scheduling | ✅ | ❌ | ❌ |
+| Planning / TodoList | ✅ | ✅ | ❌ |
+| **Providers & Resilience** | | | |
+| Three-tier provider fallback + quarantine | ✅ | ❌ | ❌ |
+| Native + text tool call repair | ✅ | ✅ | ❌ |
+| Streaming with stall detection | ✅ | ❌ | ✅ |
+| Truncated JSON repair + retry | ✅ | ❌ | ❌ |
+| Model-specific temperature override | ✅ | ❌ | ❌ |
+| Gemini 3 thought_signature support | ✅ | ❌ | ❌ |
+| Thinking token preservation (`<think>`) | ✅ | ❌ | ❌ |
+| Model control token stripping | ✅ | ❌ | ✅ |
+| **Memory & Context** | | | |
+| Persistent memory (AGENTS.md) | ✅ | ✅ | ✅ |
+| Auto-summarization + history offloading | ✅ | ✅ | ✅ |
+| Pre-compact transcript archival | ✅ | ❌ | ❌ |
+| Atomic file writes (crash-safe) | ✅ | ❌ | ❌ |
+| Session persistence + resume | ✅ | ❌ | ❌ |
+| Session heartbeat + auto-cleanup | ✅ | ❌ | ❌ |
+| Background memory extraction | ✅ | ❌ | ❌ |
+| **Security & Hooks** | | | |
+| Rich hook result model (block/redirect/inject) | ✅ | ✅ | ✅ |
+| Credential proxy for sandboxed agents | ✅ | ❌ | ✅ |
+| External shell hooks (pre/post tool + LLM) | ✅ | ❌ | ✅ |
+| Declarative permission rules | ✅ | ❌ | ❌ |
+| Tool access control (block/allow) | ✅ | ❌ | ❌ |
+| Human-in-the-loop | ✅ | ✅ | ✅ |
+| **Skills** | | | |
+| SKILL.md with constraint documents | ✅ | ✅ | ✅ |
+| Skill eligibility gating (OS/bins/env) | ✅ | ✅ | ❌ |
+| **RL & Self-Improvement** | | | |
+| Prompt-Time RL (PTRL) — learn from past runs | ✅ | ❌ | ❌ |
+| Trajectory logging + run scoring | ✅ | ❌ | ❌ |
+| Consecutive-failure rethink | ✅ | ❌ | ❌ |
+| Adaptive rethink threshold | ✅ | ❌ | ❌ |
+| Deterministic verification (exit codes, tests) | ✅ | ❌ | ❌ |
+| GRPO-inspired multi-sample comparison | ✅ | ❌ | ❌ |
+| Task-type-aware verification | ✅ | ❌ | ❌ |
+| LLM-as-Judge verification | ✅ | ❌ | ❌ |
+| RFT-ready transition export | ✅ | ❌ | ❌ |
+| **Infrastructure** | | | |
+| Gateway HTTP server + SSE | ✅ | ❌ | ✅ |
 | WebSocket gateway | ✅ | ❌ | ✅ |
 | Multi-channel messaging (Telegram, WhatsApp, Signal) | ✅ | ❌ | ✅ |
 | Per-session message serialization | ✅ | ❌ | ✅ |
+| Error taxonomy + recovery recipes | ✅ | ❌ | ❌ |
+| Prompt cache boundary (Anthropic) | ✅ | ✅ | ❌ |
+| Lane-based command queue | ✅ | ❌ | ✅ |
 
 ---
 
 ## Architecture
 
-### Core Components (~2,500 LOC)
+### Core Components
 
 ```
 clawagents/
-├── agent.py            # ClawAgent class — ReAct loop, hooks, compaction
-├── __main__.py          # CLI entrypoint
-├── config/              # Env-based configuration (incl. TEMPERATURE, CLAW_*)
-├── providers/           # LLM backends (OpenAI, Gemini, Fallback)
-│   └── llm.py           # max_completion_tokens, temperature override, JSON repair
-├── tools/               # 14+ built-in tools
-│   ├── filesystem.py    # ls, read_file, write_file, edit_file
-│   ├── advanced_fs.py   # tree, diff, insert_lines
-│   ├── search.py        # grep, glob
-│   ├── execute.py       # Shell command execution
-│   ├── planning.py      # write_todos, update_todo
-│   ├── delegation.py    # Sub-agent task delegation
-│   ├── think.py         # Structured reasoning (no side effects)
-│   ├── web.py           # URL fetching with HTML cleanup
-│   └── interactive.py   # ask_user (stdin-based)
-├── sandbox/             # Pluggable backend protocol
-│   ├── protocol.py      # SandboxBackend interface (15+ methods)
-│   ├── local.py         # LocalBackend (pathlib + asyncio)
-│   └── in_memory.py     # InMemoryBackend (VFS for testing)
-├── trajectory/          # RL-inspired run analysis (v5.9+)
-│   └── recorder.py      # TrajectoryRecorder, discrete scoring, quality grading
-├── gateway/             # Production HTTP server
-│   ├── server.py        # FastAPI + SSE streaming
-│   └── queue.py         # 4-lane FIFO command queue
-├── graph/               # Agent loop orchestration + failure tracking
-├── memory/              # AGENTS.md discovery + compaction
-├── process/             # Process management
-└── logging/             # Structured logging
+├── agent.py              # ClawAgent class, create_claw_agent factory
+├── __main__.py            # CLI entrypoint (--init, --doctor, --task, --serve, --trajectory)
+├── config/
+│   ├── config.py          # EngineConfig, .env discovery, model resolution
+│   └── features.py        # 15 feature flags (CLAW_FEATURE_* env vars)
+├── providers/
+│   ├── llm.py             # LLMProvider ABC + OpenAI/Gemini/Anthropic implementations
+│   └── fallback.py        # FallbackProvider — 3-tier failover + quarantine (v6.0)
+├── tools/
+│   ├── registry.py        # ToolRegistry, LazyTool, parallel execution, LRU cache (v6.0)
+│   ├── filesystem.py      # ls, read_file, write_file, edit_file, grep, glob
+│   ├── advanced_fs.py     # tree, diff, insert_lines
+│   ├── exec.py            # Shell command execution with dangerous command blocking
+│   ├── subagent.py        # Sub-agent delegation with state isolation (v6.0)
+│   ├── skills.py          # SKILL.md loading with constraint documents (v6.0)
+│   ├── think.py           # Structured reasoning (no side effects)
+│   ├── web.py             # URL fetching with HTML cleanup
+│   ├── todolist.py        # write_todos, update_todo
+│   ├── compose.py         # ComposeTool — deterministic multi-tool pipelines
+│   ├── interactive.py     # ask_user (stdin-based)
+│   ├── cache.py           # ResultCacheManager (SHA-256, TTL-based)
+│   ├── validate.py        # JSON Schema param validation + lenient coercion
+│   └── permissions.py     # Declarative permission rules (glob-based)
+├── graph/
+│   ├── agent_loop.py      # Core ReAct loop, HookResult, context management (v6.0)
+│   ├── coordinator.py     # Coordinator/swarm orchestration mode
+│   └── forked_agent.py    # Background forked agent pattern
+├── sandbox/
+│   ├── backend.py         # SandboxBackend protocol (15+ methods)
+│   ├── local.py           # LocalBackend (pathlib + asyncio)
+│   ├── memory.py          # InMemoryBackend (VFS for testing)
+│   └── credential_proxy.py # Credential proxy for sandboxed agents (v6.0)
+├── trajectory/            # RL-inspired run analysis
+│   ├── recorder.py        # TrajectoryRecorder, scoring, quality grading
+│   ├── lessons.py         # PTRL — post-run self-analysis + lesson injection
+│   ├── verifier.py        # Deterministic verification, task-type detection
+│   ├── compare.py         # GRPO-inspired multi-sample comparison
+│   ├── judge.py           # LLM-as-Judge verification
+│   └── background_memory.py # Continuous memory extraction
+├── session/
+│   ├── persistence.py     # Append-only JSONL session events
+│   └── heartbeat.py       # Session heartbeat + auto-cleanup (v6.0)
+├── memory/                # AGENTS.md discovery + LLM compaction
+├── channels/              # Multi-channel messaging (Telegram, WhatsApp, Signal)
+├── hooks/                 # External shell hook system
+├── errors/                # Error taxonomy + recovery recipes
+├── gateway/               # HTTP + WebSocket gateway server
+├── process/               # Lane-based command queue with barriers (v6.0)
+├── utils/                 # Atomic file writes (v6.0)
+└── logging/               # Structured diagnostic logging
 ```
 
 ### Built-in Tools
