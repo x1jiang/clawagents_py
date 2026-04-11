@@ -1150,8 +1150,6 @@ python -m pytest tests/ -v -m benchmark
 
 ### v6.0.0 — Production Hardening: 17 Improvements from 10 Reference Codebases
 
-Major release incorporating patterns from OpenClaw, DeepAgents, NanoClaw, Claw-Code, ToolUniverse, SkyRL, CUDA-Agent, and OpenClaw-RL.
-
 **High Priority**
 
 | Feature | Description |
