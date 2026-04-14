@@ -416,20 +416,78 @@ def create_claw_agent(
 
     registry = ToolRegistry()
 
-    # ── Built-in tools (backed by sandbox) ─────────────────────────────
-    from clawagents.tools.filesystem import create_filesystem_tools
-    from clawagents.tools.exec import create_exec_tools
-    from clawagents.tools.advanced_fs import create_advanced_fs_tools
+    # ── Built-in tools (lazy where possible) ─────────────────────────
+    # Eager: cheap, no sandbox dependency
     from clawagents.tools.todolist import todolist_tools
     from clawagents.tools.think import think_tools
-    from clawagents.tools.web import web_tools
     from clawagents.tools.interactive import interactive_tools
 
-    for tool in [
-        *create_filesystem_tools(sb), *create_exec_tools(sb), *todolist_tools,
-        *think_tools, *web_tools, *create_advanced_fs_tools(sb), *interactive_tools,
-    ]:
+    for tool in [*todolist_tools, *think_tools, *interactive_tools]:
         registry.register(tool)
+
+    # Lazy: sandbox-backed tools — schema available immediately,
+    # module import + sandbox init deferred to first execute()
+    from clawagents.tools.registry import LazyTool
+
+    def _make_lazy_sb_tool(name, desc, params, module_path, factory_fn, sb_ref=sb):
+        """Create a LazyTool that calls a factory function with the sandbox on first use."""
+        class _SbLazyTool(LazyTool):
+            def __init__(self):
+                super().__init__(name, desc, params, module_path, "")
+            async def execute(self, args):
+                if self._resolved is None:
+                    import importlib
+                    mod = importlib.import_module(module_path)
+                    factory = getattr(mod, factory_fn)
+                    tools = factory(sb_ref)
+                    self._resolved = next(t for t in tools if t.name == name)
+                return await self._resolved.execute(args)
+        return _SbLazyTool()
+
+    _lazy_fs_schemas = [
+        ("ls", "List directory contents with size and modification time", {"path": {"type": "string", "description": "Directory path (default: cwd)"}}, "create_filesystem_tools"),
+        ("read_file", "Read a file with line numbers and optional pagination", {"path": {"type": "string", "description": "File path to read", "required": True}, "offset": {"type": "number", "description": "Start line (0-based)"}, "limit": {"type": "number", "description": "Max lines to return"}}, "create_filesystem_tools"),
+        ("write_file", "Write content to a file (creates dirs automatically)", {"path": {"type": "string", "description": "File path", "required": True}, "content": {"type": "string", "description": "Content to write", "required": True}}, "create_filesystem_tools"),
+        ("edit_file", "Replace text in a file", {"path": {"type": "string", "description": "File path", "required": True}, "old_text": {"type": "string", "description": "Text to find", "required": True}, "new_text": {"type": "string", "description": "Replacement", "required": True}}, "create_filesystem_tools"),
+        ("grep", "Search for text/regex in files", {"pattern": {"type": "string", "description": "Search pattern", "required": True}, "path": {"type": "string", "description": "File or directory"}, "include": {"type": "string", "description": "Glob filter"}}, "create_filesystem_tools"),
+        ("glob", "Find files matching a glob pattern", {"pattern": {"type": "string", "description": "Glob pattern", "required": True}, "path": {"type": "string", "description": "Base directory"}}, "create_filesystem_tools"),
+    ]
+    for name, desc, params, factory_fn in _lazy_fs_schemas:
+        registry.register(_make_lazy_sb_tool(name, desc, params, "clawagents.tools.filesystem", factory_fn))
+
+    registry.register(_make_lazy_sb_tool(
+        "execute", "Execute a shell command and return its output.",
+        {"command": {"type": "string", "description": "The shell command to execute", "required": True}, "timeout": {"type": "number", "description": "Timeout in milliseconds. Default: 30000"}},
+        "clawagents.tools.exec", "create_exec_tools",
+    ))
+
+    _lazy_adv_schemas = [
+        ("tree", "Show recursive directory tree", {"path": {"type": "string", "description": "Root directory"}, "depth": {"type": "number", "description": "Max depth"}}, "create_advanced_fs_tools"),
+        ("diff", "Unified diff between two files", {"file_a": {"type": "string", "description": "First file", "required": True}, "file_b": {"type": "string", "description": "Second file", "required": True}}, "create_advanced_fs_tools"),
+        ("insert_lines", "Insert text at a specific line", {"path": {"type": "string", "description": "File path", "required": True}, "line": {"type": "number", "description": "Line number", "required": True}, "content": {"type": "string", "description": "Content to insert", "required": True}}, "create_advanced_fs_tools"),
+    ]
+    for name, desc, params, factory_fn in _lazy_adv_schemas:
+        registry.register(_make_lazy_sb_tool(name, desc, params, "clawagents.tools.advanced_fs", factory_fn))
+
+    registry.register(_make_lazy_sb_tool(
+        "web_fetch", "Fetch a URL and return its content (HTML stripped to text, 50KB cap)",
+        {"url": {"type": "string", "description": "URL to fetch", "required": True}},
+        "clawagents.tools.web", "create_web_tools" if False else "web_tools",
+    ))
+
+    # web_tools is a list, not a factory — handle it differently
+    registry.tools.pop("web_fetch", None)  # remove the broken one
+    class _LazyWebFetch(LazyTool):
+        def __init__(self):
+            super().__init__("web_fetch", "Fetch a URL and return its content (HTML stripped, 50KB cap)",
+                             {"url": {"type": "string", "description": "URL to fetch", "required": True}},
+                             "clawagents.tools.web", "")
+        async def execute(self, args):
+            if self._resolved is None:
+                from clawagents.tools.web import web_tools as _wt
+                self._resolved = next(t for t in _wt if t.name == "web_fetch")
+            return await self._resolved.execute(args)
+    registry.register(_LazyWebFetch())
 
     # ── Adapt and register user-provided tools ─────────────────────────
     if tools:

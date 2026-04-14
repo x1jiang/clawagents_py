@@ -1219,6 +1219,13 @@ python -m pytest tests/ -v -m benchmark
 
 ## Changelog
 
+### v6.1.1 — Credential Isolation & Lazy Tool Provisioning
+
+| Feature | Description |
+|:---|:---|
+| **Credential Isolation** | `execute` tool strips sensitive env vars (`OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, etc.) from subprocess environment. Claude-generated code can no longer read API keys via `env` or `os.environ`. |
+| **Lazy Tool Provisioning** | Sandbox-backed tools (filesystem, exec, advanced-fs, web) defer module import to first `execute()` call. Schema is available immediately for the LLM. Reduces startup overhead. |
+
 ### v6.1.0 — Advisor Model: Smart Model Guides Cheap Model
 
 Pair a stronger "advisor" model with a cheaper "executor" model. The executor runs every turn; the advisor is consulted 2-3 times per task for strategic guidance. Cross-provider supported — any model can advise any other model.

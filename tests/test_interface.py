@@ -447,9 +447,93 @@ class TestAdvisorModel:
             )
             assert agent.advisor_max_calls == 7
 
+    def test_advisor_max_calls_param_overrides_env(self):
+        from clawagents.agent import create_claw_agent
+
+        with patch.dict(os.environ, {"ADVISOR_MAX_CALLS": "99"}):
+            agent = create_claw_agent(
+                "gpt-5-nano",
+                advisor_model="gpt-5-nano",
+                advisor_max_calls=2,
+            )
+            assert agent.advisor_max_calls == 2
+
     def test_advisor_model_from_env(self):
         from clawagents.agent import create_claw_agent
 
         with patch.dict(os.environ, {"ADVISOR_MODEL": "gpt-5-nano"}):
             agent = create_claw_agent("gpt-5-nano")
             assert agent.advisor_llm is not None
+
+
+# ─── Test: Credential Isolation ─────────────────────────────────────────
+
+class TestCredentialIsolation:
+    """Test that sensitive env vars are stripped from subprocess."""
+
+    def test_sanitized_env_strips_keys(self):
+        from clawagents.sandbox.local import LocalBackend
+
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-secret", "SAFE_VAR": "safe"}):
+            backend = LocalBackend()
+            sanitized = backend._sanitized_env()
+            assert "OPENAI_API_KEY" not in sanitized
+            assert sanitized["SAFE_VAR"] == "safe"
+
+    def test_sanitized_env_strips_all_sensitive(self):
+        from clawagents.sandbox.local import LocalBackend
+
+        sensitive = {
+            "OPENAI_API_KEY": "x", "GEMINI_API_KEY": "x",
+            "ANTHROPIC_API_KEY": "x", "ADVISOR_API_KEY": "x",
+            "GATEWAY_API_KEY": "x", "TAVILY_API_KEY": "x",
+        }
+        with patch.dict(os.environ, sensitive):
+            backend = LocalBackend()
+            sanitized = backend._sanitized_env()
+            for key in sensitive:
+                assert key not in sanitized
+
+    @pytest.mark.asyncio
+    async def test_execute_does_not_leak_keys(self):
+        from clawagents.sandbox.local import LocalBackend
+
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-leaked-key"}):
+            backend = LocalBackend()
+            result = await backend.exec("env")
+            assert "sk-leaked-key" not in result.stdout, "API key leaked into subprocess"
+
+
+# ─── Test: Lazy Tool Provisioning ───────────────────────────────────────
+
+class TestLazyToolProvisioning:
+    """Test that lazy tools defer initialization."""
+
+    def test_lazy_tool_defers_import(self):
+        from clawagents.tools.registry import LazyTool
+
+        lazy = LazyTool(
+            name="mock_tool",
+            description="A mock tool",
+            parameters={"x": {"type": "string", "description": "input"}},
+            module_path="clawagents.tools.think",
+            class_name="ThinkTool",
+        )
+
+        # Schema available immediately
+        assert lazy.name == "mock_tool"
+        assert lazy.description == "A mock tool"
+        # Not resolved yet
+        assert lazy._resolved is None
+
+    def test_factory_registers_lazy_tools(self):
+        from clawagents.agent import create_claw_agent
+
+        agent = create_claw_agent("gpt-5-nano")
+        tool_names = [t.name for t in agent.tools.list()]
+
+        assert "read_file" in tool_names
+        assert "execute" in tool_names
+        assert "ls" in tool_names
+        assert "grep" in tool_names
+        assert "web_fetch" in tool_names

@@ -84,6 +84,22 @@ class LocalBackend:
             mtime_ms=s.st_mtime * 1000,
         )
 
+    # ── Credential isolation ────────────────────────────────────────
+    # Keys stripped from subprocess env to prevent credential leakage.
+    # Claude-generated code running in execute() should never see API keys.
+    _SENSITIVE_ENV_KEYS = frozenset({
+        "OPENAI_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY",
+        "ADVISOR_API_KEY", "ADVISOR_MODEL",
+        "GATEWAY_API_KEY", "TAVILY_API_KEY",
+        "TELEGRAM_BOT_TOKEN", "WHATSAPP_API_TOKEN",
+        "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+        "AZURE_API_KEY", "GOOGLE_API_KEY",
+    })
+
+    def _sanitized_env(self) -> dict[str, str]:
+        return {k: v for k, v in os.environ.items()
+                if k not in self._SENSITIVE_ENV_KEYS}
+
     # ── Command execution ───────────────────────────────────────────
 
     async def exec(
@@ -93,7 +109,7 @@ class LocalBackend:
         cwd: str | None = None,
         env: dict[str, str] | None = None,
     ) -> ExecResult:
-        merged_env = {**os.environ, "PAGER": "cat"}
+        merged_env = {**self._sanitized_env(), "PAGER": "cat"}
         if env:
             merged_env.update(env)
 
