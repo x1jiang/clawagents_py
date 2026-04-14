@@ -1107,6 +1107,8 @@ async def run_agent_graph(
     response_chars: int = 500,
     timeout_s: float = 0,
     features: Optional[dict[str, bool]] = None,
+    advisor_llm: Optional[LLMProvider] = None,
+    advisor_max_calls: int = 3,
 ) -> AgentState:
     """Single ReAct loop: LLM → tools → LLM → tools → ... → final answer."""
     if features is not None:
@@ -1161,6 +1163,27 @@ async def run_agent_graph(
     resolved_model_name: Optional[str] = None
     _cached_sys_tokens: int = 0  # Feature D: cache system prompt token count
     _last_memory_extraction_turn: int = 0  # Background memory extraction cursor
+
+    # ── Advisor model: phone-a-friend for strategic guidance ────────
+    _advisor_call_count = 0
+
+    async def _consult_advisor(msgs: list[LLMMessage], trigger: str) -> None:
+        nonlocal _advisor_call_count
+        if not advisor_llm or _advisor_call_count >= advisor_max_calls:
+            return
+        _advisor_call_count += 1
+        emit("context", {"message": f"advisor consultation #{_advisor_call_count} ({trigger})"})
+        try:
+            advisor_response = await advisor_llm.chat([
+                LLMMessage(role="system", content="You are a senior advisor. Review the agent's full transcript and provide concise strategic guidance. Under 150 words. Use numbered steps, not explanations."),
+                *msgs,
+                LLMMessage(role="user", content=f"[Advisor Request — {trigger}] Review the conversation above and provide strategic guidance for the next steps."),
+            ])
+            if advisor_response.content:
+                msgs.append(LLMMessage(role="user", content=f"[Advisor Guidance]\n{advisor_response.content}"))
+                emit("context", {"message": f"advisor: {advisor_response.content[:120]}..."})
+        except Exception as err:
+            emit("warn", {"message": f"advisor consultation failed: {err}"})
 
     prompt_to_use = system_prompt or BASE_SYSTEM_PROMPT
 
@@ -1246,6 +1269,10 @@ async def run_agent_graph(
                 state.status = "error"
                 state.result = str(te)
                 break
+
+            # ── Advisor: consult after initial orientation (first tool results in transcript)
+            if advisor_llm and round_idx == 1 and _advisor_call_count == 0:
+                await _consult_advisor(messages, "planning")
 
             # Write-ahead log: persist last message before API call (Claude Code pattern)
             _wal_write(messages)
@@ -1402,6 +1429,15 @@ async def run_agent_graph(
                         ),
                     ))
                     continue
+
+                # ── Advisor: final check before declaring done ──
+                if advisor_llm and _advisor_call_count > 0 and _advisor_call_count < advisor_max_calls and state.tool_calls > 0:
+                    messages.append(LLMMessage(role="assistant", content=response.content, thinking=_thinking_content))
+                    await _consult_advisor(messages, "final-check")
+                    # If advisor injected guidance, let the LLM process it
+                    last_msg = messages[-1] if messages else None
+                    if last_msg and isinstance(last_msg.content, str) and last_msg.content.startswith("[Advisor Guidance]"):
+                        continue
 
                 if recorder:
                     recorder.record_turn(
@@ -1632,6 +1668,8 @@ async def run_agent_graph(
                     except Exception:
                         pass
                     if failure_tracker.should_rethink():
+                        # ── Advisor: consult when stuck ──
+                        await _consult_advisor(messages, "stuck")
                         n = failure_tracker.consecutive_failures
                         rethink_num = failure_tracker.bump_rethink()
                         emit("warn", {"message": f"rethink #{rethink_num}: {n} consecutive failures (threshold={failure_tracker._threshold})"})
@@ -1824,6 +1862,8 @@ async def run_agent_graph(
                     except Exception:
                         pass
                     if failure_tracker.should_rethink():
+                        # ── Advisor: consult when stuck ──
+                        await _consult_advisor(messages, "stuck")
                         n = failure_tracker.consecutive_failures
                         rethink_num = failure_tracker.bump_rethink()
                         emit("warn", {"message": f"rethink #{rethink_num}: {n} consecutive failures (threshold={failure_tracker._threshold})"})

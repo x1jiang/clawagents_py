@@ -52,6 +52,11 @@ _ENV_TEMPLATE = dedent("""\
     MAX_TOKENS=8192
     TEMPERATURE=0
 
+    # ── Optional: Advisor Model (pair a smarter model for guidance) ──────
+    # ADVISOR_MODEL=gpt-5.4
+    # ADVISOR_API_KEY=sk-...             # Only if different provider
+    # ADVISOR_MAX_CALLS=3
+
     # ── Optional: PTRL (Prompt-Time Reinforcement Learning) ─────────────
     # CLAW_TRAJECTORY=1
     # CLAW_RETHINK=1
@@ -309,14 +314,18 @@ def _build_banner() -> str:
     return f"ClawAgents | provider={provider} model={model} env={env_src} ptrl={flag_str}"
 
 
-async def cmd_task(task: str, timeout_s: int = 0):
+async def cmd_task(task: str, timeout_s: int = 0, advisor_model: str | None = None):
     """Run a single task and print the result."""
     from clawagents.agent import create_claw_agent
 
     banner = _build_banner()
-    agent = create_claw_agent()
+    kwargs = {}
+    if advisor_model:
+        kwargs["advisor_model"] = advisor_model
+    agent = create_claw_agent(**kwargs)
     tool_count = len(agent.tools.list())
-    sys.stderr.write(f"{banner} | {tool_count} tools\n")
+    advisor_info = f" advisor={advisor_model}" if agent.advisor_llm else ""
+    sys.stderr.write(f"{banner} | {tool_count} tools{advisor_info}\n")
 
     result = await agent.invoke(task, timeout_s=timeout_s)
     if result.result:
@@ -534,6 +543,7 @@ def main():
     parser.add_argument("--prune-trajectories", type=int, metavar="DAYS", help="Delete trajectory files older than N days")
     parser.add_argument("--sessions", action="store_true", help="List saved sessions")
     parser.add_argument("--resume", type=str, nargs="?", const="latest", metavar="SESSION_ID", help="Resume a saved session (default: latest)")
+    parser.add_argument("--advisor", type=str, metavar="MODEL", help="Stronger model for strategic guidance (e.g. gpt-5.4, claude-opus-4-6)")
     args = parser.parse_args()
 
     if args.prune_trajectories is not None:
@@ -560,7 +570,7 @@ def main():
         cmd_trajectory(args.trajectory)
     elif args.task:
         try:
-            asyncio.run(cmd_task(args.task, timeout_s=args.timeout))
+            asyncio.run(cmd_task(args.task, timeout_s=args.timeout, advisor_model=args.advisor))
         except KeyboardInterrupt:
             sys.stderr.write("\nInterrupted.\n")
             sys.exit(1)

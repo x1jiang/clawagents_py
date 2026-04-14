@@ -387,3 +387,69 @@ class TestRawHooks:
         result = agent.before_llm([{"role": "system", "content": "hi"}])
         assert len(result) == 2
         assert result[-1]["content"] == "extra"
+
+
+# ─── Test: Advisor Model ────────────────────────────────────────────────
+
+class TestAdvisorModel:
+    """Test advisor model integration."""
+
+    def test_clawagent_stores_advisor_fields(self):
+        from clawagents.agent import ClawAgent
+        from clawagents.tools.registry import ToolRegistry
+
+        mock_llm = MagicMock()
+        mock_advisor = MagicMock()
+        mock_advisor.name = "advisor-mock"
+
+        agent = ClawAgent(
+            llm=mock_llm, tools=ToolRegistry(),
+            advisor_llm=mock_advisor, advisor_max_calls=5,
+        )
+
+        assert agent.advisor_llm is mock_advisor
+        assert agent.advisor_max_calls == 5
+
+    def test_clawagent_defaults_advisor_none(self):
+        from clawagents.agent import ClawAgent
+        from clawagents.tools.registry import ToolRegistry
+
+        agent = ClawAgent(llm=MagicMock(), tools=ToolRegistry())
+
+        assert agent.advisor_llm is None
+        assert agent.advisor_max_calls == 3
+
+    def test_factory_resolves_advisor_model_string(self):
+        from clawagents.agent import create_claw_agent
+
+        agent = create_claw_agent(
+            "gpt-5-nano",
+            advisor_model="gpt-5-nano",
+        )
+
+        assert agent.advisor_llm is not None
+        assert agent.advisor_max_calls == 3
+
+    def test_factory_works_without_advisor(self):
+        from clawagents.agent import create_claw_agent
+
+        agent = create_claw_agent("gpt-5-nano")
+
+        assert agent.advisor_llm is None
+
+    def test_advisor_max_calls_from_env(self):
+        from clawagents.agent import create_claw_agent
+
+        with patch.dict(os.environ, {"ADVISOR_MAX_CALLS": "7"}):
+            agent = create_claw_agent(
+                "gpt-5-nano",
+                advisor_model="gpt-5-nano",
+            )
+            assert agent.advisor_max_calls == 7
+
+    def test_advisor_model_from_env(self):
+        from clawagents.agent import create_claw_agent
+
+        with patch.dict(os.environ, {"ADVISOR_MODEL": "gpt-5-nano"}):
+            agent = create_claw_agent("gpt-5-nano")
+            assert agent.advisor_llm is not None

@@ -76,6 +76,8 @@ class ClawAgent:
         preview_chars: int = 120,
         response_chars: int = 500,
         features: Optional[dict[str, bool]] = None,
+        advisor_llm: Optional[LLMProvider] = None,
+        advisor_max_calls: int = 3,
     ):
         """
         Initialize a ClawAgent.
@@ -94,6 +96,8 @@ class ClawAgent:
             preview_chars: Number of characters to log in console output for tool results
             response_chars: Number of characters to log from LLM free-text response
             features: Dictionary to override global architectural variables (e.g. {"micro_compact": False, "wal": True})
+            advisor_llm: Optional stronger model for strategic guidance (consulted 2-3 times per task)
+            advisor_max_calls: Maximum advisor consultations per task (default: 3)
         """
         self.llm = llm
         self.tools = tools
@@ -112,6 +116,8 @@ class ClawAgent:
         self.preview_chars = preview_chars
         self.response_chars = response_chars
         self.features = features
+        self.advisor_llm = advisor_llm
+        self.advisor_max_calls = advisor_max_calls
 
     async def invoke(
         self,
@@ -154,6 +160,8 @@ class ClawAgent:
             response_chars=self.response_chars,
             timeout_s=timeout_s,
             features=features if features is not None else self.features,
+            advisor_llm=self.advisor_llm,
+            advisor_max_calls=self.advisor_max_calls,
         )
 
     # ── Convenience hook methods ──────────────────────────────────────
@@ -262,6 +270,9 @@ def create_claw_agent(
     max_iterations: Optional[int] = None,
     preview_chars: Optional[int] = None,
     response_chars: Optional[int] = None,
+    advisor_model: Union[str, LLMProvider, None] = None,
+    advisor_api_key: Optional[str] = None,
+    advisor_max_calls: Optional[int] = None,
 ) -> ClawAgent:
     """
     Create a ClawAgent with full-stack capabilities.
@@ -304,6 +315,13 @@ def create_claw_agent(
                         Default: from CLAW_PREVIEW_CHARS env / 120.
         response_chars: Max chars for LLM response text in trajectory logs.
                         Default: from CLAW_RESPONSE_CHARS env / 500.
+        advisor_model:  A stronger model for strategic guidance (consulted 2-3 times per task).
+                        Cross-provider supported — e.g. use "claude-opus-4-6" to advise "gpt-5.4-nano".
+                        Default: from ADVISOR_MODEL env / None (disabled).
+        advisor_api_key: API key for the advisor model (only needed if it's a different provider).
+                        Default: from ADVISOR_API_KEY env / None.
+        advisor_max_calls: Maximum advisor consultations per task.
+                        Default: from ADVISOR_MAX_CALLS env / 3.
         fallback_models: Ordered list of model name strings to try when the primary
                         provider fails. Wraps the primary in a FallbackProvider.
                         Also read from CLAWAGENTS_FALLBACK_MODELS env var
@@ -379,6 +397,15 @@ def create_claw_agent(
         temperature=temperature,
         on_event=on_event,
     )
+
+    # ── Resolve advisor model ─────────────────────────────────────────
+    resolved_advisor_llm: Optional[LLMProvider] = None
+    _adv_max_raw = os.environ.get("ADVISOR_MAX_CALLS", "")
+    resolved_advisor_max_calls = advisor_max_calls if advisor_max_calls is not None else (int(_adv_max_raw) if _adv_max_raw.isdigit() else 3)
+    advisor_spec = advisor_model if advisor_model is not None else (os.environ.get("ADVISOR_MODEL") or None)
+    if advisor_spec:
+        adv_key = advisor_api_key or (os.environ.get("ADVISOR_API_KEY") or None)
+        resolved_advisor_llm = _resolve_model(advisor_spec, streaming, adv_key, context_window)
 
     # ── Resolve sandbox backend ────────────────────────────────────────
     if sandbox is None:
@@ -473,6 +500,7 @@ def create_claw_agent(
         before_llm=composed_before_llm, trajectory=trajectory,
         rethink=rethink, learn=learn, max_iterations=max_iterations,
         preview_chars=preview_chars, response_chars=response_chars,
+        advisor_llm=resolved_advisor_llm, advisor_max_calls=resolved_advisor_max_calls,
     )
 
     # ── Sub-agent tool (always available) ──────────────────────────────

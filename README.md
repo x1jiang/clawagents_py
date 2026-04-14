@@ -195,7 +195,26 @@ result = await agent.invoke("Build the data pipeline")
 # Next run: lessons injected into system prompt automatically
 ```
 
-### 6. Multi-Sample Comparison (GRPO-inspired)
+### 6. With Advisor Model (smart model guides cheap model)
+
+```python
+# GPT-5.4-nano executes, GPT-5.4 advises 2-3 times per task
+agent = create_claw_agent(
+    "gpt-5.4-nano",
+    advisor_model="gpt-5.4",
+)
+
+# Cross-provider: Haiku executes, GPT-5.4 advises
+agent = create_claw_agent(
+    "claude-haiku-4-5",
+    advisor_model="gpt-5.4",
+    advisor_api_key="sk-...",
+)
+```
+
+The advisor is consulted at three points: (1) after initial orientation, before committing to an approach, (2) when stuck (consecutive failures trigger rethink), and (3) before declaring the task complete. Set `ADVISOR_MODEL` in `.env` or pass `advisor_model` in code.
+
+### 7. Multi-Sample Comparison (GRPO-inspired) 
 
 ```python
 agent = create_claw_agent("gpt-5-mini", rethink=True)
@@ -206,7 +225,7 @@ print(result["best_score"])    # objective score
 print(result["all_scores"])    # all samples with scores
 ```
 
-### 7. Azure OpenAI
+### 8. Azure OpenAI
 
 ```python
 agent = create_claw_agent(
@@ -229,7 +248,7 @@ OPENAI_BASE_URL=https://myresource.openai.azure.com/
 OPENAI_API_VERSION=2024-12-01-preview
 ```
 
-### 8. AWS Bedrock (via OpenAI-compatible gateway)
+### 9. AWS Bedrock (via OpenAI-compatible gateway)
 
 Use [Bedrock Access Gateway](https://github.com/aws-samples/bedrock-access-gateway) or [LiteLLM proxy](https://docs.litellm.ai/docs/proxy/quick_start) to expose Bedrock models as an OpenAI-compatible API:
 
@@ -249,7 +268,7 @@ OPENAI_MODEL=anthropic.claude-3-sonnet-20240229-v1:0
 OPENAI_BASE_URL=http://localhost:8080/v1
 ```
 
-### 9. Local Models (Ollama / vLLM / LM Studio)
+### 10. Local Models (Ollama / vLLM / LM Studio)
 
 Any OpenAI-compatible local server works out of the box:
 
@@ -274,7 +293,7 @@ OPENAI_BASE_URL=http://localhost:11434/v1
 
 > **Tip:** For local models that emit `<think>...</think>` tokens (Qwen3, DeepSeek), thinking content is automatically detected, stripped from output, and preserved in trajectory records (Feature H).
 
-### 10. CLI
+### 11. CLI
 
 ```bash
 # Scaffold a project (generates .env, run_agent.py, AGENTS.md)
@@ -320,6 +339,7 @@ python run_agent.py              # 6. Or use the generated script
 | `clawagents --sessions` | List saved sessions (requires `CLAW_FEATURE_SESSION_PERSISTENCE=1`). Shows session ID, turn count, status, and task. |
 | `clawagents --resume [ID\|latest]` | Resume a saved session. Loads messages from JSONL and continues the conversation. Defaults to `latest`. |
 | `clawagents --help` | Show all options with examples. |
+| `clawagents --advisor MODEL` | Pair a stronger model for strategic guidance (e.g. `--advisor gpt-5.4`). |
 
 ---
 
@@ -1198,6 +1218,25 @@ python -m pytest tests/ -v -m benchmark
 ---
 
 ## Changelog
+
+### v6.1.0 — Advisor Model: Smart Model Guides Cheap Model
+
+Pair a stronger "advisor" model with a cheaper "executor" model. The executor runs every turn; the advisor is consulted 2-3 times per task for strategic guidance. Cross-provider supported — any model can advise any other model.
+
+| Feature | Description |
+|:---|:---|
+| **Advisor Model** | New `advisor_model` config field. Set it and the agent gets smarter. Don't set it, nothing changes. Fully backward compatible. |
+| **Three Trigger Points** | (1) After initial orientation, before planning. (2) When stuck (consecutive failures). (3) Before declaring done. |
+| **Cross-Provider** | Mix providers freely: `gpt-5.4-nano` executor + `claude-opus-4-6` advisor, or any combination. |
+| **CLI Flag** | `--advisor MODEL` flag for one-line usage. |
+| **Env Config** | `ADVISOR_MODEL`, `ADVISOR_API_KEY`, `ADVISOR_MAX_CALLS` env vars. |
+
+```python
+agent = create_claw_agent(
+    "gpt-5.4-nano",
+    advisor_model="gpt-5.4",
+)
+```
 
 ### v6.0.0 — Production Hardening: 17 Improvements
 
