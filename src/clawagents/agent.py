@@ -1,7 +1,7 @@
 import os
 import asyncio
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Union
+from typing import Callable, Optional, List, Dict, Any, Union
 
 from clawagents.providers.llm import LLMProvider
 from clawagents.tools.registry import ToolRegistry, Tool, ToolResult
@@ -9,6 +9,10 @@ from clawagents.graph.agent_loop import (
     run_agent_graph, AgentState, OnEvent,
     BeforeLLMHook, BeforeToolHook, AfterToolHook,
 )
+from clawagents.run_context import RunContext
+from clawagents.lifecycle import RunHooks, AgentHooks
+from clawagents.guardrails import InputGuardrail, OutputGuardrail
+from clawagents.stream_events import StreamEvent
 
 
 class LangChainToolAdapter:
@@ -78,6 +82,14 @@ class ClawAgent:
         features: Optional[dict[str, bool]] = None,
         advisor_llm: Optional[LLMProvider] = None,
         advisor_max_calls: int = 3,
+        # ── New, backward-compatible surfaces (OpenAI-Agents-inspired) ──
+        hooks: Optional[RunHooks] = None,
+        agent_hooks: Optional[AgentHooks] = None,
+        input_guardrails: Optional[list[InputGuardrail]] = None,
+        output_guardrails: Optional[list[OutputGuardrail]] = None,
+        output_type: Optional[type] = None,
+        session: Any = None,
+        on_stream_event: Optional[Callable[[StreamEvent], None]] = None,
     ):
         """
         Initialize a ClawAgent.
@@ -118,6 +130,13 @@ class ClawAgent:
         self.features = features
         self.advisor_llm = advisor_llm
         self.advisor_max_calls = advisor_max_calls
+        self.hooks = hooks
+        self.agent_hooks = agent_hooks
+        self.input_guardrails = input_guardrails
+        self.output_guardrails = output_guardrails
+        self.output_type = output_type
+        self.session = session
+        self.on_stream_event = on_stream_event
 
     async def invoke(
         self,
@@ -126,19 +145,22 @@ class ClawAgent:
         on_event: Optional[OnEvent] = None,
         timeout_s: float = 0,
         features: Optional[dict[str, bool]] = None,
+        *,
+        run_context: Optional[RunContext] = None,
+        user_context: Any = None,
+        hooks: Optional[RunHooks] = None,
+        agent_hooks: Optional[AgentHooks] = None,
+        input_guardrails: Optional[list[InputGuardrail]] = None,
+        output_guardrails: Optional[list[OutputGuardrail]] = None,
+        output_type: Optional[type] = None,
+        session: Any = None,
+        on_stream_event: Optional[Callable[[StreamEvent], None]] = None,
     ) -> AgentState:
-        """
-        Start the ReAct agent loop for a specific task.
-        
-        Args:
-            task: The user's query or instruction payload
-            max_iterations: Override for the maximum loop turns
-            on_event: Runtime callback for event streams
-            timeout_s: Optional hard timeout in seconds
-            features: Dictionary to override the global/class-level architectural feature flags
-            
-        Returns:
-            The final AgentState upon completion or max iteration
+        """Start the ReAct agent loop for ``task``.
+
+        All per-call keyword arguments (``hooks``, ``input_guardrails``,
+        ``output_type``, ``session``, ``on_stream_event`` …) override the
+        values supplied to ``ClawAgent.__init__`` for just this invocation.
         """
         return await run_agent_graph(
             task=task,
@@ -162,6 +184,21 @@ class ClawAgent:
             features=features if features is not None else self.features,
             advisor_llm=self.advisor_llm,
             advisor_max_calls=self.advisor_max_calls,
+            run_context=run_context,
+            user_context=user_context,
+            hooks=hooks if hooks is not None else self.hooks,
+            agent_hooks=agent_hooks if agent_hooks is not None else self.agent_hooks,
+            input_guardrails=(
+                input_guardrails if input_guardrails is not None else self.input_guardrails
+            ),
+            output_guardrails=(
+                output_guardrails if output_guardrails is not None else self.output_guardrails
+            ),
+            output_type=output_type if output_type is not None else self.output_type,
+            session=session if session is not None else self.session,
+            on_stream_event=(
+                on_stream_event if on_stream_event is not None else self.on_stream_event
+            ),
         )
 
     # ── Convenience hook methods ──────────────────────────────────────

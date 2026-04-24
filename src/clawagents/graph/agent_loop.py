@@ -29,12 +29,26 @@ import re
 import signal
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional
 
 from clawagents.providers.llm import LLMProvider, LLMMessage, LLMResponse, NativeToolSchema, NativeToolCall, strip_thinking_tokens
 from clawagents.tools.registry import ToolRegistry, ParsedToolCall, ToolResult
+from clawagents.run_context import RunContext
+from clawagents.usage import Usage, RequestUsage
+from clawagents.lifecycle import RunHooks, AgentHooks
+from clawagents.guardrails import (
+    InputGuardrail,
+    OutputGuardrail,
+    GuardrailBehavior,
+    GuardrailTripwireTriggered,
+    GuardrailResult,
+)
+from clawagents.stream_events import (
+    StreamEvent,
+    stream_event_from_kind,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -154,21 +168,89 @@ def _evict_large_tool_result(tool_name: str, output: str) -> str:
 
 # ─── Model-Aware Context Budget (learned from deepagents) ─────────────────
 
+# NOTE: Order matters for prefix matching below. List the *most specific*
+# keys first so e.g. "gpt-5.4-medium" resolves to the "gpt-5.4" profile
+# rather than falling back to "gpt-5".
 _MODEL_PROFILES: dict[str, dict[str, int | float]] = {
-    # OpenAI
-    "gpt-5": {"max_input_tokens": 128_000, "budget_ratio": 0.80},
-    "gpt-5-mini": {"max_input_tokens": 128_000, "budget_ratio": 0.80},
-    "gpt-5-nano": {"max_input_tokens": 128_000, "budget_ratio": 0.80},
-    "gpt-4o": {"max_input_tokens": 128_000, "budget_ratio": 0.80},
+    # ── OpenAI — GPT-5 family (400K context) ───────────────────────────
+    "gpt-5.4-mini": {"max_input_tokens": 400_000, "budget_ratio": 0.85},
+    "gpt-5.4-nano": {"max_input_tokens": 400_000, "budget_ratio": 0.85},
+    "gpt-5.4": {"max_input_tokens": 400_000, "budget_ratio": 0.85},
+    "gpt-5.3-codex": {"max_input_tokens": 400_000, "budget_ratio": 0.85},
+    "gpt-5.3-mini": {"max_input_tokens": 400_000, "budget_ratio": 0.85},
+    "gpt-5.3": {"max_input_tokens": 400_000, "budget_ratio": 0.85},
+    "gpt-5.2-mini": {"max_input_tokens": 400_000, "budget_ratio": 0.85},
+    "gpt-5.2": {"max_input_tokens": 400_000, "budget_ratio": 0.85},
+    "gpt-5.1-codex": {"max_input_tokens": 400_000, "budget_ratio": 0.85},
+    "gpt-5.1-mini": {"max_input_tokens": 400_000, "budget_ratio": 0.85},
+    "gpt-5.1": {"max_input_tokens": 400_000, "budget_ratio": 0.85},
+    "gpt-5-codex": {"max_input_tokens": 400_000, "budget_ratio": 0.85},
+    "gpt-5-mini": {"max_input_tokens": 400_000, "budget_ratio": 0.85},
+    "gpt-5-nano": {"max_input_tokens": 400_000, "budget_ratio": 0.85},
+    "gpt-5": {"max_input_tokens": 400_000, "budget_ratio": 0.85},
+    # ── OpenAI — GPT-4.1 (1M context) ──────────────────────────────────
+    "gpt-4.1-mini": {"max_input_tokens": 1_000_000, "budget_ratio": 0.85},
+    "gpt-4.1-nano": {"max_input_tokens": 1_000_000, "budget_ratio": 0.85},
+    "gpt-4.1": {"max_input_tokens": 1_000_000, "budget_ratio": 0.85},
+    # ── OpenAI — GPT-4o (128K context) ─────────────────────────────────
     "gpt-4o-mini": {"max_input_tokens": 128_000, "budget_ratio": 0.80},
-    # Gemini
-    "gemini-3-flash": {"max_input_tokens": 1_000_000, "budget_ratio": 0.90},
+    "gpt-4o": {"max_input_tokens": 128_000, "budget_ratio": 0.80},
+    # ── OpenAI — reasoning (o-series) ──────────────────────────────────
+    "o4-mini": {"max_input_tokens": 200_000, "budget_ratio": 0.80},
+    "o3-mini": {"max_input_tokens": 200_000, "budget_ratio": 0.80},
+    "o3": {"max_input_tokens": 200_000, "budget_ratio": 0.80},
+    "o1-pro": {"max_input_tokens": 200_000, "budget_ratio": 0.80},
+    "o1-mini": {"max_input_tokens": 128_000, "budget_ratio": 0.80},
+    "o1": {"max_input_tokens": 200_000, "budget_ratio": 0.80},
+    # ── Google — Gemini 3.x (1M–2M context) ────────────────────────────
+    "gemini-3.1-pro": {"max_input_tokens": 2_000_000, "budget_ratio": 0.90},
+    "gemini-3.1-flash": {"max_input_tokens": 1_000_000, "budget_ratio": 0.90},
+    "gemini-3.1": {"max_input_tokens": 1_000_000, "budget_ratio": 0.90},
+    "gemini-3-pro": {"max_input_tokens": 2_000_000, "budget_ratio": 0.90},
     "gemini-3-flash-preview": {"max_input_tokens": 1_000_000, "budget_ratio": 0.90},
+    "gemini-3-flash": {"max_input_tokens": 1_000_000, "budget_ratio": 0.90},
+    # ── Google — Gemini 2.5 ────────────────────────────────────────────
+    "gemini-2.5-pro": {"max_input_tokens": 2_000_000, "budget_ratio": 0.90},
     "gemini-2.5-flash": {"max_input_tokens": 1_000_000, "budget_ratio": 0.90},
-    "gemini-2.5-pro": {"max_input_tokens": 1_000_000, "budget_ratio": 0.90},
-    # Claude
-    "claude-sonnet-4-5": {"max_input_tokens": 200_000, "budget_ratio": 0.85},
+    # ── Anthropic — Claude 4.x ─────────────────────────────────────────
+    "claude-opus-4-7": {"max_input_tokens": 200_000, "budget_ratio": 0.85},
+    "claude-opus-4-5": {"max_input_tokens": 200_000, "budget_ratio": 0.85},
+    "claude-opus-4": {"max_input_tokens": 200_000, "budget_ratio": 0.85},
+    "claude-4.6-sonnet": {"max_input_tokens": 1_000_000, "budget_ratio": 0.85},
+    "claude-4.5-sonnet": {"max_input_tokens": 1_000_000, "budget_ratio": 0.85},
+    "claude-sonnet-4-5": {"max_input_tokens": 1_000_000, "budget_ratio": 0.85},
+    "claude-sonnet-4": {"max_input_tokens": 200_000, "budget_ratio": 0.85},
+    # ── Anthropic — Claude 3.x ─────────────────────────────────────────
+    "claude-3-7-sonnet": {"max_input_tokens": 200_000, "budget_ratio": 0.85},
     "claude-3-5-sonnet": {"max_input_tokens": 200_000, "budget_ratio": 0.85},
+    "claude-3-5-haiku": {"max_input_tokens": 200_000, "budget_ratio": 0.85},
+    # ── Ollama / local OpenAI-compatible models ────────────────────────
+    # NOTE: prefix-matching walks in insertion order. Put specific tags
+    # (``gemma4:e4b``) before generic families (``gemma4``) before legacy
+    # prefixes (``gemma3``/``gemma``) so "gemma4:e4b" doesn't collapse to
+    # the 8K Gemma-1 default.
+    # ── Google — Gemma 4 (released 2026-04-02; Apache-2.0) ─────────────
+    "gemma4:e2b": {"max_input_tokens": 128_000, "budget_ratio": 0.80},
+    "gemma4:e4b": {"max_input_tokens": 128_000, "budget_ratio": 0.80},
+    "gemma4:26b": {"max_input_tokens": 256_000, "budget_ratio": 0.85},
+    "gemma4:31b": {"max_input_tokens": 256_000, "budget_ratio": 0.85},
+    "gemma4": {"max_input_tokens": 128_000, "budget_ratio": 0.80},
+    # ── Google — Gemma 3n (edge/mobile 32K) ────────────────────────────
+    "gemma3n:e4b": {"max_input_tokens": 32_000, "budget_ratio": 0.80},
+    "gemma3n:e2b": {"max_input_tokens": 32_000, "budget_ratio": 0.80},
+    "gemma3n": {"max_input_tokens": 32_000, "budget_ratio": 0.80},
+    # ── Google — Gemma 3 / 2 / 1 ───────────────────────────────────────
+    "gemma3": {"max_input_tokens": 128_000, "budget_ratio": 0.80},
+    "gemma2": {"max_input_tokens": 8_192, "budget_ratio": 0.75},
+    "gemma": {"max_input_tokens": 8_192, "budget_ratio": 0.75},
+    "llama3.3": {"max_input_tokens": 128_000, "budget_ratio": 0.80},
+    "llama3.2": {"max_input_tokens": 128_000, "budget_ratio": 0.80},
+    "llama3.1": {"max_input_tokens": 128_000, "budget_ratio": 0.80},
+    "qwen2.5-coder": {"max_input_tokens": 32_768, "budget_ratio": 0.80},
+    "qwen2.5": {"max_input_tokens": 32_768, "budget_ratio": 0.80},
+    "deepseek-r1": {"max_input_tokens": 64_000, "budget_ratio": 0.75},
+    "mistral": {"max_input_tokens": 32_768, "budget_ratio": 0.80},
+    "phi4": {"max_input_tokens": 16_384, "budget_ratio": 0.75},
 }
 
 
@@ -198,6 +280,13 @@ EventKind = Literal[
     "final_content",
     "approval_required",
     "tool_skipped",
+    "turn_started",
+    "assistant_message",
+    "assistant_delta",
+    "tool_started",
+    "usage",
+    "guardrail_tripped",
+    "final_output",
 ]
 
 OnEvent = Callable[[EventKind, dict[str, Any]], None]
@@ -249,6 +338,136 @@ def _default_on_event(kind: EventKind, data: dict[str, Any]) -> None:
     sys.stderr.flush()
 
 
+# ── Guardrail + Session helpers ──────────────────────────────────────────
+
+async def _run_input_guardrails(
+    guardrails: list[InputGuardrail],
+    ctx: RunContext,
+    task: str,
+) -> Optional[str]:
+    """Run input guardrails. Raises GuardrailTripwireTriggered on RAISE_EXCEPTION.
+
+    Returns a rewrite string if any guardrail rewrites the input, else ``None``.
+    """
+    rewrite_prefix: list[str] = []
+    for gr in guardrails:
+        result: GuardrailResult = await gr.run(ctx, task)
+        if result.behavior == GuardrailBehavior.ALLOW:
+            continue
+        if result.behavior == GuardrailBehavior.RAISE_EXCEPTION:
+            raise GuardrailTripwireTriggered(gr.name, "input", result)
+        if result.behavior == GuardrailBehavior.REJECT_CONTENT:
+            rewrite_prefix.append(
+                f"[Input Guardrail '{gr.name}']: "
+                f"{result.replacement_output or result.message or 'rejected'}"
+            )
+    return "\n".join(rewrite_prefix) if rewrite_prefix else None
+
+
+async def _run_output_guardrails(
+    guardrails: list[OutputGuardrail],
+    ctx: RunContext,
+    output: str,
+) -> tuple[str, Optional[str]]:
+    """Run output guardrails. Raises on RAISE_EXCEPTION.
+
+    Returns ``(possibly-rewritten output, tripped name or None)``.
+    """
+    for gr in guardrails:
+        result: GuardrailResult = await gr.run(ctx, output)
+        if result.behavior == GuardrailBehavior.ALLOW:
+            continue
+        if result.behavior == GuardrailBehavior.RAISE_EXCEPTION:
+            raise GuardrailTripwireTriggered(gr.name, "output", result)
+        if result.behavior == GuardrailBehavior.REJECT_CONTENT:
+            return (
+                result.replacement_output or result.message or f"[blocked by {gr.name}]",
+                gr.name,
+            )
+    return (output, None)
+
+
+async def _session_get_items(session: Any) -> list[LLMMessage]:
+    """Fetch prior messages from a Session-protocol backend (async or sync)."""
+    get_items = getattr(session, "get_items", None)
+    if get_items is None:
+        return []
+    res = get_items()
+    if asyncio.iscoroutine(res):
+        res = await res
+    out: list[LLMMessage] = []
+    for item in res or []:
+        if isinstance(item, LLMMessage):
+            out.append(item)
+        elif isinstance(item, dict) and "role" in item:
+            out.append(LLMMessage(
+                role=item.get("role", "user"),
+                content=item.get("content", ""),
+                tool_call_id=item.get("tool_call_id"),
+                tool_calls_meta=item.get("tool_calls_meta"),
+                thinking=item.get("thinking"),
+            ))
+    return out
+
+
+async def _session_add_items(session: Any, items: list[LLMMessage]) -> None:
+    """Persist messages to a Session-protocol backend (async or sync).
+
+    Passes ``LLMMessage`` instances directly so both built-in backends
+    (``InMemorySession``, ``SQLiteSession``) and user-supplied backends
+    that accept dict payloads keep working.
+    """
+    add = getattr(session, "add_items", None)
+    if add is None:
+        return
+    res = add(items)
+    if asyncio.iscoroutine(res):
+        await res
+
+
+def _coerce_output_type(raw: str, output_type: type) -> Any:
+    """Best-effort parse of final assistant text into ``output_type``.
+
+    Supports:
+    - ``str`` (pass-through)
+    - Pydantic v1/v2 BaseModel subclasses
+    - ``@dataclass`` classes
+    - Any class with a ``model_validate_json`` / ``parse_raw`` class-method
+    - ``dict`` / ``list`` (json-loaded)
+
+    Returns the parsed value, or ``raw`` if parsing fails.
+    """
+    if output_type is str:
+        return raw
+    if output_type in (dict, list):
+        try:
+            return json.loads(raw)
+        except Exception:
+            return raw
+    # Pydantic v2
+    if hasattr(output_type, "model_validate_json"):
+        try:
+            return output_type.model_validate_json(raw)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+    # Pydantic v1
+    if hasattr(output_type, "parse_raw"):
+        try:
+            return output_type.parse_raw(raw)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+    # Dataclass
+    try:
+        import dataclasses as _dc
+        if _dc.is_dataclass(output_type):
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                return output_type(**data)
+    except Exception:
+        pass
+    return raw
+
+
 @dataclass
 class AgentState:
     messages: list[LLMMessage]
@@ -260,6 +479,11 @@ class AgentState:
     tool_calls: int
     trajectory_file: str = ""
     session_file: str = ""
+    # New-style aggregate state populated by the loop and exposed to callers.
+    usage: Usage = field(default_factory=Usage)
+    run_context: RunContext = field(default_factory=RunContext)
+    final_output: Any = None
+    guardrail_triggered: Optional[str] = None
 
 
 BASE_SYSTEM_PROMPT = """You are a ClawAgent, an AI assistant that helps users accomplish tasks using tools. You respond with text and tool calls.
@@ -1109,6 +1333,16 @@ async def run_agent_graph(
     features: Optional[dict[str, bool]] = None,
     advisor_llm: Optional[LLMProvider] = None,
     advisor_max_calls: int = 3,
+    # ── New, fully backward-compatible keyword-only parameters ──
+    run_context: Optional[RunContext] = None,
+    user_context: Any = None,
+    hooks: Optional[RunHooks] = None,
+    agent_hooks: Optional[AgentHooks] = None,
+    input_guardrails: Optional[list[InputGuardrail]] = None,
+    output_guardrails: Optional[list[OutputGuardrail]] = None,
+    output_type: Optional[type] = None,
+    on_stream_event: Optional[Callable[[StreamEvent], None]] = None,
+    session: Optional[Any] = None,  # clawagents.session.Session protocol
 ) -> AgentState:
     """Single ReAct loop: LLM → tools → LLM → tools → ... → final answer."""
     if features is not None:
@@ -1122,6 +1356,63 @@ async def run_agent_graph(
     tool_desc = registry.describe_for_llm() if not use_native_tools else ""
     loop_tracker = _ToolCallTracker()
     emit = on_event or _default_on_event
+
+    # ── Typed run context + usage accumulator ──
+    if run_context is None:
+        run_context = RunContext(context=user_context)
+    elif user_context is not None and run_context.context is None:
+        run_context.context = user_context
+    usage = run_context.usage
+
+    def _emit_typed(kind: str, data: dict[str, Any] | None = None) -> None:
+        """Dispatch a typed StreamEvent alongside the existing ``emit`` hook."""
+        if on_stream_event is None:
+            return
+        try:
+            on_stream_event(stream_event_from_kind(kind, data or {}))
+        except Exception as err:
+            emit("warn", {"message": f"on_stream_event error: {err}"})
+
+    def _accumulate_usage(resp: LLMResponse) -> RequestUsage:
+        prompt_t = int(getattr(resp, "prompt_tokens", 0) or 0)
+        total_t = int(getattr(resp, "tokens_used", 0) or 0)
+        output_t = int(getattr(resp, "completion_tokens", max(total_t - prompt_t, 0)) or 0)
+        req = usage.add_response(
+            model=getattr(resp, "model", None) or "",
+            input_tokens=prompt_t,
+            output_tokens=output_t,
+            total_tokens=total_t,
+            cached_input_tokens=int(getattr(resp, "cache_read_tokens", 0) or 0),
+            cache_creation_tokens=int(getattr(resp, "cache_creation_tokens", 0) or 0),
+        )
+        _emit_typed("usage", {
+            "input_tokens": req.input_tokens,
+            "output_tokens": req.output_tokens,
+            "total_tokens": req.total_tokens,
+            "cached_input_tokens": req.cached_input_tokens,
+            "cache_creation_tokens": req.cache_creation_tokens,
+            "model": req.model,
+        })
+        return req
+
+    # RunHooks / AgentHooks — combine into a single call list.
+    active_hooks: list[RunHooks] = []
+    if hooks is not None:
+        active_hooks.append(hooks)
+    if agent_hooks is not None and agent_hooks is not hooks:
+        active_hooks.append(agent_hooks)
+
+    async def _fire_hook(method_name: str, *args: Any) -> None:
+        for h in active_hooks:
+            fn = getattr(h, method_name, None)
+            if fn is None:
+                continue
+            try:
+                result = fn(run_context, *args)
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception as hook_err:
+                emit("warn", {"message": f"{method_name} hook error: {hook_err}"})
 
     # Feature C + F: detect task type for adaptive rethink threshold
     _task_type = "general"
@@ -1225,7 +1516,64 @@ async def run_agent_graph(
         iterations=0,
         max_iterations=max_iterations,
         tool_calls=0,
+        usage=usage,
+        run_context=run_context,
     )
+
+    # Session protocol — hydrate history before first LLM call (non-destructive).
+    _session_preloaded_count = 0
+    if session is not None:
+        try:
+            prior = await _session_get_items(session)
+            if prior:
+                # Keep original system + user (task), append replayed history after.
+                messages = messages + prior
+                state.messages = messages
+                _session_preloaded_count = len(prior)
+        except Exception as err:
+            emit("warn", {"message": f"session load failed: {err}"})
+    # Snapshot of messages we brought in before the loop runs; anything
+    # appended after this cursor is what we'll persist back.
+    _session_start_cursor = len(messages)
+
+    # RunHooks: on_run_start
+    if active_hooks:
+        await _fire_hook("on_run_start", task)
+    _emit_typed("turn_started", {"iteration": 0, "task": task})
+
+    # Input guardrails (short-circuit before the first LLM call).
+    if input_guardrails:
+        try:
+            tripped = await _run_input_guardrails(
+                input_guardrails, run_context, task,
+            )
+        except GuardrailTripwireTriggered as tripwire:
+            state.status = "done"
+            state.result = (
+                tripwire.result.message
+                or f"Input rejected by guardrail '{tripwire.guardrail_name}'"
+            )
+            state.guardrail_triggered = tripwire.guardrail_name
+            _emit_typed("guardrail_tripped", {
+                "guardrail_name": tripwire.guardrail_name,
+                "where": "input",
+                "behavior": tripwire.result.behavior.value,
+                "message": state.result,
+            })
+            emit("warn", {"message": f"input guardrail tripped: {tripwire.guardrail_name}"})
+            if active_hooks:
+                await _fire_hook("on_run_end", state.result)
+            return state
+        if tripped:
+            messages.append(LLMMessage(role="user", content=tripped))
+            _emit_typed("guardrail_tripped", {
+                "guardrail_name": "input",
+                "where": "input",
+                "behavior": "reject_content",
+                "message": tripped,
+                "stage": "input",
+                "rewrite": True,
+            })
 
     overflow_retries = 0
     cancel_event = asyncio.Event()
@@ -1308,6 +1656,8 @@ async def run_agent_graph(
                     emit("warn", {"message": f"before_llm hook error: {hook_err}"})
 
             buf, on_chunk = _make_buffer()
+            if active_hooks:
+                await _fire_hook("on_llm_start", resolved_model_name or "", messages)
             try:
                 response = await llm.chat(
                     messages,
@@ -1317,6 +1667,14 @@ async def run_agent_graph(
                 )
                 if not resolved_model_name and response.model:
                     resolved_model_name = response.model
+                _last_request_usage = _accumulate_usage(response)
+                if active_hooks:
+                    await _fire_hook(
+                        "on_llm_end",
+                        response.model or resolved_model_name or "",
+                        response.content or "",
+                        _last_request_usage,
+                    )
 
                 # Session: write usage
                 if session_writer:
@@ -1549,8 +1907,51 @@ async def run_agent_graph(
 
                 loop_tracker.record(call.tool_name, call.args)
 
-                tool_result = await registry.execute_tool(call.tool_name, call.args)
+                # HITL tool approval (via RunContext). ``None`` means undecided,
+                # which we treat as approve-by-default for backward compatibility.
+                native_tc_id = native_tc.tool_call_id if native_tc else call.tool_name
+                approval_state = run_context.is_tool_approved(
+                    native_tc_id, tool_name=call.tool_name,
+                )
+                if approval_state is False:
+                    rec = run_context.get_approval(native_tc_id, tool_name=call.tool_name)
+                    reason = (rec.reason if rec else None) or "rejected via RunContext"
+                    emit("tool_skipped", {"name": call.tool_name, "reason": reason})
+                    messages.append(LLMMessage(
+                        role="user",
+                        content=f"[Tool Skipped] {call.tool_name} was rejected: {reason}",
+                    ))
+                    continue
+                if approval_state is None:
+                    emit("approval_required", {"name": call.tool_name, "id": native_tc_id})
+                    _emit_typed("approval_required", {
+                        "tool_name": call.tool_name,
+                        "call_id": native_tc_id,
+                        "args": call.args,
+                    })
+
+                _emit_typed("tool_started", {
+                    "tool_name": call.tool_name,
+                    "call_id": native_tc_id,
+                    "args": call.args,
+                })
+                if active_hooks:
+                    await _fire_hook(
+                        "on_tool_start", call.tool_name, native_tc_id, call.args,
+                    )
+                tool_result = await registry.execute_tool(
+                    call.tool_name, call.args, run_context=run_context,
+                )
                 state.tool_calls += 1
+                if active_hooks:
+                    await _fire_hook(
+                        "on_tool_end",
+                        call.tool_name,
+                        native_tc_id,
+                        tool_result.success,
+                        str(tool_result.output)[:2000] if tool_result.output else "",
+                        tool_result.error if not tool_result.success else None,
+                    )
 
                 # External post_tool_use hook
                 if ext_hook_runner:
@@ -1592,6 +1993,13 @@ async def run_agent_graph(
                     "name": call.tool_name,
                     "success": tool_result.success,
                     "preview": preview,
+                })
+                _emit_typed("tool_result", {
+                    "tool_name": call.tool_name,
+                    "call_id": native_tc_id,
+                    "success": tool_result.success,
+                    "output": preview if isinstance(preview, str) else "[multimodal]",
+                    "error": tool_result.error if not tool_result.success else None,
                 })
 
                 # Session: write tool result
@@ -1723,8 +2131,43 @@ async def run_agent_graph(
                     emit("tool_call", {"name": call.tool_name})
                 loop_tracker.record_batch(approved_calls)
 
-                results = await registry.execute_tools_parallel(approved_calls)
+                # Resolve a stable call_id per approved call (prefer native tc id).
+                _approved_call_ids: list[str] = []
+                for _idx, _c in enumerate(approved_calls):
+                    _ntc = native_tool_call_objects[_idx] if (
+                        native_tool_call_objects
+                        and _idx < len(native_tool_call_objects)
+                    ) else None
+                    _approved_call_ids.append(
+                        (_ntc.tool_call_id if _ntc else None) or _c.tool_name
+                    )
+
+                for _c, _cid in zip(approved_calls, _approved_call_ids):
+                    _emit_typed("tool_started", {
+                        "tool_name": _c.tool_name,
+                        "call_id": _cid,
+                        "args": _c.args,
+                    })
+                    if active_hooks:
+                        await _fire_hook(
+                            "on_tool_start", _c.tool_name, _cid, _c.args,
+                        )
+                results = await registry.execute_tools_parallel(
+                    approved_calls, run_context=run_context,
+                )
                 state.tool_calls += len(approved_calls)
+                if active_hooks:
+                    for _c, _cid, _r in zip(
+                        approved_calls, _approved_call_ids, results
+                    ):
+                        await _fire_hook(
+                            "on_tool_end",
+                            _c.tool_name,
+                            _cid,
+                            _r.success,
+                            str(_r.output)[:2000] if _r.output else "",
+                            _r.error if not _r.success else None,
+                        )
 
                 if after_tool:
                     safe_results = []
@@ -1754,7 +2197,7 @@ async def run_agent_graph(
 
                 call_summaries: list[str] = []
                 tool_outputs: list[str] = []
-                for call, result in zip(approved_calls, results):
+                for _idx2, (call, result) in enumerate(zip(approved_calls, results)):
                     raw_out = result.output if result.success else f"Error: {result.error}"
                     if isinstance(raw_out, list):
                         output = raw_out
@@ -1762,11 +2205,23 @@ async def run_agent_graph(
                     else:
                         output = _evict_large_tool_result(call.tool_name, raw_out)
                         preview = output[:preview_chars]
-                        
+
+                    _call_id = (
+                        _approved_call_ids[_idx2]
+                        if _idx2 < len(_approved_call_ids)
+                        else call.tool_name
+                    )
                     emit("tool_result", {
                         "name": call.tool_name,
                         "success": result.success,
                         "preview": preview,
+                    })
+                    _emit_typed("tool_result", {
+                        "tool_name": call.tool_name,
+                        "call_id": _call_id,
+                        "success": result.success,
+                        "output": preview if isinstance(preview, str) else "[multimodal]",
+                        "error": result.error if not result.success else None,
                     })
                     
                     if isinstance(output, str):
@@ -1969,9 +2424,66 @@ async def run_agent_graph(
         except Exception:
             logger.debug("PTRL: post-run self-analysis failed", exc_info=True)
 
+    # ── Output guardrails + structured output coercion ──
+    if output_guardrails and state.result:
+        try:
+            rewritten, tripped = await _run_output_guardrails(
+                output_guardrails, run_context, state.result,
+            )
+            if tripped:
+                state.guardrail_triggered = tripped
+                state.result = str(rewritten)
+                _emit_typed("guardrail_tripped", {
+                    "guardrail_name": tripped,
+                    "where": "output",
+                    "behavior": GuardrailBehavior.REJECT_CONTENT.value,
+                    "message": state.result,
+                })
+                emit("warn", {"message": f"output guardrail tripped: {tripped}"})
+        except GuardrailTripwireTriggered as tripwire:
+            state.guardrail_triggered = tripwire.guardrail_name
+            _emit_typed("guardrail_tripped", {
+                "guardrail_name": tripwire.guardrail_name,
+                "where": "output",
+                "behavior": tripwire.result.behavior.value,
+                "message": tripwire.result.message or "",
+            })
+            emit("warn", {"message": f"output guardrail raised: {tripwire.guardrail_name}"})
+
+    if output_type is not None and state.status == "done" and state.result:
+        try:
+            state.final_output = _coerce_output_type(state.result, output_type)
+        except Exception as err:
+            emit("warn", {"message": f"output_type coercion failed: {err}"})
+            state.final_output = state.result
+    elif state.status == "done":
+        state.final_output = state.result
+
+    # Persist only the messages newly added in this run to the Session backend.
+    if session is not None:
+        try:
+            new_msgs = messages[_session_start_cursor:]
+            if new_msgs:
+                await _session_add_items(session, new_msgs)
+        except Exception as err:
+            emit("warn", {"message": f"session save failed: {err}"})
+
+    _emit_typed("final_output", {
+        "output": (
+            state.final_output
+            if state.final_output is not None
+            else state.result
+        ),
+        "raw": state.result if isinstance(state.result, str) else "",
+        "usage": usage.to_dict(),
+    })
+    if active_hooks:
+        await _fire_hook("on_run_end", state.result)
+
     emit("agent_done", {
         "tool_calls": state.tool_calls,
         "iterations": state.iterations,
         "elapsed": elapsed,
+        "usage": usage.to_dict(),
     })
     return state

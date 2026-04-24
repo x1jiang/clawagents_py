@@ -1,4 +1,4 @@
-__version__ = "6.1.1"
+__version__ = "6.2.0"
 
 from clawagents.agent import ClawAgent, create_claw_agent
 from clawagents.graph.agent_loop import (
@@ -26,4 +26,23 @@ from clawagents.hooks import (
 )
 from clawagents.session import (
     SessionWriter, SessionReader, SessionInfo, list_sessions,
+    Session, InMemorySession, JsonlFileSession, SQLiteSession,
 )
+
+# ── OpenAI-Agents-inspired APIs (additive) ─────────────────────────────
+from clawagents.run_context import RunContext, ApprovalRecord
+from clawagents.usage import Usage, RequestUsage
+from clawagents.lifecycle import RunHooks, AgentHooks, composite_hooks
+from clawagents.guardrails import (
+    InputGuardrail, OutputGuardrail,
+    GuardrailBehavior, GuardrailResult, GuardrailTripwireTriggered,
+    input_guardrail, output_guardrail,
+)
+from clawagents.stream_events import (
+    StreamEvent, TurnStartedEvent, AssistantTextEvent, AssistantDeltaEvent,
+    ToolCallPlannedEvent, ToolStartedEvent, ToolResultEvent,
+    ApprovalRequiredEvent, UsageEvent, GuardrailTrippedEvent,
+    FinalOutputEvent, ErrorStreamEvent, ErrorEvent, stream_event_from_kind,
+)
+from clawagents.function_tool import function_tool
+from clawagents.retry import RetryPolicy, DEFAULT_RETRY_POLICY

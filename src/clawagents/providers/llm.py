@@ -133,6 +133,10 @@ def rebuild_thinking_content(content: str, thinking: str | None) -> str:
 
 class LLMProvider(ABC):
     name: str
+    # Per-provider RetryPolicy override. When ``None``, the module-level
+    # default is used. Set on an instance or subclass to customise behaviour
+    # without touching the concrete provider class.
+    retry_policy: Any = None
 
     @abstractmethod
     async def chat(
@@ -212,21 +216,63 @@ async def _invoke_callback(
 async def _with_retry(
     tag: str,
     fn: Callable[[], Coroutine[Any, Any, T]],
+    *,
+    policy: Any = None,
 ) -> T:
+    """Retry ``fn`` with either the legacy heuristic or a :class:`RetryPolicy`.
+
+    When ``policy`` is ``None``, behaviour matches the pre-existing
+    ``_is_retryable`` heuristic so providers that don't opt-in keep working.
+    """
     last_error: BaseException | None = None
-    for attempt in range(_MAX_RETRIES + 1):
-        if attempt > 0:
-            delay = _jittered_delay(attempt - 1)
-            logger.warning(
-                "  [%s] Retry %d/%d after %.1fs", tag, attempt, _MAX_RETRIES, delay,
-            )
-            await asyncio.sleep(delay)
+
+    if policy is None:
+        for attempt in range(_MAX_RETRIES + 1):
+            if attempt > 0:
+                delay = _jittered_delay(attempt - 1)
+                logger.warning(
+                    "  [%s] Retry %d/%d after %.1fs",
+                    tag, attempt, _MAX_RETRIES, delay,
+                )
+                await asyncio.sleep(delay)
+            try:
+                return await fn()
+            except Exception as exc:
+                last_error = exc
+                if not _is_retryable(exc):
+                    break
+        raise last_error  # type: ignore[misc]
+
+    # Policy-driven path.
+    max_attempts = max(1, int(getattr(policy, "max_retries", _MAX_RETRIES)) + 1)
+    attempt = 0
+    while attempt < max_attempts:
         try:
             return await fn()
         except Exception as exc:
             last_error = exc
-            if not _is_retryable(exc):
+            attempt += 1
+            try:
+                descriptor = policy.classify(exc)
+                should = policy.should_retry(exc, attempt, descriptor=descriptor)
+            except Exception:
+                descriptor = None
+                should = _is_retryable(exc)
+            if not should or attempt >= max_attempts:
                 break
+            try:
+                delay = policy.compute_delay(
+                    attempt,
+                    retry_after=getattr(descriptor, "retry_after", None),
+                )
+            except Exception:
+                delay = _jittered_delay(attempt - 1)
+            logger.warning(
+                "  [%s] Retry %d/%d after %.1fs (policy=%s)",
+                tag, attempt, max_attempts - 1, delay,
+                getattr(descriptor, "error_class", "?"),
+            )
+            await asyncio.sleep(delay)
     raise last_error  # type: ignore[misc]
 
 
@@ -459,7 +505,11 @@ class OpenAIProvider(LLMProvider):
         oai_tools = _to_openai_tools(tools) if tools else None
 
         if not on_chunk:
-            return await _with_retry("openai", lambda: self._request_once(formatted, oai_tools))
+            return await _with_retry(
+                "openai",
+                lambda: self._request_once(formatted, oai_tools),
+                policy=getattr(self, "retry_policy", None),
+            )
         return await self._stream_with_retry(formatted, on_chunk, cancel_event, oai_tools)
 
     async def _request_once(
@@ -711,9 +761,11 @@ class GeminiProvider(LLMProvider):
         gemini_config = types.GenerateContentConfig(**config_opts)
 
         if not on_chunk:
-            return await _with_retry("gemini", lambda: self._request_once(
-                user_contents, gemini_config,
-            ))
+            return await _with_retry(
+                "gemini",
+                lambda: self._request_once(user_contents, gemini_config),
+                policy=getattr(self, "retry_policy", None),
+            )
         return await self._stream_with_retry(
             user_contents, gemini_config, on_chunk, cancel_event,
         )
@@ -994,7 +1046,11 @@ class AnthropicProvider(LLMProvider):
             ]
 
         if not on_chunk:
-            return await _with_retry("anthropic", lambda: self._request_once(kwargs))
+            return await _with_retry(
+                "anthropic",
+                lambda: self._request_once(kwargs),
+                policy=getattr(self, "retry_policy", None),
+            )
         return await self._stream_with_retry(kwargs, on_chunk, cancel_event)
 
     async def _request_once(self, kwargs: dict[str, Any]) -> LLMResponse:
@@ -1110,6 +1166,46 @@ class AnthropicProvider(LLMProvider):
 
 # ─── Factory ──────────────────────────────────────────────────────────────
 
+# Prefixes that indicate a model is served by Ollama's OpenAI-compatible
+# endpoint (http://localhost:11434/v1). Matching is case-insensitive.
+# Users can always force-route by prefixing with ``ollama/``.
+_OLLAMA_PREFIXES: tuple[str, ...] = (
+    "ollama/",
+    "gemma4:",
+    "gemma3n:",
+    "gemma3:",
+    "gemma2:",
+    "gemma:",
+    "gemma4",
+    "gemma3n",
+    "gemma3",
+    "gemma2",
+    "gemma",
+    "llama3",
+    "llama2",
+    "llama",
+    "qwen2",
+    "qwen",
+    "mistral",
+    "mixtral",
+    "phi4",
+    "phi3",
+    "phi",
+    "deepseek-r1",
+    "deepseek",
+    "codellama",
+)
+_OLLAMA_DEFAULT_BASE_URL = "http://localhost:11434/v1"
+
+
+def _looks_like_ollama(model_name: str) -> bool:
+    """Return True if *model_name* looks like an Ollama/local model tag.
+
+    Use the explicit ``ollama/<tag>`` form to bypass heuristics.
+    """
+    lower = model_name.lower()
+    return any(lower.startswith(p) for p in _OLLAMA_PREFIXES)
+
 
 def create_provider(model_name: str, config: EngineConfig) -> LLMProvider:
     """Create a single LLM provider inferred from model name."""
@@ -1124,5 +1220,15 @@ def create_provider(model_name: str, config: EngineConfig) -> LLMProvider:
     if lower.startswith("claude") or lower.startswith("anthropic"):
         config.anthropic_model = model_name
         return AnthropicProvider(config)
+    if _looks_like_ollama(model_name):
+        # Strip the explicit ``ollama/`` routing prefix; Ollama serves the bare tag.
+        tag = model_name[len("ollama/"):] if lower.startswith("ollama/") else model_name
+        if not config.openai_base_url:
+            config.openai_base_url = _OLLAMA_DEFAULT_BASE_URL
+        if not config.openai_api_key:
+            # Ollama ignores the API key but the OpenAI client refuses an empty string.
+            config.openai_api_key = "ollama"
+        config.openai_model = tag
+        return OpenAIProvider(config)
     config.openai_model = model_name
     return OpenAIProvider(config)

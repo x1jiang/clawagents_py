@@ -266,7 +266,13 @@ class ToolRegistry:
 
         return []
 
-    async def execute_tool(self, tool_name: str, args: Dict[str, Any]) -> ToolResult:
+    async def execute_tool(
+        self,
+        tool_name: str,
+        args: Dict[str, Any],
+        *,
+        run_context: Any = None,
+    ) -> ToolResult:
         tool = self.get(tool_name)
         if not tool:
             return ToolResult(success=False, output="", error=f"Unknown tool: {tool_name}")
@@ -294,8 +300,10 @@ class ToolRegistry:
             # File snapshot before write tools (Claude Code pattern: fileHistoryMakeSnapshot)
             _snapshot_before_write(tool_name, effective_args)
 
+            # Route run_context to tools that declare it in their execute signature.
+            execute_awaitable = _call_tool_execute(tool, effective_args, run_context)
             result = await asyncio.wait_for(
-                tool.execute(effective_args),
+                execute_awaitable,
                 timeout=self._tool_timeout_s,
             )
             truncated = ToolResult(
@@ -320,16 +328,48 @@ class ToolRegistry:
         except Exception as err:
             return ToolResult(success=False, output="", error=f"Tool error: {str(err)}")
 
-    async def execute_tools_parallel(self, calls: List[ParsedToolCall]) -> List[ToolResult]:
+    async def execute_tools_parallel(
+        self,
+        calls: List[ParsedToolCall],
+        *,
+        run_context: Any = None,
+    ) -> List[ToolResult]:
         if not calls:
             return []
         if len(calls) == 1:
-            return [await self.execute_tool(calls[0].tool_name, calls[0].args)]
+            return [await self.execute_tool(calls[0].tool_name, calls[0].args, run_context=run_context)]
 
         async def _safe_exec(call: ParsedToolCall) -> ToolResult:
             try:
-                return await self.execute_tool(call.tool_name, call.args)
+                return await self.execute_tool(call.tool_name, call.args, run_context=run_context)
             except Exception as err:
                 return ToolResult(success=False, output="", error=f"Tool error: {str(err)}")
 
         return list(await asyncio.gather(*[_safe_exec(c) for c in calls]))
+
+
+def _call_tool_execute(tool: Tool, args: Dict[str, Any], run_context: Any):
+    """Invoke ``tool.execute`` with ``run_context`` only when it is accepted.
+
+    This keeps the public Tool protocol minimal: legacy tools that define
+    ``async def execute(self, args)`` work as-is, while new tools can opt in
+    to the typed context by declaring ``run_context``.
+    """
+    if run_context is None:
+        return tool.execute(args)
+
+    from clawagents.function_tool import (
+        FunctionTool,
+        _tool_signature_accepts_run_context,
+    )
+
+    if isinstance(tool, FunctionTool):
+        return tool.execute(args, run_context=run_context)
+
+    accepts, param_name = _tool_signature_accepts_run_context(tool)
+    if accepts and param_name:
+        try:
+            return tool.execute(args, **{param_name: run_context})
+        except TypeError:
+            return tool.execute(args)
+    return tool.execute(args)

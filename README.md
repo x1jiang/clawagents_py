@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.0.0-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.2.0-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -26,7 +26,7 @@ pip install clawagents[anthropic]   # + Anthropic Claude support
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 6.0.0** — Latest stable release (April 2026)
+> **Version 6.2.0** — Latest stable release (April 2026). Adds 10 OpenAI-Agents parity surfaces, first-class Ollama/Gemma4 routing, and 63 model profiles. See [Changelog](#changelog).
 
 ---
 
@@ -409,7 +409,7 @@ Traditional Stack (DeepAgents):           ClawAgents:
 
 ## Feature Matrix
 
-| Feature | ClawAgents v6.0 | DeepAgents | OpenClaw |
+| Feature | ClawAgents v6.2 | DeepAgents | OpenClaw |
 |:---|:---:|:---:|:---:|
 | **Core** | | | |
 | ReAct loop | ✅ | ✅ | ✅ |
@@ -1218,6 +1218,53 @@ python -m pytest tests/ -v -m benchmark
 ---
 
 ## Changelog
+
+### v6.2.0 — OpenAI-Agents Parity, Ollama/Gemma4 First-Class Routing, 63 Model Profiles
+
+A substantial additive release. Everything is backward compatible — existing `create_claw_agent()` calls, env vars, and tool registrations work unchanged.
+
+**1. Ten OpenAI-Agents-SDK parity surfaces** (all additive, all new modules)
+
+| Surface | Module | What it adds |
+|:---|:---|:---|
+| **Run Context** | `clawagents.run_context` | `RunContext` carries per-run state, approvals, and arbitrary user data through hooks and tools. |
+| **Usage Tracking** | `clawagents.usage` | `Usage` + `RequestUsage` aggregate token/latency stats across turns, providers, and sub-agents. |
+| **Lifecycle Hooks** | `clawagents.lifecycle` | `RunHooks` / `AgentHooks` with typed `LLMStart/LLMEnd/ToolStart/ToolEnd/AgentStart/AgentEnd/RunStart/RunEnd/Handoff` payloads. `composite_hooks` chains multiple observers without interference. |
+| **Guardrails** | `clawagents.guardrails` | `input_guardrail` / `output_guardrail` decorators, `GuardrailTripwireTriggered`, behavior modes (raise / log / filter). |
+| **Stream Events** | `clawagents.stream_events` | First-class `TurnStartedEvent`, `AssistantDeltaEvent`, `ToolCallPlannedEvent`, `ApprovalRequiredEvent`, `UsageEvent`, `GuardrailTrippedEvent`, `FinalOutputEvent`, `ErrorStreamEvent`. Consumable via `on_stream_event` callback. |
+| **Retry Policy** | `clawagents.retry` | `RetryPolicy` dataclass + `DEFAULT_RETRY_POLICY`. Exponential backoff with jitter, per-error-class overrides. |
+| **Function Tools** | `clawagents.function_tool` | `@function_tool` decorator auto-derives JSON Schema from Python type hints. Zero boilerplate. |
+| **Session Backends** | `clawagents.session` | Unified `Session` protocol with `InMemorySession`, `JsonlFileSession`, `SQLiteSession`. Drop-in persistence. |
+| **Structured Outputs** | `OutputTypeSpec` | Return typed objects via Pydantic model or JSON schema. Validation happens before the run finalizes. |
+| **Tool Approval** | `ApprovalHandler` | HITL gate — async callback returns allow/deny/redirect per tool call. Integrates with `ApprovalRequiredEvent`. |
+
+**2. Ollama & Gemma 4 first-class routing**
+
+`create_provider()` now auto-routes 24 Ollama-family prefixes to `http://localhost:11434/v1` with no config needed. Use either the bare tag (`gemma4:e4b`) or the explicit routing form (`ollama/gemma4:e4b`).
+
+| Family | Examples | Routed to |
+|:---|:---|:---|
+| **Gemma 4** | `gemma4`, `gemma4:e2b`, `gemma4:e4b`, `gemma4:26b`, `gemma4:31b` | Ollama @ :11434/v1 |
+| **Gemma 3 / 3n / 2** | `gemma3`, `gemma3n:e4b`, `gemma2`, `gemma` | Ollama @ :11434/v1 |
+| **Llama / Qwen / Mistral / Phi / Deepseek / Codellama** | `llama3`, `qwen2`, `mistral`, `mixtral`, `phi4`, `deepseek-r1`, `codellama`, … | Ollama @ :11434/v1 |
+| **Explicit routing** | `ollama/<any-tag>` | Ollama @ :11434/v1 (prefix stripped) |
+
+Override with `OPENAI_BASE_URL` if you run Ollama on a different host/port. API key is auto-set to the placeholder `"ollama"`.
+
+**3. 63 model profiles + model-aware context budget**
+
+The `_MODEL_PROFILES` table now covers frontier (GPT-5.4 → 400K, Gemini 3.1 → 1M, Claude 4.6 Opus), Ollama (Gemma4 e2b/e4b → 128K, 26b/31b → 256K), and a long tail of OSS variants. `_resolve_context_budget()` walks insertion order for deterministic prefix matching (most-specific first).
+
+**4. Cross-package parity** — the TypeScript sibling `clawagents` (see [x1jiang/clawagents](https://github.com/x1jiang/clawagents)) has the identical 24-entry Ollama prefix list, 63-entry model profile table with the same (window, ratio) values, and the same `create_provider` routing logic. Parity verified by smoke tests and diff-check in CI.
+
+**5. Quality / debug pass**
+
+- Async agent loop hardening — new turn-started events, tighter cancellation semantics, cleaner state hand-off to sub-agents.
+- Added `tests/test_openai_agents_surfaces.py` — full coverage for RunContext, Usage, Hooks, Guardrails, StreamEvents, Retry, FunctionTool, Session backends.
+- Test suite: **314 passed, 2 skipped**.
+
+**New public exports** (from `clawagents`):
+`RunContext`, `ApprovalRecord`, `Usage`, `RequestUsage`, `RunHooks`, `AgentHooks`, `composite_hooks`, `InputGuardrail`, `OutputGuardrail`, `input_guardrail`, `output_guardrail`, `GuardrailBehavior`, `GuardrailResult`, `GuardrailTripwireTriggered`, `StreamEvent` (+ 10 concrete event types), `stream_event_from_kind`, `RetryPolicy`, `DEFAULT_RETRY_POLICY`, `function_tool`, `InMemorySession`, `JsonlFileSession`, `SQLiteSession`.
 
 ### v6.1.1 — Credential Isolation & Lazy Tool Provisioning
 
