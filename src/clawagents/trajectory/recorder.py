@@ -22,6 +22,8 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any
 
+from clawagents.redact import redact, redact_obj
+
 logger = logging.getLogger(__name__)
 
 def _get_trajectories_dir() -> Path:
@@ -306,23 +308,33 @@ class TrajectoryRecorder:
         self._cumulative_score += score
         self._total_tokens += tokens_used
 
+        # Redact secret-shaped substrings before persisting. Trajectories are
+        # often shared with teammates / pasted into bug reports, so this is the
+        # last line of defence against a leaked tool result containing an API
+        # key.
+        for tc in calls:
+            tc.args = redact_obj(tc.args) if isinstance(tc.args, dict) else tc.args
+            tc.output_preview = redact(tc.output_preview)
+            if tc.error:
+                tc.error = redact(tc.error)
+
         turn = TurnRecord(
             run_id=self.run_id,
             turn_index=len(self._turns),
             timestamp=time.time(),
-            response_text=response_text[:self._response_chars],
+            response_text=redact(response_text[:self._response_chars]),
             model=model,
             tokens_used=tokens_used,
             tool_calls=calls,
             score=score,
             cumulative_score=self._cumulative_score,
-            observation_context=observation_context[:300] if observation_context else "",
+            observation_context=redact(observation_context[:300]) if observation_context else "",
             productivity_score=productivity,
             deterministic_score=det_score,
             prompt_token_count=prompt_token_count,
             response_token_count=response_token_count,
-            thinking=thinking[:500] if thinking else None,
-            metadata=metadata or {},
+            thinking=redact(thinking[:500]) if thinking else None,
+            metadata=redact_obj(metadata) if metadata else {},
         )
         self._turns.append(turn)
         self._write_turn(turn)
@@ -386,7 +398,7 @@ class TrajectoryRecorder:
 
         summary = RunSummary(
             run_id=self.run_id,
-            task=self.task[:200],
+            task=redact(self.task[:200]),
             model=self.model,
             total_turns=len(self._turns),
             total_tool_calls=tool_total,

@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.4.0-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.5.0-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -26,7 +26,7 @@ pip install clawagents[anthropic]   # + Anthropic Claude support
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 6.4.0** — Latest stable release (April 2026). Big feature release: hierarchical tracing infrastructure, MCP client (stdio + SSE + Streamable-HTTP), handoffs + `Agent.as_tool()`, Exec Safety v2 (Plan Mode + bash semantic validator + obfuscation detector), expanded hook taxonomy + LLM-evaluated `PromptHook`, AskUserQuestion structured HITL, settings hierarchy, image sanitization, mock-provider parity harness. **516 Python tests** pass, mypy clean. See [Changelog](#changelog).
+> **Version 6.5.0** — Latest stable release (April 2026). Hermes-inspired hardening release: subagent depth limits, memory-isolated forks, activity heartbeats, per-agent IterationBudget, path-scoped parallel tool execution, full plugin hook expansion (`pre_tool` veto + `transform_tool_result` + `before_llm`), runtime `display_clawagents_home()`, hermetic test runner with pinned xdist workers, prompt-cache-aware `CommandDef` (`--now` parsing + `cacheImpact`), and a documented prompt-cache policy. **662 Python tests** pass, mypy clean; **370 TypeScript tests** pass, `tsc --noEmit` clean. See [Changelog](#changelog).
 
 ---
 
@@ -1325,25 +1325,62 @@ All environment variables are **optional**. They serve as defaults when the corr
 # Install with dev dependencies
 pip install -e ".[dev]"
 
-# Run all tests (expected: 334 passed, 2 skipped on v6.3.0)
+# Run all tests (expected: 662 passed, 2 skipped on v6.5.0)
 python -m pytest -q
+
+# Hermetic runner — exactly the environment CI uses (pinned xdist=4,
+# TZ=UTC, LANG=C.UTF-8, PYTHONHASHSEED=0, credentials scrubbed)
+bash scripts/run_tests.sh
 
 # Run benchmarks (requires API keys)
 python -m pytest tests/ -v -m benchmark
 
-# Static type check (expected: clean, exit 0 on v6.3.0)
+# Static type check (expected: clean, exit 0 on v6.5.0)
 python -m mypy
 ```
 
-The test suite includes regression tests for every bug fixed in v6.3.0:
-`tests/test_exec_safety.py`, `tests/test_agent_loop_bugs.py`,
-`tests/test_parallel_native_indexing.py`, `tests/test_subagent_env_race.py`,
-plus the existing `tests/test_web_fetch_ssrf.py` and the broad
-`tests/simulated_test.py`.
+The test suite includes regression tests for every Hermes-inspired pattern
+landed in v6.5.0 — `tests/test_subagent_depth.py`, `tests/test_compaction_hardened.py`,
+`tests/test_mcp_env_scrub.py`, `tests/test_paths.py`, `tests/test_redact.py`,
+`tests/test_steer.py`, `tests/test_transport.py`, `tests/test_commands.py`,
+`tests/test_aux_models.py`, `tests/test_background.py` — alongside the
+v6.3.0/6.4.0 regression sets and the broad `tests/simulated_test.py` parity
+sweep.
 
 ---
 
 ## Changelog
+
+### v6.5.0 — Hermes-inspired hardening: depth, isolation, heartbeats, path-scoped parallelism (April 2026)
+
+Architecture/correctness release. Ten patterns ported from the Hermes agent are
+now live on **both** Python and TypeScript ports — every change comes with
+regression tests on both. Test totals after this release: **Python 662 passed**,
+**TypeScript 370 passed**, mypy clean, `tsc --noEmit` clean.
+
+**Tier 1 — runtime safety & isolation:**
+
+- **🪜 Subagent depth limits** (`graph/coordinator`, `tools/subagent`, `graph/forked_agent`) — `RunContext` now tracks `subagent_depth`. The `task` tool refuses to delegate when the parent is already at `depth >= 2`, returning a structured error instead of silently spawning a third tier. Forks inherit the depth counter; the cap mirrors Hermes' "no recursive delegation" rule and prevents exponential subagent fan-out.
+- **🧠 Memory-isolated forks/subagents** (`graph/forked_agent`, `memory/loader`) — both `forked_agent` and the built-in `task` tool now accept `skip_memory=True` (default for forks). When set, memory loaders are bypassed so a sandboxed fork cannot see the parent's `AGENTS.md`/skills/notes — closing a previously-silent context-leak path. Forks also get their own `IterationBudget` so a runaway research fork cannot starve the parent's remaining turns.
+- **💓 Activity heartbeats** (`session/heartbeat`, `gateway/server`, `graph/agent_loop`) — long-running tool calls now emit periodic `tool_heartbeat` events (`tool_name`, `call_id`, `elapsed_s`) every ~20s through `run_with_heartbeat`. Gateway clients can use these to keep WebSocket channels alive and surface progress, eliminating false timeouts on slow shell/web/sandbox calls. Best-effort: emitter exceptions are swallowed so they never mask the real result.
+- **⏱️ Per-agent IterationBudget** (`iteration_budget`, `graph/agent_loop`, `graph/forked_agent`) — replaces the implicit `max_turns` counter with an explicit `IterationBudget` object that lives on `RunContext`. Subagents and forks each get their own budget sized from `delegation.max_iterations` (default `DEFAULT_DELEGATION_MAX_ITERATIONS`), so one chatty fork can't drain the parent's turn pool. Surfaces the same `consume()`/`refund()`/`exhausted` shape Hermes uses, making it easy to tee budgets across recursive delegation.
+- **🌿 Path-scoped parallel tool execution** (`tools/registry`) — `execute_tools_parallel` no longer fans out blindly. Tools are tagged `parallel_safe` (read-only by default for `read_file` / `list_dir` / `glob` / `search_files` / `grep` / `web_fetch`) with optional `path_scoped_arg` ("path", "url", …); the registry partitions calls into ordered batches so reads run concurrently while any writer or path-scope collision serialises behind them. Capped at `MAX_PARALLEL_TOOL_WORKERS = 8` to keep file-handle pressure bounded. Mirrors Hermes' parallel-read / serial-write contract.
+
+**Tier 2 — extensibility & cache-discipline:**
+
+- **🔌 Plugin hook expansion** (`plugins`) — new top-level `Plugin` + `PluginManager` (`from clawagents import Plugin, PluginManager`). Plugins compose three hook families with priority-based ordering: `pre_tool` (first-deny veto / args-rewrite, alias `before_tool`), `transform_tool_result` (sequential post-execution rewrite, alias `after_tool`), and `before_llm` (prompt-massage). Replaces the previous "single hook wins" model with a deterministic chain that's easy to unit-test.
+- **📁 `display_clawagents_home()`** (`paths`) — runtime helper that resolves the package install root and rewrites it to a placeholder (`<clawagents-home>`) for tool descriptions, error messages, and traces. Makes prompt cache hits stable across user homes / dev / CI by stripping absolute paths from anything that ends up in the LLM context window.
+- **🧊 Prompt-cache-aware `CommandDef`** (`commands`) — slash-command definitions now carry an explicit `cache_impact` (`"none" | "soft_break" | "hard_break"`) and parse a `--now` flag (`/skills install foo --now`) so users can opt into immediate state mutation; default is `cache_impact="none"`, `--now` upgrades to `"hard_break"` and forces a fresh prompt build. Mirrors Hermes' "deferred by default to preserve prompt cache" contract.
+- **📜 Prompt-cache policy** (`AGENTS.md`) — new top-level rule documents the cache invariants (stable system prompt prefix, no per-turn timestamps in cached blocks, deferred slash-command state mutations, `display_clawagents_home()` for paths) so contributors keep the cache hit rate above the 80%+ Hermes target.
+
+**Tier 3 — testing infrastructure:**
+
+- **🧪 Hermetic test runner + pinned xdist** (`scripts/run_tests.sh`, `pyproject.toml`) — canonical CI-mirrored runner that pins `pytest-xdist` to 4 workers (override via `CLAW_TEST_WORKERS`), forces `TZ=UTC` / `LANG=C.UTF-8` / `PYTHONHASHSEED=0`, and scrubs every credential + `CLAW_*` env var before pytest sees it. Gives every contributor the exact environment CI runs in, eliminating local-vs-CI flakes. Mirrored by `clawagents/scripts/run_tests.sh` for the TypeScript port (`node:test --test-concurrency=4` via `tsx`).
+
+**Backwards compatibility:** All 10 features are additive. Existing
+`create_claw_agent()` / `agent.invoke()` call sites keep working; the new
+machinery activates automatically (depth tracking, heartbeats, parallel-safe
+tagging) or via opt-in (`Plugin`, `--now`, `skip_memory`, `IterationBudget`).
 
 ### v6.4.1 — Public-API export polish (no behavior change)
 

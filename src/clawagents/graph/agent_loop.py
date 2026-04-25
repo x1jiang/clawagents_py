@@ -36,6 +36,10 @@ from typing import Any, Callable, Literal, Optional
 from clawagents.providers.llm import LLMProvider, LLMMessage, LLMResponse, NativeToolSchema, NativeToolCall, strip_thinking_tokens
 from clawagents.tools.registry import ToolRegistry, ParsedToolCall, ToolResult
 from clawagents.run_context import RunContext
+from clawagents.session.heartbeat import (
+    DEFAULT_ACTIVITY_HEARTBEAT_INTERVAL_S,
+    run_with_heartbeat,
+)
 from clawagents.usage import Usage, RequestUsage
 from clawagents.lifecycle import RunHooks, AgentHooks
 from clawagents.guardrails import (
@@ -271,7 +275,7 @@ def _resolve_context_budget(model_name: str, context_window: int) -> tuple[int, 
         return int(profile["max_input_tokens"]), float(profile["budget_ratio"])
     return context_window, 0.75
 
-AgentStatus = Literal["running", "done", "error"]
+AgentStatus = Literal["running", "done", "error", "max_iterations"]
 
 EventKind = Literal[
     "tool_call",
@@ -1420,6 +1424,19 @@ async def run_agent_graph(
         run_context.context = user_context
     usage = run_context.usage
 
+    # Per-agent iteration budget (Hermes parity). If the caller has not
+    # already attached one (e.g., through a subagent-spawning path that
+    # creates a fresh budget), build one sized to ``max_iterations`` so
+    # the loop has a single source of truth for "are we out of turns?".
+    # We size it to ``max_iterations`` directly; the existing ``for
+    # round_idx in range(effective_max_rounds)`` loop still acts as a
+    # belt-and-braces hard ceiling, but the budget is the user-visible
+    # control surface.
+    if run_context.iteration_budget is None:
+        from clawagents.iteration_budget import IterationBudget as _IterBudget
+        _budget_size = max(0, max_iterations if max_iterations > 0 else MAX_TOOL_ROUNDS)
+        run_context.iteration_budget = _IterBudget(_budget_size)
+
     def _emit_typed(kind: str, data: dict[str, Any] | None = None) -> None:
         """Dispatch a typed StreamEvent alongside the existing ``emit`` hook."""
         if on_stream_event is None:
@@ -1534,8 +1551,8 @@ async def run_agent_graph(
 
     prompt_to_use = system_prompt or BASE_SYSTEM_PROMPT
 
-    # PTRL Layer 1: Pre-run lesson injection
-    if learn:
+    # PTRL Layer 1: Pre-run lesson injection (skipped for isolated subagents).
+    if learn and not getattr(run_context, "skip_memory", False):
         from clawagents.trajectory.lessons import build_lesson_preamble
         preamble = build_lesson_preamble()
         if preamble:
@@ -1660,6 +1677,24 @@ async def run_agent_graph(
             if cancel_event.is_set():
                 state.status = "done"
                 state.result = state.result or "[cancelled]"
+                break
+
+            # Consume one unit of the iteration budget. When exhausted,
+            # surface the same outcome as Hermes' "max_iterations
+            # reached" so trajectory recorders can flag the run as
+            # truncated rather than successful. Note: ``round_idx == 0``
+            # always succeeds because the budget was sized to
+            # ``max_iterations`` above.
+            if not run_context.iteration_budget.consume():
+                emit("warn", {
+                    "message": (
+                        f"iteration budget exhausted "
+                        f"({run_context.iteration_budget.used}/"
+                        f"{run_context.iteration_budget.max_total})"
+                    ),
+                })
+                state.status = "max_iterations"
+                state.result = state.result or "[iteration budget exhausted]"
                 break
 
             # Session: mark turn start
@@ -2186,8 +2221,25 @@ async def run_agent_graph(
                     await _fire_hook(
                         "on_tool_start", call.tool_name, native_tc_id, call.args,
                     )
-                tool_result = await registry.execute_tool(
-                    call.tool_name, call.args, run_context=run_context,
+                # ── Activity heartbeats (Hermes parity) ─────────────────
+                # Long-running tools (slow web fetches, deep bash runs)
+                # would otherwise produce zero events between start and
+                # finish; upstream proxies and chat-platform gateways
+                # interpret that as "idle" and kill the connection.
+                # Emit a periodic ``tool_heartbeat`` while the call is
+                # in flight so listeners can keep the channel alive and
+                # surface progress.
+                tool_result = await run_with_heartbeat(
+                    registry.execute_tool(
+                        call.tool_name, call.args, run_context=run_context,
+                    ),
+                    on_event=on_event,
+                    kind="tool_heartbeat",
+                    payload={
+                        "tool_name": call.tool_name,
+                        "call_id": native_tc_id,
+                    },
+                    interval=DEFAULT_ACTIVITY_HEARTBEAT_INTERVAL_S,
                 )
                 state.tool_calls += 1
                 if active_hooks:
@@ -2415,8 +2467,21 @@ async def run_agent_graph(
                         await _fire_hook(
                             "on_tool_start", _c.tool_name, _cid, _c.args,
                         )
-                results = await registry.execute_tools_parallel(
-                    approved_calls, run_context=run_context,
+                # Heartbeat while the parallel batch runs; the call_ids
+                # field lets listeners disambiguate which group of tools
+                # is in flight.
+                results = await run_with_heartbeat(
+                    registry.execute_tools_parallel(
+                        approved_calls, run_context=run_context,
+                    ),
+                    on_event=on_event,
+                    kind="tool_heartbeat",
+                    payload={
+                        "parallel": True,
+                        "tool_names": [_c.tool_name for _c in approved_calls],
+                        "call_ids": list(_approved_call_ids),
+                    },
+                    interval=DEFAULT_ACTIVITY_HEARTBEAT_INTERVAL_S,
                 )
                 state.tool_calls += len(approved_calls)
                 if active_hooks:
@@ -2606,7 +2671,13 @@ async def run_agent_graph(
                         ))
 
                 # ── Continuous background memory extraction (Claude Code pattern) ──
-                if learn and recorder:
+                # Skipped for isolated subagents (skip_memory=True): they do
+                # not write back to the parent's memory store.
+                if (
+                    learn
+                    and recorder
+                    and not getattr(run_context, "skip_memory", False)
+                ):
                     try:
                         from clawagents.trajectory.background_memory import maybe_extract_memories
                         _last_memory_extraction_turn = await maybe_extract_memories(
@@ -2672,7 +2743,14 @@ async def run_agent_graph(
             logger.debug("LLM-as-Judge failed", exc_info=True)
 
     # ── PTRL Layer 3: Post-run self-analysis (with quality gate) ──
-    if learn and recorder and run_summary:
+    # Skipped for isolated subagents (skip_memory=True): subagents must not
+    # write lessons back into the parent's lesson store.
+    if (
+        learn
+        and recorder
+        and run_summary
+        and not getattr(run_context, "skip_memory", False)
+    ):
         try:
             from dataclasses import asdict
             from clawagents.trajectory.lessons import extract_lessons, save_lessons, should_extract_lessons

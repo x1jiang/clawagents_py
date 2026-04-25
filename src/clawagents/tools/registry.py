@@ -57,6 +57,65 @@ _TRUNCATION_TAIL = 2_000
 DEFAULT_TOOL_TIMEOUT_S = 120
 
 
+# ─── Parallel-execution policy (learned from Hermes) ──────────────────────
+# A tool is run concurrently with siblings only when it is parallel-safe AND
+# its path scope (if any) does not collide with another call's path scope.
+#
+# Tools may opt-in by setting a ``parallel_safe = True`` class attribute, and
+# may declare a ``path_scoped_arg`` naming the argument whose value identifies
+# the resource they touch (so two ``read_file`` calls on different paths can
+# run concurrently, but two ``write_file`` calls on the same path cannot).
+#
+# Tools listed in ``_NEVER_PARALLEL_TOOLS`` are always run alone, regardless
+# of parallel-safe flags — interactive tools must serialize.
+
+_NEVER_PARALLEL_TOOLS: frozenset[str] = frozenset({
+    "ask_user", "clarify", "confirm", "approve_action",
+})
+
+# Tools that read filesystem-like resources are safe to fan out as long as
+# their target paths are independent. Write-side tools are intentionally
+# excluded — they run sequentially via the snapshot path.
+_DEFAULT_PARALLEL_SAFE: frozenset[str] = frozenset({
+    "read_file", "list_dir", "glob", "search_files", "grep",
+    "web_fetch", "shell",  # stateless reads
+})
+
+# Default declarations for path-scoped tools. Tools may override by setting
+# their own ``path_scoped_arg`` attribute.
+_DEFAULT_PATH_SCOPED_ARGS: Dict[str, str] = {
+    "read_file": "path",
+    "list_dir": "path",
+    "glob": "path",
+    "search_files": "path",
+    "grep": "path",
+    "web_fetch": "url",
+}
+
+MAX_PARALLEL_TOOL_WORKERS = 8
+
+
+def _is_parallel_safe(tool: "Tool") -> bool:
+    if tool.name in _NEVER_PARALLEL_TOOLS:
+        return False
+    flag = getattr(tool, "parallel_safe", None)
+    if flag is True:
+        return True
+    if flag is False:
+        return False
+    return tool.name in _DEFAULT_PARALLEL_SAFE
+
+
+def _path_scope_of(tool: "Tool", args: Dict[str, Any]) -> Optional[str]:
+    arg_name = getattr(tool, "path_scoped_arg", None) or _DEFAULT_PATH_SCOPED_ARGS.get(tool.name)
+    if not arg_name:
+        return None
+    val = args.get(arg_name)
+    if val is None:
+        return None
+    return str(val)
+
+
 # ─── File Snapshots (learned from Claude Code: fileHistoryMakeSnapshot) ────
 # Before write tools modify a file, snapshot it for undo/rollback capability.
 
@@ -354,6 +413,15 @@ class ToolRegistry:
         *,
         run_context: Any = None,
     ) -> List[ToolResult]:
+        """Execute calls with Hermes-style path-scoped parallelism.
+
+        Calls are partitioned into ordered batches:
+        * Never-parallel tools and unsafe tools form singleton batches.
+        * Parallel-safe tools are merged into the trailing batch when their
+          path scope (if any) does not collide with the existing scopes.
+        * Each batch runs concurrently with at most ``MAX_PARALLEL_TOOL_WORKERS``
+          in flight; batches run strictly in order to preserve write semantics.
+        """
         if not calls:
             return []
         if len(calls) == 1:
@@ -365,7 +433,53 @@ class ToolRegistry:
             except Exception as err:
                 return ToolResult(success=False, output="", error=f"Tool error: {str(err)}")
 
-        return list(await asyncio.gather(*[_safe_exec(c) for c in calls]))
+        # Build batches. Each batch is a list of (original_index, call).
+        batches: List[List[tuple[int, ParsedToolCall]]] = []
+        scopes_per_batch: List[set[str]] = []
+
+        for idx, call in enumerate(calls):
+            tool = self.tools.get(call.tool_name)
+            psafe = bool(tool and _is_parallel_safe(tool))
+            scope = _path_scope_of(tool, call.args) if tool else None
+
+            if not psafe:
+                batches.append([(idx, call)])
+                scopes_per_batch.append(set())
+                continue
+
+            if batches:
+                # Try to merge into the trailing batch only if it is itself
+                # parallel-safe (i.e. all members were parallel-safe and no
+                # path-scope collision exists).
+                last = batches[-1]
+                last_scopes = scopes_per_batch[-1]
+                last_tool = self.tools.get(last[0][1].tool_name)
+                last_psafe = bool(last_tool and _is_parallel_safe(last_tool))
+                if (
+                    last_psafe
+                    and (scope is None or scope not in last_scopes)
+                    and len(last) < MAX_PARALLEL_TOOL_WORKERS
+                ):
+                    last.append((idx, call))
+                    if scope is not None:
+                        last_scopes.add(scope)
+                    continue
+
+            batches.append([(idx, call)])
+            scopes_per_batch.append({scope} if scope is not None else set())
+
+        results: List[Optional[ToolResult]] = [None] * len(calls)
+        for batch in batches:
+            if len(batch) == 1:
+                idx, call = batch[0]
+                results[idx] = await _safe_exec(call)
+            else:
+                tasks = [_safe_exec(c) for _, c in batch]
+                done = await asyncio.gather(*tasks)
+                for (idx, _), res in zip(batch, done):
+                    results[idx] = res
+
+        return [r if r is not None else ToolResult(success=False, output="", error="missing result") for r in results]
 
 
 def _call_tool_execute(tool: Tool, args: Dict[str, Any], run_context: Any):

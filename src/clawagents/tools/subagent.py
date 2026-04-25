@@ -4,6 +4,14 @@ Spawns an isolated ClawAgent.invoke() with a fresh context window.
 Only the final result is returned to the parent agent.
 
 Supports typed SubAgentSpec for per-agent configuration (name, prompt, etc.)
+
+Hermes-derived guardrails:
+  * Depth cap — recursive delegation is bounded by
+    :data:`clawagents.run_context.MAX_SUBAGENT_DEPTH`. The tool refuses to
+    spawn a child when the parent ``RunContext.depth`` is already at the cap.
+  * Memory isolation — children always run with ``skip_memory=True`` so
+    they cannot read the parent's memory directory, lessons, or skill state.
+    Pass anything they need explicitly via the prompt.
 """
 
 import asyncio
@@ -16,6 +24,7 @@ from clawagents.tools.registry import Tool, ToolRegistry, ToolResult
 from clawagents.process.command_queue import enqueue_command_in_lane
 from clawagents.process.lanes import CommandLane
 from clawagents.config.features import is_enabled
+from clawagents.run_context import MAX_SUBAGENT_DEPTH, RunContext
 
 # Keys that must NOT be inherited by child agents — prevents parent context leakage.
 EXCLUDED_STATE_KEYS: frozenset[str] = frozenset({
@@ -104,7 +113,11 @@ class TaskTool:
             },
         }
 
-    async def execute(self, args: Dict[str, Any]) -> ToolResult:
+    async def execute(
+        self,
+        args: Dict[str, Any],
+        run_context: Optional[RunContext] = None,
+    ) -> ToolResult:
         from clawagents.graph.agent_loop import run_agent_graph
 
         description = str(args.get("description", ""))
@@ -116,6 +129,26 @@ class TaskTool:
 
         if not description:
             return ToolResult(success=False, output="", error="No task description provided")
+
+        # ── Depth cap (Hermes parity) ──────────────────────────────────
+        # A subagent must not itself spawn another subagent. The default
+        # cap is 2 — top-level (0) → subagent (1) → would-be-grandchild (2)
+        # is refused. We treat a missing run_context as depth=0 so this
+        # only kicks in for genuinely nested calls.
+        parent_depth = run_context.depth if run_context is not None else 0
+        if parent_depth >= MAX_SUBAGENT_DEPTH:
+            return ToolResult(
+                success=False,
+                output="",
+                error=(
+                    f"Sub-agent delegation refused: depth cap of "
+                    f"{MAX_SUBAGENT_DEPTH} reached "
+                    f"(parent depth={parent_depth}). "
+                    "Recursive delegation is disallowed; the parent "
+                    "should perform the work directly or split it into "
+                    "siblings rather than nesting another `task` call."
+                ),
+            )
 
         spec: Optional[SubAgentSpec] = None
         if agent_name:
@@ -170,6 +203,27 @@ class TaskTool:
                     "use_native_tools": effective_native_tools,
                 }.items() if k not in EXCLUDED_STATE_KEYS
             }
+
+            # Fresh run-context for the child: bump depth, force memory
+            # isolation, but keep the parent's permission_mode so a child
+            # cannot escalate beyond what the user has authorised.
+            #
+            # Each subagent gets a *fresh* IterationBudget sized to its own
+            # ``effective_max_iter`` (parity with Hermes' ``delegation.max_iterations``).
+            # This means a runaway subagent cannot starve the parent's
+            # remaining turns — the parent budget is left untouched.
+            from clawagents.iteration_budget import IterationBudget as _IterBudget
+            child_ctx: RunContext = RunContext(
+                permission_mode=(
+                    run_context.permission_mode
+                    if run_context is not None
+                    else RunContext().permission_mode
+                ),
+                depth=parent_depth + 1,
+                skip_memory=True,
+                iteration_budget=_IterBudget(max(1, int(effective_max_iter))),
+            )
+            run_kwargs["run_context"] = child_ctx
 
             if proxy_env_overrides:
                 # Hold the lock across env mutate -> run -> env restore to

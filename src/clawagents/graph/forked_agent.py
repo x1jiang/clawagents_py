@@ -65,6 +65,7 @@ async def run_forked_agent(
         raise RuntimeError("Forked agents feature is not enabled. Set CLAW_FEATURE_FORKED_AGENTS=1")
 
     from clawagents.graph.agent_loop import run_agent_graph
+    from clawagents.run_context import RunContext
     from clawagents.tools.registry import ToolRegistry
 
     # Create restricted tool registry if filtering is needed
@@ -92,6 +93,20 @@ async def run_forked_agent(
     # Suppress event logging for forked agents by default
     _noop = lambda *_a, **_kw: None
 
+    # Forks are isolated like sub-agents: skip parent memory and lessons.
+    # We do NOT bump depth — forks are typically used for memory extraction
+    # and similar background tasks, not user-visible delegation, so they
+    # should not consume the recursive-delegation budget. The `task` tool
+    # remains the only path that increments RunContext.depth.
+    #
+    # Each fork also gets its own IterationBudget so a runaway research
+    # fork cannot starve the parent's remaining turns.
+    from clawagents.iteration_budget import IterationBudget
+    fork_ctx = RunContext(
+        skip_memory=True,
+        iteration_budget=IterationBudget(max(1, int(max_turns))),
+    )
+
     state = await run_agent_graph(
         task=fork_prompt,
         llm=llm,
@@ -101,6 +116,7 @@ async def run_forked_agent(
         streaming=streaming,
         on_event=on_event or _noop,
         system_prompt=system_prompt,
+        run_context=fork_ctx,
         # Disable PTRL for forks (they shouldn't learn or modify lessons)
         trajectory=False,
         learn=False,

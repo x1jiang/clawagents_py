@@ -18,12 +18,106 @@ from __future__ import annotations
 import abc
 import enum
 import importlib.util
+import logging
+import os
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Optional, TypedDict, Union
+from typing import Any, Awaitable, Callable, Iterable, Optional, TypedDict, Union
 
+from clawagents.redact import is_secret_name
 from clawagents.tracing import custom_span, tool_span
+
+logger = logging.getLogger(__name__)
+
+
+# ─── Environment scrubbing for stdio MCP servers ──────────────────────────
+
+
+# Variables that are almost always required for a child process to work
+# (locales, terminal type, shell, home directory, language) but are not
+# secrets. Anything not on this list is dropped from the inherited parent
+# environment by default to avoid leaking, e.g., ``OPENAI_API_KEY`` to an
+# untrusted MCP server.
+_SAFE_PASSTHROUGH_KEYS: tuple[str, ...] = (
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "TERM",
+    "LANG",
+    "TZ",
+    "TMPDIR",
+    "PWD",
+)
+
+
+def _is_safe_passthrough(name: str) -> bool:
+    if name in _SAFE_PASSTHROUGH_KEYS:
+        return True
+    # LC_ALL / LC_CTYPE / LC_TIME / etc.
+    if name.startswith("LC_"):
+        return True
+    return False
+
+
+def scrub_env_for_stdio(
+    user_env: Optional[dict[str, str]],
+    *,
+    inherit_safe: bool = True,
+    allowlist: Optional[Iterable[str]] = None,
+    parent_env: Optional[dict[str, str]] = None,
+) -> dict[str, str]:
+    """Build a minimal, secret-free environment for an MCP stdio child.
+
+    Policy:
+
+    * Start with an empty dict.
+    * If ``inherit_safe`` (default), copy the parent's locale / shell / path
+      keys (see :data:`_SAFE_PASSTHROUGH_KEYS`).
+    * Copy any explicit ``allowlist`` keys from the parent env. These are
+      passed through verbatim — use this for variables the MCP server
+      genuinely needs (``GITHUB_TOKEN``, ``DATABASE_URL``).
+    * Apply ``user_env`` on top, overriding anything above.
+
+    Anything *not* in the safe passthrough or allowlist is **dropped** —
+    including ``OPENAI_API_KEY``, ``ANTHROPIC_API_KEY``, ``AWS_*``, etc.
+
+    A diagnostic log is emitted listing the secret-named keys that were
+    dropped, so operators can spot accidental leaks early.
+    """
+    src = parent_env if parent_env is not None else dict(os.environ)
+    out: dict[str, str] = {}
+
+    if inherit_safe:
+        for k, v in src.items():
+            if _is_safe_passthrough(k):
+                out[k] = v
+
+    if allowlist:
+        for k in allowlist:
+            if k in src:
+                out[k] = src[k]
+
+    if user_env:
+        out.update(user_env)
+
+    # Diagnostic: which secret-shaped parent vars did we drop?
+    dropped_secrets = [
+        k for k in src.keys()
+        if is_secret_name(k) and k not in out
+    ]
+    if dropped_secrets:
+        logger.debug(
+            "clawagents.mcp: dropped %d secret-named env vars from stdio child "
+            "(use env_allowlist to inherit explicitly): %s",
+            len(dropped_secrets),
+            ", ".join(sorted(dropped_secrets)[:8])
+            + (" …" if len(dropped_secrets) > 8 else ""),
+        )
+
+    return out
 
 
 # ─── SDK probe ────────────────────────────────────────────────────────────
@@ -73,11 +167,23 @@ class MCPLifecyclePhase(str, enum.Enum):
 
 
 class MCPServerStdioParams(TypedDict, total=False):
-    """Stdio transport parameters."""
+    """Stdio transport parameters.
+
+    Security note: by default the parent process's environment is **not**
+    forwarded to the child wholesale. Only locale / path / shell variables
+    are inherited (see :func:`scrub_env_for_stdio`). Use ``env_allowlist`` to
+    forward specific keys (e.g. ``["GITHUB_TOKEN", "DATABASE_URL"]``), or
+    set ``inherit_safe_env=False`` and pass everything explicitly via ``env``.
+
+    Operators that want the legacy "inherit everything" behaviour can set the
+    ``CLAW_MCP_INHERIT_ALL_ENV=1`` env var.
+    """
 
     command: str
     args: list[str]
     env: dict[str, str]
+    env_allowlist: list[str]
+    inherit_safe_env: bool
     cwd: Union[str, Path]
     encoding: str
 
@@ -362,10 +468,23 @@ class MCPServerStdio(MCPServer):
         from mcp import StdioServerParameters
         from mcp.client.stdio import stdio_client
 
+        # Compute the scrubbed env *eagerly* so the parent's secrets never
+        # reach the SDK call. The escape hatch ``CLAW_MCP_INHERIT_ALL_ENV=1``
+        # restores the old "inherit everything when env is None" semantics
+        # for operators that explicitly opt in.
+        if os.environ.get("CLAW_MCP_INHERIT_ALL_ENV", "").lower() in {"1", "true", "yes"}:
+            scrubbed_env: Optional[dict[str, str]] = self.params.get("env")
+        else:
+            scrubbed_env = scrub_env_for_stdio(
+                self.params.get("env"),
+                inherit_safe=self.params.get("inherit_safe_env", True),
+                allowlist=self.params.get("env_allowlist"),
+            )
+
         sdk_params = StdioServerParameters(
             command=self.params["command"],
             args=list(self.params.get("args") or []),
-            env=self.params.get("env"),
+            env=scrubbed_env,
             cwd=self.params.get("cwd"),
             encoding=self.params.get("encoding", "utf-8"),
         )

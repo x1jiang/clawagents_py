@@ -1,4 +1,4 @@
-__version__ = "6.4.1"
+__version__ = "6.5.0"
 
 from clawagents.agent import ClawAgent, create_claw_agent
 from clawagents.graph.agent_loop import (
@@ -33,7 +33,16 @@ from clawagents.session import (
 )
 
 # ── OpenAI-Agents-inspired APIs (additive) ─────────────────────────────
-from clawagents.run_context import RunContext, ApprovalRecord
+from clawagents.run_context import (
+    MAX_SUBAGENT_DEPTH,
+    ApprovalRecord,
+    RunContext,
+)
+from clawagents.iteration_budget import (
+    DEFAULT_DELEGATION_MAX_ITERATIONS,
+    IterationBudget,
+)
+from clawagents.plugins import Plugin, PluginManager
 from clawagents.usage import Usage, RequestUsage
 from clawagents.lifecycle import RunHooks, AgentHooks, composite_hooks
 from clawagents.guardrails import (
@@ -54,6 +63,55 @@ from clawagents.handoffs import (
 from clawagents.handoff_filters import remove_all_tools, nest_handoff_history
 from clawagents.function_tool import function_tool
 from clawagents.retry import RetryPolicy, DEFAULT_RETRY_POLICY
+
+# ── Slash-command registry (v6.5) ──────────────────────────────────────
+from clawagents.commands import (
+    CommandDef, ResolvedCommand, COMMAND_REGISTRY,
+    register_command, resolve_command, list_commands,
+    format_help, all_command_names,
+)
+
+# ── Mid-run nudges (v6.5) ──────────────────────────────────────────────
+from clawagents.steer import (
+    SteerMessage, SteerQueue, NextTurnQueue, SteerHook,
+    steer, queue_message,
+    drain_steer, drain_next_turn,
+    peek_steer, peek_next_turn,
+)
+
+# ── Display-layer redaction (v6.5) ─────────────────────────────────────
+from clawagents.redact import (
+    redact, redact_obj, redact_env, add_pattern,
+)
+
+# ── Profile-aware filesystem paths (v6.5) ──────────────────────────────
+from clawagents.paths import (
+    DEFAULT_PROFILE,
+    get_clawagents_home,
+    get_clawagents_workspace_dir,
+    get_trajectories_dir,
+    get_sessions_dir,
+    get_lessons_dir,
+    display_clawagents_home,
+    display_clawagents_workspace_dir,
+    list_profiles,
+)
+
+# ── Auxiliary model registry (v6.5) ────────────────────────────────────
+from clawagents.aux_models import (
+    AuxModelTask, AuxModelSpec, AuxModelRegistry,
+)
+
+# ── Transport abstraction (v6.5) ───────────────────────────────────────
+from clawagents.transport import (
+    TransportRequest, TransportResponse,
+    Transport, TransportRegistry, LegacyChatTransport,
+)
+
+# ── Background jobs (v6.5) ─────────────────────────────────────────────
+from clawagents.background import (
+    BackgroundJob, BackgroundJobManager, JobNotifier,
+)
 
 # ── Settings hierarchy (v6.4) ──────────────────────────────────────────
 from clawagents.settings import (

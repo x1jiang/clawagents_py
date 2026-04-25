@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Generic, TypeVar
 
+from clawagents.iteration_budget import IterationBudget
 from clawagents.permissions.mode import PermissionMode
 from clawagents.usage import Usage
 
@@ -38,6 +39,14 @@ class ApprovalRecord:
     reason: str | None = None
 
 
+# Maximum nesting depth for sub-agent delegation. Mirrors Hermes' policy: a
+# subagent (depth=1) may not itself spawn another subagent (depth=2 is the
+# hard cap; the ``task`` tool refuses any new spawn when depth >= MAX_SUBAGENT_DEPTH).
+# This bounds the worst-case token / iteration / time blowup of recursive
+# delegation and keeps cost predictable.
+MAX_SUBAGENT_DEPTH: int = 2
+
+
 @dataclass
 class RunContext(Generic[TContext]):
     """Typed context wrapper passed through a run.
@@ -46,10 +55,32 @@ class RunContext(Generic[TContext]):
     accept ``run_context`` as a keyword) to receive this object. The
     loop auto-detects that via signature inspection; tools that only
     accept ``args`` keep working.
+
+    Attributes:
+        context: User-supplied state passed in at run start.
+        usage: Live token-usage accumulator.
+        permission_mode: Active permission mode (``DEFAULT``/``PLAN``/…).
+        depth: Nesting depth for sub-agent delegation. ``0`` for the
+            top-level / user-facing run, ``1`` for a first-level subagent,
+            ``2`` for a sub-subagent (capped at :data:`MAX_SUBAGENT_DEPTH`).
+            The ``task`` tool refuses to spawn when ``depth >= MAX_SUBAGENT_DEPTH``.
+        skip_memory: When ``True``, the agent loop and any memory loaders
+            skip reading the parent's memory directory, lessons, and
+            persisted skill state. Sub-agent runs default to ``True`` so
+            they remain isolated from parent context.
+        iteration_budget: Optional :class:`~clawagents.iteration_budget.IterationBudget`
+            attached to this run. When set, the agent loop consumes one
+            unit per round and stops when the budget is exhausted, even
+            if ``max_iterations`` would still allow more rounds. Each
+            subagent gets a *fresh* budget so a runaway delegate cannot
+            starve the parent run.
     """
     context: TContext | None = None
     usage: Usage = field(default_factory=Usage)
     permission_mode: PermissionMode = PermissionMode.DEFAULT
+    depth: int = 0
+    skip_memory: bool = False
+    iteration_budget: IterationBudget | None = None
     _approvals: dict[str, ApprovalRecord] = field(default_factory=dict)
     _always_approvals: dict[str, ApprovalRecord] = field(default_factory=dict)
     _metadata: dict[str, Any] = field(default_factory=dict)

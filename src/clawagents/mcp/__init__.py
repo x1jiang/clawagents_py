@@ -28,6 +28,7 @@ from clawagents.mcp.server import (
     MCPToolDescriptor,
     is_mcp_sdk_available,
     require_mcp_sdk,
+    scrub_env_for_stdio,
 )
 from clawagents.mcp.manager import MCPServerManager
 from clawagents.mcp.tool_bridge import mcp_tool_to_clawagents_tool, MCPBridgedTool
@@ -42,6 +43,7 @@ __all__ = [
     "MCPToolDescriptor",
     "is_mcp_sdk_available",
     "require_mcp_sdk",
+    "scrub_env_for_stdio",
     "mcp_tool_to_clawagents_tool",
     "MCPBridgedTool",
 ]
