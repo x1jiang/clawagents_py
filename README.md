@@ -1257,6 +1257,12 @@ plus the existing `tests/test_web_fetch_ssrf.py` and the broad
 
 ## Changelog
 
+### v6.3.0.post1 — Docs Re-publish (no code changes)
+
+PEP 440 post-release. Identical code to `6.3.0`; re-published so the PyPI page
+shows the corrected README (version badge, feature-matrix header, latest-release
+callout). `pip install clawagents` resolves to this artifact.
+
 ### v6.3.0 — Sandbox & Security Hardening, Strict Type Checking
 
 Security/correctness release. Eleven bugs fixed across both the Python and TypeScript ports, plus a full mypy cleanup. All tests green: **334 passed**, **mypy clean** (0 errors, exit 0).

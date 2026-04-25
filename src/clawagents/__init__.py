@@ -1,4 +1,4 @@
-__version__ = "6.3.0"
+__version__ = "6.3.0.post1"
 
 from clawagents.agent import ClawAgent, create_claw_agent
 from clawagents.graph.agent_loop import (
