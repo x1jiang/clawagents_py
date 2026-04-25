@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "clawagents"
-version = "6.2.0"
+version = "6.2.1"
 description = "Lean, full-stack agentic AI framework with PTRL (Prompt-Time Reinforcement Learning)"
 readme = "README.md"
 license = "MIT"
@@ -54,3 +54,8 @@ clawagents = "clawagents.__main__:main"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 markers = ["benchmark: performance benchmark tests (deselect with -m 'not benchmark')"]
+# Make the in-tree `src/clawagents` win over any globally-installed `clawagents`
+# package. Without this, `pytest` may import a stale wheel from site-packages and
+# silently bypass local changes (notably the redirect-aware SSRF check).
+pythonpath = ["src"]
+testpaths = ["tests"]

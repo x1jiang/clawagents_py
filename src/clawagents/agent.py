@@ -639,10 +639,17 @@ def _resolve_model(
 
     active_model = model if isinstance(model, str) and model else get_default_model(config)
 
-    # Override the appropriate API key if provided
+    # Override the appropriate API key if provided.
+    # Route by model family so a single ``api_key`` parameter targets the
+    # correct provider config field. Without this, e.g. a Claude key
+    # silently lands in ``openai_api_key`` and the Anthropic provider
+    # falls back to the env var.
     if api_key:
-        if active_model.lower().startswith("gemini"):
+        lower = active_model.lower()
+        if lower.startswith("gemini"):
             config.gemini_api_key = api_key
+        elif lower.startswith("claude") or lower.startswith("anthropic"):
+            config.anthropic_api_key = api_key
         else:
             config.openai_api_key = api_key
 

@@ -183,13 +183,42 @@ def create_app() -> tuple:
     return app, llm, active_model
 
 
-def start_gateway(port: int = 3000):
+# Hosts that are local to this machine and safe to bind without auth.
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def _resolve_bind_host(host: str | None) -> str:
+    """Resolve the gateway bind address.
+
+    Order of precedence:
+      1. ``GATEWAY_HOST`` env var (explicit operator intent).
+      2. ``host`` argument to ``start_gateway`` (programmatic override).
+      3. ``127.0.0.1`` — fail-safe default. Previous releases bound to all
+         interfaces, which silently exposed an unauthenticated gateway on
+         LAN/Wi-Fi when ``GATEWAY_API_KEY`` was unset.
+    """
+    return os.getenv("GATEWAY_HOST") or host or "127.0.0.1"
+
+
+def start_gateway(port: int = 3000, host: str | None = None) -> None:
     app, llm, active_model = create_app()
+    bind_host = _resolve_bind_host(host)
+    is_loopback = bind_host in _LOOPBACK_HOSTS
     auth_status = "enabled" if _GATEWAY_API_KEY else "disabled (set GATEWAY_API_KEY to enable)"
-    print(f"\n🦞 ClawAgents Gateway running on http://localhost:{port}")
+    display_host = "localhost" if is_loopback else bind_host
+    print(f"\n🦞 ClawAgents Gateway running on http://{display_host}:{port}")
     print(f"   Provider: {llm.name}")
     print(f"   Model: {active_model}")
+    print(f"   Bind: {bind_host}{' (loopback)' if is_loopback else ' (network-reachable)'}")
     print(f"   Auth: {auth_status}")
-    print("   Endpoints: POST /chat | POST /chat/stream | WS /ws | GET /queue | GET /health\n")
+    print("   Endpoints: POST /chat | POST /chat/stream | WS /ws | GET /queue | GET /health")
 
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
+    if not is_loopback and not _GATEWAY_API_KEY:
+        print("\n⚠️  WARNING: gateway is bound to a non-loopback address with auth disabled.")
+        print("   This exposes /chat, /chat/stream, and /ws to anyone who can reach this host.")
+        print("   Set GATEWAY_API_KEY=<secret> to require Bearer auth, or unset GATEWAY_HOST")
+        print("   to bind to 127.0.0.1.\n")
+    else:
+        print()
+
+    uvicorn.run(app, host=bind_host, port=port, log_level="warning")

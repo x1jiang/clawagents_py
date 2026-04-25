@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.2.0-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.2.1-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -26,7 +26,7 @@ pip install clawagents[anthropic]   # + Anthropic Claude support
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 6.2.0** — Latest stable release (April 2026). Adds 10 OpenAI-Agents parity surfaces, first-class Ollama/Gemma4 routing, and 63 model profiles. See [Changelog](#changelog).
+> **Version 6.2.1** — Latest stable release (April 2026). Hardens `web_fetch` against redirect-based SSRF, fixes local pytest source resolution, and adds parity smoke coverage for the TypeScript sibling. See [Changelog](#changelog).
 
 ---
 
@@ -1080,13 +1080,22 @@ This provides **unlimited conversation length** with full audit trail preservati
 
 ## Gateway Server
 
-Launch a production-ready HTTP server with one line:
+Launch an HTTP server with one line:
 
 ```python
 from clawagents.gateway import start_gateway
 
-start_gateway(port=3000)
+start_gateway(port=3000)            # binds to 127.0.0.1 by default (loopback only)
+start_gateway(port=3000, host="0.0.0.0")  # explicit LAN exposure — REQUIRES auth
 ```
+
+### Bind & auth
+
+The gateway binds to **`127.0.0.1` (loopback)** by default in v6.2+. To expose
+it on the LAN, set `GATEWAY_HOST=0.0.0.0` (or pass `host=`), and *also* set
+`GATEWAY_API_KEY=<secret>` to require Bearer auth. Starting on a non-loopback
+address without an API key prints a loud warning at startup — anyone on the
+network can otherwise hit `/chat`, `/chat/stream`, and `/ws`.
 
 ### Endpoints
 
@@ -1104,6 +1113,26 @@ start_gateway(port=3000)
 - `cron` — scheduled tasks
 - `subagent` — sub-agent delegation
 - `nested` — nested sub-agent calls
+
+---
+
+## Trust Boundaries & Hardening
+
+A few surfaces are deliberately powerful — they exist for trusted operators,
+and you should treat them as such when running ClawAgents in environments with
+untrusted prompts or LAN exposure:
+
+- **`exec_shell` tool** — runs arbitrary commands inside the configured sandbox.
+  Pair with the `LocalBackend(cwd=...)` constraint and ideally a containerized
+  runtime; the tool's blocklist is a guardrail, not a security boundary.
+- **External hooks** (`CLAW_FEATURE_EXTERNAL_HOOKS=1`, `CLAW_HOOK_*`) execute
+  shell commands defined in your env or `.clawagents/hooks.json`. Anyone who
+  controls those configs has code execution. Treat hooks as **trusted-only**.
+- **`web_fetch` tool** — refuses loopback / RFC1918 / link-local / multicast
+  IPs by default to block SSRF. Set `CLAWAGENTS_WEB_ALLOW_PRIVATE=1` only in
+  trusted dev environments.
+- **Gateway** — defaults to loopback (`127.0.0.1`) bind. Set `GATEWAY_API_KEY`
+  if you bind to `0.0.0.0`.
 
 ---
 
@@ -1219,6 +1248,16 @@ python -m pytest tests/ -v -m benchmark
 
 ## Changelog
 
+### v6.2.1 — Release Hardening, Redirect-Safe `web_fetch`, and Parity Smokes
+
+Patch release focused on making the v6.2 line safer to install, test, and operate.
+
+- **Redirect-aware SSRF protection** — `web_fetch` disables automatic redirects and manually revalidates every hop before network I/O. Public-to-private redirects to loopback, RFC1918, link-local, reserved, multicast, or cloud metadata IPs are refused by default.
+- **Hermetic SSRF regression tests** — added `tests/test_web_fetch_ssrf.py` covering public-to-private redirects, redirect loops, direct private IP refusal, and legitimate public-to-public redirects.
+- **Local-source pytest resolution** — `pyproject.toml` now sets `pythonpath = ["src"]` and `testpaths = ["tests"]`, so local test runs cannot accidentally import an older installed wheel from `site-packages`.
+- **Cross-package parity smoke** — added `scripts/smoke_gemma4.py`, mirroring the TypeScript smoke script and printing provider, base URL, and stored model for Ollama/Gemma4, `gpt-5.4`, `gemini-3.1-pro`, and `claude-opus-4-6`.
+- **Release verification** — `python -m pytest` reports **319 passed, 2 skipped**; the SSRF-specific suite reports **5 passed**.
+
 ### v6.2.0 — OpenAI-Agents Parity, Ollama/Gemma4 First-Class Routing, 63 Model Profiles
 
 A substantial additive release. Everything is backward compatible — existing `create_claw_agent()` calls, env vars, and tool registrations work unchanged.
@@ -1235,8 +1274,8 @@ A substantial additive release. Everything is backward compatible — existing `
 | **Retry Policy** | `clawagents.retry` | `RetryPolicy` dataclass + `DEFAULT_RETRY_POLICY`. Exponential backoff with jitter, per-error-class overrides. |
 | **Function Tools** | `clawagents.function_tool` | `@function_tool` decorator auto-derives JSON Schema from Python type hints. Zero boilerplate. |
 | **Session Backends** | `clawagents.session` | Unified `Session` protocol with `InMemorySession`, `JsonlFileSession`, `SQLiteSession`. Drop-in persistence. |
-| **Structured Outputs** | `OutputTypeSpec` | Return typed objects via Pydantic model or JSON schema. Validation happens before the run finalizes. |
-| **Tool Approval** | `ApprovalHandler` | HITL gate — async callback returns allow/deny/redirect per tool call. Integrates with `ApprovalRequiredEvent`. |
+| **Structured Outputs** | `output_type=` arg on `create_claw_agent` / `agent.invoke` | Return typed objects via Pydantic model, dataclass, `dict`, `list`, or `str`. Coerced after run completes; failures emit a `warn` stream event. |
+| **Tool Approval** | `approval_handler=` arg + `ApprovalRequiredEvent` | HITL gate — async callable receives `{tool, args}` and returns `True` / `False` / a redirect dict. Integrates with `ApprovalRequiredEvent` for streaming UIs. |
 
 **2. Ollama & Gemma 4 first-class routing**
 
@@ -1255,7 +1294,7 @@ Override with `OPENAI_BASE_URL` if you run Ollama on a different host/port. API 
 
 The `_MODEL_PROFILES` table now covers frontier (GPT-5.4 → 400K, Gemini 3.1 → 1M, Claude 4.6 Opus), Ollama (Gemma4 e2b/e4b → 128K, 26b/31b → 256K), and a long tail of OSS variants. `_resolve_context_budget()` walks insertion order for deterministic prefix matching (most-specific first).
 
-**4. Cross-package parity** — the TypeScript sibling `clawagents` (see [x1jiang/clawagents](https://github.com/x1jiang/clawagents)) has the identical 24-entry Ollama prefix list, 63-entry model profile table with the same (window, ratio) values, and the same `create_provider` routing logic. Parity verified by smoke tests and diff-check in CI.
+**4. Cross-package parity** — the TypeScript sibling `clawagents` (see [x1jiang/clawagents](https://github.com/x1jiang/clawagents)) has the identical 24-entry Ollama prefix list, 63-entry model profile table with the same (window, ratio) values, and the same `create_provider` routing logic. Parity can be exercised manually with the matching smoke scripts in each repo (`clawagents_py/scripts/smoke_gemma4.py` and `clawagents/scripts/smoke-gemma4.ts`); both print the same provider, base URL and stored model for `gemma4:*`, `ollama/...`, `gpt-5.4`, `gemini-3.1-pro` and `claude-opus-4-6`. The GitHub Actions workflow added in v6.2.1 runs `pytest`, `python -m build`, and `twine check` on every push.
 
 **5. Quality / debug pass**
 

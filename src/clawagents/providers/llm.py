@@ -1208,7 +1208,13 @@ def _looks_like_ollama(model_name: str) -> bool:
 
 
 def create_provider(model_name: str, config: EngineConfig) -> LLMProvider:
-    """Create a single LLM provider inferred from model name."""
+    """Create a single LLM provider inferred from model name.
+
+    Clones ``config`` before mutating provider-specific fields so callers
+    can safely reuse one ``EngineConfig`` across providers (e.g. main +
+    advisor) or in concurrent flows without cross-talk.
+    """
+    config = config.model_copy()
     lower = model_name.lower()
     if lower.startswith("gemini"):
         if not _HAS_GEMINI:
