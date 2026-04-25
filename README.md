@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.2.1-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.3.0-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -26,7 +26,7 @@ pip install clawagents[anthropic]   # + Anthropic Claude support
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 6.2.1** — Latest stable release (April 2026). Hardens `web_fetch` against redirect-based SSRF, fixes local pytest source resolution, and adds parity smoke coverage for the TypeScript sibling. See [Changelog](#changelog).
+> **Version 6.3.0** — Latest stable release (April 2026). Sandbox & security hardening: multimodal-safe context shedding, parallel native tool-call indexing under `before_tool` hooks, subagent credential-proxy env race fix, plus a full mypy cleanup (46 errors → 0). 334 tests pass, mypy clean. See [Changelog](#changelog).
 
 ---
 
@@ -409,7 +409,7 @@ Traditional Stack (DeepAgents):           ClawAgents:
 
 ## Feature Matrix
 
-| Feature | ClawAgents v6.2 | DeepAgents | OpenClaw |
+| Feature | ClawAgents v6.3 | DeepAgents | OpenClaw |
 |:---|:---:|:---:|:---:|
 | **Core** | | | |
 | ReAct loop | ✅ | ✅ | ✅ |
@@ -1237,12 +1237,21 @@ All environment variables are **optional**. They serve as defaults when the corr
 # Install with dev dependencies
 pip install -e ".[dev]"
 
-# Run all tests
-python -m pytest tests/ -v
+# Run all tests (expected: 334 passed, 2 skipped on v6.3.0)
+python -m pytest -q
 
 # Run benchmarks (requires API keys)
 python -m pytest tests/ -v -m benchmark
+
+# Static type check (expected: clean, exit 0 on v6.3.0)
+python -m mypy
 ```
+
+The test suite includes regression tests for every bug fixed in v6.3.0:
+`tests/test_exec_safety.py`, `tests/test_agent_loop_bugs.py`,
+`tests/test_parallel_native_indexing.py`, `tests/test_subagent_env_race.py`,
+plus the existing `tests/test_web_fetch_ssrf.py` and the broad
+`tests/simulated_test.py`.
 
 ---
 
