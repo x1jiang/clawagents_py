@@ -102,7 +102,7 @@ async def run_forked_agent(
     # Each fork also gets its own IterationBudget so a runaway research
     # fork cannot starve the parent's remaining turns.
     from clawagents.iteration_budget import IterationBudget
-    fork_ctx = RunContext(
+    fork_ctx: RunContext = RunContext(
         skip_memory=True,
         iteration_budget=IterationBudget(max(1, int(max_turns))),
     )

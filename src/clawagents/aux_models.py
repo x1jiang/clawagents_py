@@ -112,7 +112,7 @@ class AuxModelSpec:
         """Promote a bare ``str`` model id (or ``model@base_url``) to a spec."""
         if isinstance(value, AuxModelSpec):
             return value
-        if not isinstance(value, str):  # type: ignore[unreachable]
+        if not isinstance(value, str):
             raise TypeError(f"AuxModelSpec.coerce: expected str | AuxModelSpec, got {type(value).__name__}")
         s = value.strip()
         if not s:

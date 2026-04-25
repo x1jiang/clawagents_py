@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.5.0-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.6.0-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -26,7 +26,7 @@ pip install clawagents[anthropic]   # + Anthropic Claude support
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 6.5.0** — Latest stable release (April 2026). Hermes-inspired hardening release: subagent depth limits, memory-isolated forks, activity heartbeats, per-agent IterationBudget, path-scoped parallel tool execution, full plugin hook expansion (`pre_tool` veto + `transform_tool_result` + `before_llm`), runtime `display_clawagents_home()`, hermetic test runner with pinned xdist workers, prompt-cache-aware `CommandDef` (`--now` parsing + `cacheImpact`), and a documented prompt-cache policy. **662 Python tests** pass, mypy clean; **370 TypeScript tests** pass, `tsc --noEmit` clean. See [Changelog](#changelog).
+> **Version 6.6.0** — Latest stable release (April 2026). Hermes-parity feature release: native **browser tools** (Playwright local + cloud provider stubs, accessibility-tree snapshots, surgical `click`/`type`/`fill_form`/`navigate`/`scroll`/`wait_for_selector` action set), built-in **cron / scheduler** (interval, one-shot, and cron expressions via optional `croniter`, JSON-persisted job store, due-job runner with structured `JobNotifier` events), **ACP adapter** (`AcpServer.serve()` bridges any ClawAgents agent to Zed's Agent Client Protocol over stdio with per-session prompt runners), and **RL fine-tuning hooks** (`RLRecorder` + `Trajectory` data model, pluggable `RewardScorer`s, lazy `TrlAdapter` / `AtroposAdapter` exporters with TRL-SFT / TRL-DPO / Atropos rollout / generic JSONL output). All four ports landed on **both** Python and TypeScript with mirrored APIs. **762 Python tests** pass, mypy clean; **478 TypeScript tests** pass, `tsc --noEmit` clean. See [Changelog](#changelog).
 
 ---
 
@@ -1372,6 +1372,74 @@ sweep.
 ---
 
 ## Changelog
+
+### v6.6.0 — Hermes-parity feature release: browser tools, scheduler, ACP, RL hooks (April 2026)
+
+Feature release. Four big Hermes-side capabilities now ship on both
+Python and TypeScript ports, each behind an optional dependency so the
+core install stays slim. Test totals after this release: **Python 762
+passed**, **TypeScript 478 passed**, mypy clean, `tsc --noEmit` clean.
+
+- **🌐 Browser tools** (`clawagents.browser`) — Playwright-driven browser
+  control for agents that need to read or interact with the live web.
+  `BrowserSession` exposes a stable async API (`navigate`, `snapshot`,
+  `click`, `type_text`, `fill_form`, `scroll`, `wait_for_selector`,
+  `screenshot`, `close`) over a pluggable provider (`LocalProvider` for
+  Playwright; `BrowserbaseProviderStub` / `BrowserUseProviderStub` ready
+  to be filled in for cloud back-ends). `create_browser_tools()` adapts
+  the session into ClawAgents tools with per-action accessibility-tree
+  snapshots so the model sees the page through the same axtree Hermes
+  uses. Playwright is an optional peer (`pip install clawagents[browser]`);
+  importing the module without it works fine — only `session.start()`
+  raises `MissingPlaywrightError`. `MAX_NODES = 800`-cap on snapshots,
+  navigation allow-/deny-lists, and a `renderSnapshot()` helper for
+  prompt-friendly trees.
+- **⏰ Cron / scheduled jobs** (`clawagents.cron`) — minimal but
+  production-shaped scheduler for agent-driven cron, one-shots, and
+  intervals. `parse_schedule()` handles `every 30s`, `at 2026-04-23T18:00`,
+  and 5-field cron expressions; cron support uses the optional
+  `croniter` package and degrades cleanly when missing. `Scheduler`
+  provides `create_job` / `get_job` / `pause_job` / `resume_job` /
+  `trigger_job` / `remove_job` plus a `run_due` driver that emits
+  `JobNotifier` events (`job_started`, `job_finished`, `job_failed`,
+  `job_skipped`). Job store is plain JSON on disk; runners can be any
+  callable, so users can wire it to `agent.invoke(...)` or shell.
+  Mirrors Hermes' "agents as a workflow engine" pattern.
+- **🔌 ACP adapter** (`clawagents.acp`) — bridges any ClawAgents agent
+  to **Zed's Agent Client Protocol** over stdio so editors / IDEs that
+  speak ACP can drive a ClawAgents agent the same way they drive
+  Claude Code or Codex. `AcpServer.serve()` registers an
+  `AgentSessionFactory`, accepts ACP `initialize` / `newSession` /
+  `prompt` / `cancel` requests, and translates ClawAgents stream events
+  into ACP `session/update` messages (`agent_message_chunk`,
+  `agent_thought_chunk`, `tool_call.start` / `.complete`, `permission`).
+  Per-session `AgentSession` wraps prompt history, permission
+  callbacks, and `StopReason` propagation. The optional
+  `agent-client-protocol` package is loaded lazily — importing
+  `clawagents.acp` works without it; only `serve()` raises
+  `MissingAcpDependencyError`. Round-trip tested against Hermes'
+  reference message shape.
+- **🎯 RL fine-tuning hooks** (`clawagents.rl`) — capture live agent
+  runs as training-ready trajectories and export them to **TRL**,
+  **Atropos**, **SLIME**, or generic JSONL. `RLRecorder` plugs into
+  `agent.on_event` and assembles a `Trajectory` (system / user /
+  assistant + `tool_calls` / tool messages) in correct ChatML order,
+  with config knobs for `max_tool_result_chars`, `redact_tool_args`,
+  and `capture_system_prompt`. Pluggable `RewardScorer`s (`Contains`,
+  `ExactMatch`, `Regex`, `LengthPenalty`, `Composite`) attach a scalar
+  reward + per-component breakdown. Export helpers: `export_jsonl`,
+  `to_chatml`, `to_trl_sft`, `to_trl_dpo`, `to_atropos_rollout`. Lazy
+  `TrlAdapter` and `AtroposAdapter` only import `trl` / `atropos` when
+  the user actually drives a trainer or rollout collector — install
+  hints surface as `MissingRLDependencyError`.
+
+**Backwards compatibility:** All four features are additive and
+opt-in. Importing the new submodules has no side effects; nothing in
+the core `create_claw_agent()` / `agent.invoke()` path changed. The
+optional peers (`playwright`, `croniter`, `agent-client-protocol`,
+`trl`, `atropos`) are only required at the moment you actually
+`session.start()` / parse a cron expression / `serve()` over ACP /
+build a TRL dataset.
 
 ### v6.5.0 — Hermes-inspired hardening: depth, isolation, heartbeats, path-scoped parallelism (April 2026)
 

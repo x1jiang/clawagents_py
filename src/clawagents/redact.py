@@ -188,7 +188,7 @@ def redact_obj(obj: Any) -> Any:
     if isinstance(obj, tuple):
         return tuple(redact_obj(v) for v in obj)
     if isinstance(obj, set):
-        return {redact_obj(v) for v in obj}  # type: ignore[misc]
+        return {redact_obj(v) for v in obj}
     if isinstance(obj, list):
         return [redact_obj(v) for v in obj]
     return obj

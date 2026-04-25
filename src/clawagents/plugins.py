@@ -100,8 +100,8 @@ class PluginManager:
         return list(self._plugins)
 
     def composed_before_tool(self) -> Optional[Callable[..., Any]]:
-        hooks = [p.resolved_before_tool() for p in self._plugins]
-        hooks = [h for h in hooks if h is not None]
+        raw_hooks = [p.resolved_before_tool() for p in self._plugins]
+        hooks: list[Callable[..., Any]] = [h for h in raw_hooks if h is not None]
         if not hooks:
             return None
 
@@ -125,8 +125,8 @@ class PluginManager:
         return composed
 
     def composed_after_tool(self) -> Optional[Callable[..., Any]]:
-        hooks = [p.resolved_after_tool() for p in self._plugins]
-        hooks = [h for h in hooks if h is not None]
+        raw_hooks = [p.resolved_after_tool() for p in self._plugins]
+        hooks: list[Callable[..., Any]] = [h for h in raw_hooks if h is not None]
         if not hooks:
             return None
 

@@ -1,4 +1,4 @@
-__version__ = "6.5.0"
+__version__ = "6.6.0"
 
 from clawagents.agent import ClawAgent, create_claw_agent
 from clawagents.graph.agent_loop import (
@@ -175,4 +175,84 @@ from clawagents.mcp import (
     is_mcp_sdk_available,
     require_mcp_sdk,
     mcp_tool_to_clawagents_tool,
+)
+
+# ── Cron / scheduled jobs (v6.6) ───────────────────────────────────────
+# In-process scheduler with persistent JSON job store. Cron expressions
+# require the optional ``croniter`` package; interval and one-shot
+# schedules work out of the box.
+from clawagents.cron import (
+    Scheduler,
+    SchedulerError,
+    Job,
+    JobRunner,
+    ParsedSchedule,
+    parse_schedule,
+    parse_duration,
+    compute_next_run,
+    create_job,
+    get_job,
+    list_jobs,
+    update_job,
+    pause_job,
+    resume_job,
+    trigger_job,
+    remove_job,
+    mark_job_run,
+    advance_next_run,
+    get_due_jobs,
+    save_job_output,
+    CRONITER_AVAILABLE,
+)
+
+# ── ACP adapter (v6.6) ─────────────────────────────────────────────────
+# Wraps a ClawAgents agent so it can be served over Zed's Agent Client
+# Protocol (JSON-RPC over stdio). The optional ``agent-client-protocol``
+# package is only required to actually call ``AcpServer.serve()``.
+from clawagents.acp import (
+    AcpError,
+    MissingAcpDependencyError,
+    PromptRequest,
+    SessionUpdate,
+    AgentMessageChunk,
+    AgentThoughtChunk,
+    ToolCallStart,
+    ToolCallComplete,
+    PermissionRequest,
+    PermissionDecision,
+    StopReason,
+    AgentSession,
+    AcpServer,
+    ACP_AVAILABLE,
+)
+
+# ── RL fine-tuning hooks (v6.6) ────────────────────────────────────────
+# Capture agent runs as training-ready trajectories and export them to
+# TRL / Atropos / SLIME / generic JSONL formats. The ``trl`` and
+# ``atropos`` packages are optional — only required to actually drive a
+# trainer or rollout collector.
+from clawagents.rl import (
+    RLError,
+    MissingRLDependencyError,
+    Trajectory,
+    TrajectoryStep,
+    ToolCall as RLToolCall,
+    RLRecorder,
+    RecorderConfig as RLRecorderConfig,
+    RewardScorer,
+    ContainsScorer,
+    ExactMatchScorer,
+    RegexScorer,
+    LengthPenaltyScorer,
+    CompositeScorer,
+    export_jsonl as rl_export_jsonl,
+    load_jsonl as rl_load_jsonl,
+    to_chatml as rl_to_chatml,
+    to_trl_sft,
+    to_trl_dpo,
+    to_atropos_rollout,
+    TrlAdapter,
+    AtroposAdapter,
+    TRL_AVAILABLE,
+    ATROPOS_AVAILABLE,
 )

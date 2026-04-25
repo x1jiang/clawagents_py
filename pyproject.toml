@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "clawagents"
-version = "6.5.0"
+version = "6.6.0"
 description = "Lean, full-stack agentic AI framework with PTRL (Prompt-Time Reinforcement Learning)"
 readme = "README.md"
 license = "MIT"
@@ -39,7 +39,29 @@ media = ["Pillow>=10.0"]
 # external MCP servers via ``MCPServerStdio`` / ``MCPServerSse`` /
 # ``MCPServerStreamableHttp``. Install with ``pip install 'clawagents[mcp]'``.
 mcp = ["mcp>=1.0.0"]
-all = ["google-genai>=0.1.0", "anthropic>=0.40.0", "tiktoken>=0.5.0", "Pillow>=10.0", "mcp>=1.0.0"]
+# Browser automation tools. ``pip install 'clawagents[browser]'`` then
+# ``playwright install chromium`` to fetch the runtime.
+browser = ["playwright>=1.40.0"]
+# Cloud browser provider stubs (real implementations land later — these
+# extras exist so cloud-provider users have a stable extras name today).
+browser-browserbase = ["playwright>=1.40.0"]
+browser-cloud = ["playwright>=1.40.0"]
+# Cron expressions. Interval and one-shot schedules work without this.
+cron = ["croniter>=1.4"]
+# Reinforcement-learning fine-tuning hooks (TRL adapter, Atropos export).
+# The hooks export trajectories regardless; this extra pulls TRL only.
+rl = ["trl>=0.7.0"]
+# Agent Communication Protocol adapter.
+acp = ["agent-client-protocol>=0.1.0"]
+all = [
+    "google-genai>=0.1.0",
+    "anthropic>=0.40.0",
+    "tiktoken>=0.5.0",
+    "Pillow>=10.0",
+    "mcp>=1.0.0",
+    "playwright>=1.40.0",
+    "croniter>=1.4",
+]
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
