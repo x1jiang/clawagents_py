@@ -49,6 +49,8 @@ from clawagents.stream_events import (
     StreamEvent,
     stream_event_from_kind,
 )
+from clawagents.handoffs import Handoff, HandoffInputData
+from clawagents.tracing import handoff_span
 
 logger = logging.getLogger(__name__)
 
@@ -1360,6 +1362,8 @@ async def run_agent_graph(
     output_type: Optional[type] = None,
     on_stream_event: Optional[Callable[[StreamEvent], None]] = None,
     session: Optional[Any] = None,  # clawagents.session.Session protocol
+    handoffs: Optional[list[Handoff]] = None,
+    agent_name: Optional[str] = None,
 ) -> AgentState:
     """Single ReAct loop: LLM → tools → LLM → tools → ... → final answer."""
     if features is not None:
@@ -1373,6 +1377,41 @@ async def run_agent_graph(
     tool_desc = registry.describe_for_llm() if not use_native_tools else ""
     loop_tracker = _ToolCallTracker()
     emit = on_event or _default_on_event
+
+    # ── Synthesise handoff tools (v6.4) ──
+    # Each Handoff becomes a synthetic tool the LLM can call. We DO NOT add
+    # these to the registry — they're dispatched directly by the loop so
+    # they can switch the active agent rather than execute a tool. We also
+    # build a name → Handoff map for fast lookup at dispatch time.
+    handoff_list: list[Handoff] = list(handoffs) if handoffs else []
+    handoff_map: dict[str, Handoff] = {h.name: h for h in handoff_list}
+    if handoff_list:
+        handoff_params = {
+            "reason": {
+                "type": "string",
+                "description": "Free-text rationale for why the handoff is appropriate.",
+                "required": False,
+            }
+        }
+        if use_native_tools:
+            if native_schemas is None:
+                native_schemas = []
+            for h in handoff_list:
+                native_schemas.append(NativeToolSchema(
+                    name=h.name,
+                    description=h.description,
+                    parameters=handoff_params,
+                ))
+        else:
+            # Append handoff descriptions to the text-mode tool block so the
+            # LLM still discovers them.
+            extra_lines = ["", "## Handoffs"]
+            for h in handoff_list:
+                extra_lines.append(f"### {h.name}\n{h.description}")
+                extra_lines.append("Parameters:")
+                extra_lines.append("- `reason` (string): Free-text rationale.")
+                extra_lines.append("")
+            tool_desc = (tool_desc or "") + "\n" + "\n".join(extra_lines)
 
     # ── Typed run context + usage accumulator ──
     if run_context is None:
@@ -1843,6 +1882,181 @@ async def run_agent_graph(
                 emit("final_content", {"content": state.result})
                 messages.append(LLMMessage(role="assistant", content=response.content, thinking=_thinking_content))
                 break
+
+            # ── Handoff dispatch (v6.4) ──────────────────────────────
+            # If the LLM called a synthetic handoff tool, transfer control
+            # to the target agent and return its terminal state. We honour
+            # only the first handoff call in a batch — multiple handoffs
+            # in one turn don't make sense (a transfer is exclusive).
+            if handoff_map:
+                _handoff_call: ParsedToolCall | None = None
+                _handoff_native_tc: NativeToolCall | None = None
+                for _i, _tc in enumerate(tool_calls):
+                    if _tc.tool_name in handoff_map:
+                        _handoff_call = _tc
+                        if native_tool_call_objects and _i < len(native_tool_call_objects):
+                            _handoff_native_tc = native_tool_call_objects[_i]
+                        break
+                if _handoff_call is not None:
+                    h_obj = handoff_map[_handoff_call.tool_name]
+                    reason_text = str(_handoff_call.args.get("reason", "")) if isinstance(_handoff_call.args, dict) else ""
+                    # Materialise the target agent now so a Handoff(factory=)
+                    # constructed before the import cycle was broken can
+                    # still resolve.
+                    try:
+                        target_agent = h_obj.resolve_target()
+                    except Exception as resolve_err:
+                        emit("warn", {"message": f"handoff target resolution failed: {resolve_err}"})
+                        messages.append(LLMMessage(
+                            role="user",
+                            content=f"[Handoff Error] Could not resolve target agent: {resolve_err}",
+                        ))
+                        state.iterations += 1
+                        continue
+
+                    target_name = getattr(target_agent, "name", None) or _handoff_call.tool_name
+                    from_name = agent_name or "ClawAgent"
+
+                    # Stamp the assistant message that triggered the handoff
+                    # so the input filter sees a complete transcript.
+                    if use_native_tools and _handoff_native_tc and _handoff_native_tc.tool_call_id:
+                        messages.append(LLMMessage(
+                            role="assistant",
+                            content=response.content or "",
+                            tool_calls_meta=[{
+                                "id": _handoff_native_tc.tool_call_id,
+                                "name": _handoff_call.tool_name,
+                                "args": _handoff_call.args,
+                            }],
+                            thinking=_thinking_content,
+                        ))
+                        # Synthesize a tool-result message acknowledging the
+                        # transfer, since most providers reject orphan tool
+                        # calls (the rule that drives _patch_dangling_tool_calls).
+                        messages.append(LLMMessage(
+                            role="tool",
+                            content=f"[Handoff] transferred to {target_name}",
+                            tool_call_id=_handoff_native_tc.tool_call_id,
+                        ))
+                    else:
+                        messages.append(LLMMessage(
+                            role="assistant",
+                            content=f'{{"tool": "{_handoff_call.tool_name}", "args": {json.dumps(_handoff_call.args)}}}',
+                            thinking=_thinking_content,
+                        ))
+                        messages.append(LLMMessage(
+                            role="user",
+                            content=f"[Handoff] transferred to {target_name}",
+                        ))
+
+                    # Build the input filter payload from the messages
+                    # accumulated so far (input_history). The pre/new split
+                    # is approximate: we treat anything past the original
+                    # user task as new_items.
+                    handoff_payload = HandoffInputData(
+                        input_history=list(messages),
+                        pre_handoff_items=list(messages[:_session_start_cursor]),
+                        new_items=list(messages[_session_start_cursor:]),
+                        run_context=run_context,
+                    )
+                    if h_obj.input_filter is not None:
+                        try:
+                            handoff_payload = h_obj.input_filter(handoff_payload)
+                        except Exception as filter_err:
+                            emit("warn", {"message": f"handoff input_filter raised: {filter_err}"})
+                    filtered_messages = list(handoff_payload.input_history)
+
+                    # Fire the on_handoff side-effect (per-Handoff) before
+                    # firing class-based RunHooks.on_handoff. Both are
+                    # observation-only — exceptions are logged.
+                    if h_obj.on_handoff is not None:
+                        try:
+                            await h_obj.on_handoff(run_context)
+                        except Exception as hk_err:
+                            emit("warn", {"message": f"handoff on_handoff raised: {hk_err}"})
+                    if active_hooks:
+                        await _fire_hook("on_handoff", from_name, target_name)
+
+                    # Emit the typed event + warn line so callers tracking
+                    # `on_event` see the transfer too.
+                    emit("warn", {"message": f"handoff: {from_name} → {target_name}"})
+                    _emit_typed("handoff_occurred", {
+                        "from_agent": from_name,
+                        "to_agent": target_name,
+                        "tool_name": _handoff_call.tool_name,
+                        "reason": reason_text,
+                    })
+
+                    # Re-enter the loop on the target agent inside a
+                    # ``handoff_span`` so traces capture the transfer.
+                    with handoff_span(_handoff_call.tool_name, from_agent=from_name, to_agent=target_name):
+                        # Build a fresh task string. We forward the most
+                        # recent user message from the filtered history if
+                        # one exists; otherwise fall back to the original.
+                        last_user = next(
+                            (m for m in reversed(filtered_messages)
+                             if m.role == "user" and isinstance(m.content, str)),
+                            None,
+                        )
+                        if last_user is not None and isinstance(last_user.content, str):
+                            forward_task = last_user.content
+                        else:
+                            forward_task = task
+
+                        # Drop the system message — the target agent has
+                        # its own. Pass remaining filtered history (if any)
+                        # via session-protocol-style preload by appending
+                        # to messages after the loop's own system prompt
+                        # is constructed; the simplest path is to re-call
+                        # invoke() with the filtered task + pass any prior
+                        # non-system messages via a transient session.
+                        non_system = [
+                            m for m in filtered_messages if m.role != "system"
+                        ]
+
+                        class _TransientSession:
+                            def __init__(self, items: list[LLMMessage]):
+                                self._items = items
+
+                            async def get_items(self) -> list[LLMMessage]:
+                                return list(self._items)
+
+                            async def add_items(self, _new: list[LLMMessage]) -> None:
+                                return None
+
+                        # Don't preload the user message we're about to
+                        # send as ``task`` — drop the trailing user msg.
+                        preload = list(non_system)
+                        if preload and preload[-1].role == "user" and isinstance(preload[-1].content, str) and preload[-1].content == forward_task:
+                            preload = preload[:-1]
+
+                        try:
+                            child_state = await target_agent.invoke(
+                                forward_task,
+                                run_context=run_context,
+                                session=_TransientSession(preload) if preload else None,
+                                on_stream_event=on_stream_event,
+                            )
+                        except Exception as run_err:
+                            emit("warn", {"message": f"handoff target raised: {run_err}"})
+                            messages.append(LLMMessage(
+                                role="user",
+                                content=f"[Handoff Error] Target agent failed: {run_err}",
+                            ))
+                            state.iterations += 1
+                            continue
+
+                    state.result = child_state.result
+                    state.status = child_state.status if child_state.status != "running" else "done"
+                    state.final_output = (
+                        child_state.final_output
+                        if child_state.final_output is not None
+                        else child_state.result
+                    )
+                    state.tool_calls += child_state.tool_calls
+                    state.iterations += 1
+                    state.messages = messages + child_state.messages
+                    break
 
             if loop_tracker.is_circuit_broken():
                 emit("warn", {"message": f"circuit breaker tripped ({loop_tracker._no_progress_count} no-progress calls) — breaking"})

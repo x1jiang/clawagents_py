@@ -1,13 +1,33 @@
 """Exec Tool — backed by a pluggable SandboxBackend.
 
 Provides shell command execution with timeout and output capture.
+
+The pre-execute pipeline is:
+
+1. Obfuscation detector (``detect_obfuscation``) — refuses on hit.
+2. Bash semantic validator (``validate_bash``) — BLOCK refuses, WARN
+   prepends a notice (and refuses in PLAN mode for DESTRUCTIVE).
+3. Legacy ``_is_dangerous_command`` denylist (kept for back-compat).
+4. Sandbox exec.
+
+Each phase runs inside its own ``tool_span`` so traces show where time
+went.
 """
 
 from __future__ import annotations
 
 from typing import Any, Dict, List
 
+from clawagents.permissions.mode import PermissionMode
+from clawagents.tools.bash_validator import (
+    BashDecision,
+    CommandCategory,
+    Decision,
+    validate_bash,
+)
+from clawagents.tools.exec_obfuscation import detect_obfuscation
 from clawagents.tools.registry import Tool, ToolResult
+from clawagents.tracing import tool_span
 
 DEFAULT_TIMEOUT_MS = 30000
 MAX_OUTPUT_CHARS = 10000
@@ -63,7 +83,7 @@ class ExecTool:
     def __init__(self, sb: Any):
         self._sb = sb
 
-    async def execute(self, args: Dict[str, Any]) -> ToolResult:
+    async def execute(self, args: Dict[str, Any], run_context: Any = None) -> ToolResult:
         sb = self._sb
         command = str(args.get("command", ""))
         try:
@@ -77,14 +97,66 @@ class ExecTool:
         # Ensure ByteRover CLI is available: run via npx if command is brv and not on PATH
         command = _ensure_brv_command(command)
 
-        if _is_dangerous_command(command):
-            return ToolResult(success=False, output="", error=f"Blocked potentially destructive command: {command}")
+        warning_prefix = ""
+        permission_mode = getattr(run_context, "permission_mode", PermissionMode.DEFAULT)
 
-        try:
-            result = await sb.exec(command, timeout=timeout_ms)
+        with tool_span("exec.validate", command=command):
+            # 1. Obfuscation detector
+            ob = detect_obfuscation(command)
+            if ob is not None:
+                return ToolResult(
+                    success=False, output="",
+                    error=(
+                        "Refused: obfuscated/encoded command detected "
+                        f"({', '.join(ob.matched_patterns)}): {'; '.join(ob.reasons)}"
+                    ),
+                )
+
+            # 2. Bash semantic validator
+            decision: BashDecision = validate_bash(command)
+            if decision.decision == Decision.BLOCK:
+                return ToolResult(
+                    success=False, output="",
+                    error=(
+                        f"Blocked by bash validator ({decision.category.value}): "
+                        f"{decision.reason}"
+                    ),
+                )
+            if (
+                permission_mode == PermissionMode.PLAN
+                and decision.category == CommandCategory.DESTRUCTIVE
+            ):
+                return ToolResult(
+                    success=False, output="",
+                    error=(
+                        "Blocked: destructive command refused in plan mode "
+                        f"({decision.reason})"
+                    ),
+                )
+            if decision.decision == Decision.WARN:
+                warning_prefix = (
+                    f"[bash_validator: WARN {decision.category.value} — "
+                    f"{decision.reason}]\n"
+                )
+
+            # 3. Legacy denylist (back-compat)
+            if _is_dangerous_command(command):
+                return ToolResult(
+                    success=False, output="",
+                    error=f"Blocked potentially destructive command: {command}",
+                )
+
+        with tool_span("exec.run", command=command, timeout_ms=timeout_ms):
+            try:
+                result = await sb.exec(command, timeout=timeout_ms)
+            except Exception as e:
+                return ToolResult(success=False, output="", error=f"Command failed: {str(e)}")
 
             if result.killed:
-                return ToolResult(success=False, output="", error=f"Command timed out after {timeout_ms}ms: {command}")
+                return ToolResult(
+                    success=False, output="",
+                    error=f"Command timed out after {timeout_ms}ms: {command}",
+                )
 
             output = result.stdout or ""
             if result.stderr:
@@ -103,9 +175,7 @@ class ExecTool:
                     error=f"Command failed with exit code {result.exit_code}: {command}",
                 )
 
-            return ToolResult(success=success, output=output or "(no output)")
-        except Exception as e:
-            return ToolResult(success=False, output="", error=f"Command failed: {str(e)}")
+            return ToolResult(success=success, output=warning_prefix + (output or "(no output)"))
 
 
 # ─── Public API ──────────────────────────────────────────────────────────────

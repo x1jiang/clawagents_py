@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Generic, TypeVar
 
+from clawagents.permissions.mode import PermissionMode
 from clawagents.usage import Usage
 
 TContext = TypeVar("TContext")
@@ -48,6 +49,7 @@ class RunContext(Generic[TContext]):
     """
     context: TContext | None = None
     usage: Usage = field(default_factory=Usage)
+    permission_mode: PermissionMode = PermissionMode.DEFAULT
     _approvals: dict[str, ApprovalRecord] = field(default_factory=dict)
     _always_approvals: dict[str, ApprovalRecord] = field(default_factory=dict)
     _metadata: dict[str, Any] = field(default_factory=dict)

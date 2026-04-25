@@ -13,6 +13,7 @@ from clawagents.run_context import RunContext
 from clawagents.lifecycle import RunHooks, AgentHooks
 from clawagents.guardrails import InputGuardrail, OutputGuardrail
 from clawagents.stream_events import StreamEvent
+from clawagents.handoffs import Handoff
 
 
 class LangChainToolAdapter:
@@ -90,6 +91,9 @@ class ClawAgent:
         output_type: Optional[type] = None,
         session: Any = None,
         on_stream_event: Optional[Callable[[StreamEvent], None]] = None,
+        # ── v6.4: Handoffs + Agent.as_tool ──
+        handoffs: Optional[list[Handoff]] = None,
+        name: Optional[str] = None,
     ):
         """
         Initialize a ClawAgent.
@@ -137,6 +141,8 @@ class ClawAgent:
         self.output_type = output_type
         self.session = session
         self.on_stream_event = on_stream_event
+        self.handoffs: list[Handoff] = list(handoffs) if handoffs else []
+        self.name = name
 
     async def invoke(
         self,
@@ -155,6 +161,7 @@ class ClawAgent:
         output_type: Optional[type] = None,
         session: Any = None,
         on_stream_event: Optional[Callable[[StreamEvent], None]] = None,
+        handoffs: Optional[list[Handoff]] = None,
     ) -> AgentState:
         """Start the ReAct agent loop for ``task``.
 
@@ -199,6 +206,8 @@ class ClawAgent:
             on_stream_event=(
                 on_stream_event if on_stream_event is not None else self.on_stream_event
             ),
+            handoffs=handoffs if handoffs is not None else self.handoffs,
+            agent_name=self.name,
         )
 
     # ── Convenience hook methods ──────────────────────────────────────
@@ -266,6 +275,39 @@ class ClawAgent:
             response_chars=self.response_chars,
         )
 
+    def as_tool(
+        self,
+        *,
+        tool_name: str,
+        tool_description: str,
+        custom_output_extractor: Optional[Callable[[AgentState], str]] = None,
+        needs_approval: bool = False,
+    ) -> Tool:
+        """Expose this agent as a tool callable by another agent.
+
+        Unlike a :class:`~clawagents.handoffs.Handoff`, the wrapped agent
+        is invoked synchronously inside the parent's tool dispatch:
+        parent calls, child runs, parent resumes. The default output is
+        ``state.result`` from the child's terminal turn; provide
+        ``custom_output_extractor`` to project anything from the final
+        :class:`AgentState` (e.g. ``state.final_output`` after structured
+        output coercion, or a specific trajectory turn).
+
+        When ``needs_approval=True`` the tool emits an
+        :class:`ApprovalRequiredEvent` and waits for the parent's
+        :class:`RunContext` approval store before running the child —
+        the same mechanism used by the permissions module's
+        ``needs_approval`` policy.
+        """
+        wrapped_agent = self
+        return _AgentAsTool(
+            agent=wrapped_agent,
+            tool_name=tool_name,
+            tool_description=tool_description,
+            custom_output_extractor=custom_output_extractor,
+            needs_approval=needs_approval,
+        )
+
     def truncate_output(self, max_chars: int = 5000):
         """Truncate tool outputs to a maximum character length.
 
@@ -282,6 +324,114 @@ class ClawAgent:
             return result
 
         self.after_tool = hook
+
+
+class _AgentAsTool:
+    """Tool adapter produced by :meth:`ClawAgent.as_tool`.
+
+    Conforms to the :class:`~clawagents.tools.registry.Tool` protocol.
+    Invokes the wrapped agent on ``args["task"]`` (free-text) and
+    returns the extracted output as a :class:`ToolResult`.
+
+    Approval gating is handled inside :meth:`execute` rather than via
+    :class:`RunContext.is_tool_approved` so that the parent loop's
+    standard approval-required emission still works — and so callers
+    that don't pre-approve still see the typed event.
+    """
+
+    def __init__(
+        self,
+        agent: "ClawAgent",
+        *,
+        tool_name: str,
+        tool_description: str,
+        custom_output_extractor: Optional[Callable[[AgentState], str]] = None,
+        needs_approval: bool = False,
+    ):
+        self._agent = agent
+        self.name = tool_name
+        self.description = tool_description
+        self._extractor = custom_output_extractor
+        self._needs_approval = needs_approval
+        self.parameters: Dict[str, Dict[str, Any]] = {
+            "task": {
+                "type": "string",
+                "description": (
+                    "The task or question to send to the wrapped agent. "
+                    "The agent receives this as its initial user input."
+                ),
+                "required": True,
+            }
+        }
+
+    async def execute(
+        self,
+        args: Dict[str, Any],
+        run_context: Optional[RunContext] = None,
+    ) -> ToolResult:
+        task = str(args.get("task", "")).strip()
+        if not task:
+            return ToolResult(
+                success=False,
+                output="",
+                error=f"{self.name}: missing required 'task' argument",
+            )
+
+        # Optional approval gate. We don't block forever — if there's no
+        # standing decision and no permission_mode that would auto-allow,
+        # we surface a typed event and require the caller to pre-approve
+        # via run_context. That mirrors the loop's existing semantics.
+        if self._needs_approval and run_context is not None:
+            decision = run_context.is_tool_approved(self.name, tool_name=self.name)
+            if decision is False:
+                rec = run_context.get_approval(self.name, tool_name=self.name)
+                reason = (rec.reason if rec else None) or "approval rejected"
+                return ToolResult(
+                    success=False,
+                    output="",
+                    error=f"{self.name}: {reason}",
+                )
+            if decision is None:
+                # Notify via on_stream_event if the parent passed one in.
+                on_stream = getattr(run_context, "_metadata", {}).get("on_stream_event")
+                if callable(on_stream):
+                    try:
+                        from clawagents.stream_events import ApprovalRequiredEvent
+                        on_stream(ApprovalRequiredEvent(
+                            tool_name=self.name,
+                            call_id=self.name,
+                            args=dict(args),
+                        ))
+                    except Exception:
+                        pass
+                return ToolResult(
+                    success=False,
+                    output="",
+                    error=(
+                        f"{self.name}: approval required (use "
+                        "run_context.approve_tool() to allow)"
+                    ),
+                )
+
+        try:
+            child_state = await self._agent.invoke(task)
+        except Exception as e:
+            return ToolResult(
+                success=False, output="", error=f"{self.name} raised: {e}"
+            )
+
+        if self._extractor is not None:
+            try:
+                extracted = self._extractor(child_state)
+            except Exception as e:
+                return ToolResult(
+                    success=False,
+                    output="",
+                    error=f"{self.name}: output extractor raised: {e}",
+                )
+            return ToolResult(success=True, output=str(extracted))
+
+        return ToolResult(success=True, output=str(child_state.result))
 
 
 def create_claw_agent(
@@ -310,6 +460,9 @@ def create_claw_agent(
     advisor_model: Union[str, LLMProvider, None] = None,
     advisor_api_key: Optional[str] = None,
     advisor_max_calls: Optional[int] = None,
+    mcp_servers: Optional[List[Any]] = None,
+    handoffs: Optional[List[Handoff]] = None,
+    name: Optional[str] = None,
 ) -> ClawAgent:
     """
     Create a ClawAgent with full-stack capabilities.
@@ -596,11 +749,55 @@ def create_claw_agent(
         rethink=rethink, learn=learn, max_iterations=max_iterations,
         preview_chars=preview_chars, response_chars=response_chars,
         advisor_llm=resolved_advisor_llm, advisor_max_calls=resolved_advisor_max_calls,
+        handoffs=handoffs, name=name,
     )
 
     # ── Sub-agent tool (always available) ──────────────────────────────
     from clawagents.tools.subagent import create_task_tool
     registry.register(create_task_tool(llm, registry))
+
+    # ── MCP server integration (v6.4, optional) ────────────────────────
+    if mcp_servers:
+        from clawagents.mcp import (
+            MCPServerManager,
+            is_mcp_sdk_available,
+        )
+        if not is_mcp_sdk_available():
+            raise ImportError(
+                "create_claw_agent received mcp_servers= but the optional "
+                "MCP SDK is not installed. Install with: pip install 'clawagents[mcp]' "
+                "(or directly: pip install mcp)."
+            )
+
+        manager = MCPServerManager(mcp_servers)
+        # Start the manager: connect each server, list tools, register them.
+        # We run it in a fresh event loop the same way skill loading does, so
+        # the call works from sync, Streamlit, and Jupyter contexts.
+        try:
+            asyncio.get_running_loop()
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                pool.submit(asyncio.run, manager.start(registry)).result()
+        except RuntimeError:
+            asyncio.run(manager.start(registry))
+
+        # Stash the manager on the agent so callers can shut it down. We also
+        # register an atexit finaliser as a backstop for short-lived scripts.
+        agent.mcp_manager = manager  # type: ignore[attr-defined]
+        import atexit
+
+        def _shutdown_mcp():  # pragma: no cover — best-effort process exit hook
+            try:
+                asyncio.get_running_loop()
+                # Already in a loop — let the user shut down explicitly.
+                return
+            except RuntimeError:
+                try:
+                    asyncio.run(manager.shutdown())
+                except Exception:
+                    pass
+
+        atexit.register(_shutdown_mcp)
 
     return agent
 

@@ -95,6 +95,16 @@ class GuardrailTrippedEvent(StreamEvent):
 
 
 @dataclass
+class HandoffOccurredEvent(StreamEvent):
+    """Emitted when the loop transfers control to another agent via :class:`Handoff`."""
+    from_agent: str = ""
+    to_agent: str = ""
+    tool_name: str = ""
+    reason: str = ""
+    kind: str = "handoff_occurred"
+
+
+@dataclass
 class FinalOutputEvent(StreamEvent):
     output: Any = None
     raw: str = ""
@@ -124,6 +134,7 @@ AnyStreamEvent = Union[
     ApprovalRequiredEvent,
     UsageEvent,
     GuardrailTrippedEvent,
+    HandoffOccurredEvent,
     FinalOutputEvent,
     ErrorStreamEvent,
     StreamEvent,
@@ -140,6 +151,7 @@ _KIND_TO_CLS: dict[str, type[StreamEvent]] = {
     "approval_required": ApprovalRequiredEvent,
     "usage": UsageEvent,
     "guardrail_tripped": GuardrailTrippedEvent,
+    "handoff_occurred": HandoffOccurredEvent,
     "final_output": FinalOutputEvent,
     "error": ErrorStreamEvent,
 }

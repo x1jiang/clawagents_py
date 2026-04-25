@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.3.0-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.4.0-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -26,7 +26,7 @@ pip install clawagents[anthropic]   # + Anthropic Claude support
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 6.3.0** — Latest stable release (April 2026). Sandbox & security hardening: multimodal-safe context shedding, parallel native tool-call indexing under `before_tool` hooks, subagent credential-proxy env race fix, plus a full mypy cleanup (46 errors → 0). 334 tests pass, mypy clean. See [Changelog](#changelog).
+> **Version 6.4.0** — Latest stable release (April 2026). Big feature release: hierarchical tracing infrastructure, MCP client (stdio + SSE + Streamable-HTTP), handoffs + `Agent.as_tool()`, Exec Safety v2 (Plan Mode + bash semantic validator + obfuscation detector), expanded hook taxonomy + LLM-evaluated `PromptHook`, AskUserQuestion structured HITL, settings hierarchy, image sanitization, mock-provider parity harness. **516 Python tests** pass, mypy clean. See [Changelog](#changelog).
 
 ---
 
@@ -293,7 +293,48 @@ OPENAI_BASE_URL=http://localhost:11434/v1
 
 > **Tip:** For local models that emit `<think>...</think>` tokens (Qwen3, DeepSeek), thinking content is automatically detected, stripped from output, and preserved in trajectory records (Feature H).
 
-### 11. CLI
+### 11. MCP Servers (Model Context Protocol)
+
+Wire any external **MCP server** into the agent and its tools become first-class
+clawagents tools — no boilerplate. Three transports are supported (stdio, HTTP+SSE,
+Streamable HTTP):
+
+```python
+from clawagents import create_claw_agent, MCPServerStdio
+
+agent = create_claw_agent(
+    "gpt-5-mini",
+    mcp_servers=[
+        MCPServerStdio(
+            params={"command": "python", "args": ["-m", "my_mcp_server"]},
+            name="my-mcp",
+            cache_tools_list=True,
+        ),
+    ],
+)
+result = await agent.invoke("Use the my-mcp tools to do X")
+```
+
+Install the optional dependency once: `pip install 'clawagents[mcp]'`.
+If `mcp_servers=` is non-empty without the SDK installed, the factory raises
+a clear `ImportError`. The manager connects each server, lists its tools,
+bridges them into the existing `ToolRegistry`, and registers a shutdown
+finalizer. Every lifecycle phase (`Idle → Connecting → Initializing →
+DiscoveringTools → Ready → Invoking → Errored / Shutdown`) emits a tracing
+span, so MCP activity is visible in the standard tracing exporters.
+
+For HTTP-based servers:
+
+```python
+from clawagents import MCPServerSse, MCPServerStreamableHttp
+
+mcp_servers = [
+    MCPServerSse(params={"url": "https://example.com/mcp/sse"}),
+    MCPServerStreamableHttp(params={"url": "https://example.com/mcp"}),
+]
+```
+
+### 12. CLI
 
 ```bash
 # Scaffold a project (generates .env, run_agent.py, AGENTS.md)
@@ -409,7 +450,7 @@ Traditional Stack (DeepAgents):           ClawAgents:
 
 ## Feature Matrix
 
-| Feature | ClawAgents v6.3 | DeepAgents | OpenClaw |
+| Feature |  ClawAgents v6.4 | DeepAgents | OpenClaw |
 |:---|:---:|:---:|:---:|
 | **Core** | | | |
 | ReAct loop | ✅ | ✅ | ✅ |
@@ -429,6 +470,7 @@ Traditional Stack (DeepAgents):           ClawAgents:
 | ComposeTool (deterministic pipelines) | ✅ | ❌ | ❌ |
 | `think` tool (structured reasoning) | ✅ | ❌ | ❌ |
 | LangChain tool adapter | ✅ | N/A | ❌ |
+| MCP server integration (stdio / SSE / Streamable HTTP) | ✅ (v6.4) | ❌ | ❌ |
 | **Agents & Orchestration** | | | |
 | Sub-agent delegation | ✅ | ✅ | ✅ |
 | Subagent state isolation | ✅ | ✅ | ❌ |
@@ -738,6 +780,52 @@ agent = create_claw_agent(
 {"tool": "web_fetch", "args": {"url": "https://api.github.com/repos/python/cpython", "timeout": 10}}
 # → Returns raw JSON response
 ```
+
+</details>
+
+<details>
+<summary><strong>❓ AskUserQuestion — structured HITL</strong></summary>
+
+#### Structured HITL
+
+`ask_user_question` lets the agent ask 1-3 multiple-choice questions in a single batch — useful for upfront clarification with a small, well-defined option set. Each question carries a short `header` (≤80 chars), the `question` text (≤256 chars), and 2-4 unique `options`. Headers must be unique across the batch; an implicit `Other (please specify)` option is appended automatically so the user can break out of the menu.
+
+The actual rendering and answer collection is delegated to a callback you supply, so the same tool plugs into a CLI prompt, a TUI, a web UI, or a channel adapter (Telegram/Signal/etc.) without code changes:
+
+```python
+from clawagents import create_claw_agent, ask_user_question_tool
+
+async def my_ui(questions):
+    # Render questions with your UI of choice; return a dict keyed by header.
+    return {
+        q["header"]: {"question": q["question"], "answer": q["options"][0]}
+        for q in questions
+    }
+
+agent = create_claw_agent("gpt-5", tools=[ask_user_question_tool(on_ask=my_ui)])
+```
+
+If no `on_ask` is supplied the tool fails fast with a clear error rather than hanging on stdin — safe to install in headless gateways.
+
+</details>
+
+<details>
+<summary><strong>🖼️ Image Sanitization (Tool Output Hygiene)</strong></summary>
+
+#### Multimodal — Tool Output Hygiene
+
+Anthropic's Messages API rejects images > 5MB and tends to fail on images much larger than ~2000px on a side. When tool results surface large screenshots or attachments, they can silently break the conversation. `clawagents.media.images` clamps base64 image blocks down to safe limits via Pillow:
+
+```python
+from clawagents.media.images import sanitize_image_block, sanitize_tool_output
+
+clean_block = sanitize_image_block(block, max_dim=1200, max_bytes=5 * 1024 * 1024)
+clean_output = sanitize_tool_output(tool_result_blocks)  # walks a list of content blocks
+```
+
+- Base64 sources: decode → resize the longest side down to `max_dim` (aspect-preserving), recompress as JPEG (or PNG when the input is a PNG with alpha) walking through `quality_steps=(90, 75, 60)` until under `max_bytes`. If still too big at the lowest quality, the block is replaced with a `[image too large after sanitization, dropped]` text block.
+- URL sources and non-image blocks pass through unchanged.
+- Pillow is **optional** (`pip install 'clawagents[media]'`). Without it, the helpers no-op and emit a one-time warning. `is_pillow_available()` reports the runtime state.
 
 </details>
 
@@ -1256,6 +1344,30 @@ plus the existing `tests/test_web_fetch_ssrf.py` and the broad
 ---
 
 ## Changelog
+
+### v6.4.0 — Tracing, MCP, Handoffs, Plan Mode (April 2026)
+
+Big feature release. Nine new subsystems shipped on **both** Python and TypeScript ports — every change comes with regression tests on both. Test totals: **Python 516 passed**, **TypeScript 226 passed**, mypy clean, `tsc --noEmit` clean.
+
+**Tier 1 — production interop & safety:**
+
+- **🔭 Tracing infrastructure** (`clawagents.tracing`) — hierarchical Span model with 8 kinds (`agent` / `turn` / `generation` / `tool` / `handoff` / `guardrail` / `subagent` / `custom`), pluggable `TracingProcessor` + `TracingExporter` ABCs, batched `BatchTraceProcessor` with background flush, ready-made `JsonlSpanExporter` / `ConsoleSpanExporter` / `NoopSpanExporter`, and `agent_span` / `turn_span` / `generation_span` / `tool_span` / `handoff_span` context managers. Spans propagate via Python `contextvars` (TS: `AsyncLocalStorage`). Replaces flat trajectory JSONL — drop in OTLP/Langfuse/Logfire by writing one exporter.
+- **🔌 MCP (Model Context Protocol) integration** (`clawagents.mcp`) — full client supporting **stdio**, **SSE**, and **Streamable-HTTP** transports. `MCPServerStdio` / `MCPServerSse` / `MCPServerStreamableHttp` follow openai-agents-python's shape; `MCPServerManager` lifecycles a list of servers; `MCPBridgedTool` adapts MCP tools into `ToolRegistry` so they coexist with native tools, hooks, and approval flows. SDK is an optional dep (`pip install clawagents[mcp]` / `npm install @modelcontextprotocol/sdk`). 11 lifecycle phases tracked per server with tracing spans.
+- **🔁 Handoffs + `Agent.as_tool()`** — fills the previously-stub `on_handoff` lifecycle hook. `Handoff` dataclass + `handoff()` builder lets one agent transfer control to another (with optional `input_filter` for history trimming). `agent.as_tool(tool_name=…, tool_description=…)` is the complementary primitive: expose any agent as a callable tool to a parent agent. Built-in `remove_all_tools` filter strips tool calls/results before handoff. New `HandoffOccurredEvent` typed stream event.
+- **🛡️ Exec safety v2** (`clawagents.permissions`, `clawagents.tools.{plan_mode,bash_validator,exec_obfuscation}`) — three security upgrades shipped together: (1) `PermissionMode` enum (`DEFAULT|PLAN|ACCEPT_EDITS|BYPASS`) on `RunContext` plus `enter_plan_mode` / `exit_plan_mode` built-in tools — write-class tools refuse in `PLAN`. (2) Bash semantic validator classifies every command (`READ_ONLY|WRITE|DESTRUCTIVE|NETWORK|PROCESS|PACKAGE|SYSTEM_ADMIN|UNKNOWN`) with a 47-row corpus and decision (`ALLOW|WARN|BLOCK`). (3) Command obfuscation detector catches base64/hex/printf decode-then-exec, `<(curl …)`, `curl … | sh`, `eval` decoders, and 9 other patterns — with an allowlist for known-safe installers (rustup, brew, nvm, …).
+- **🪝 Hook event taxonomy expansion + `PromptHook`** — extended `RunHooks` with 8 additive events: `on_pre_compact`, `on_post_compact`, `on_subagent_start`, `on_subagent_end`, `on_user_prompt_submit`, `on_session_start`, `on_session_end`, `on_tool_failure`. New `PromptHook(prompt, model)` evaluates a guardrail using a small/cheap model with strict-JSON `{"ok":bool, "reason":str}` verdict — write a natural-language guardrail in `settings.json` instead of Python code. Fails open on timeout/error so a noisy hook can't deadlock the agent.
+
+**Tier 2 — ergonomics & correctness:**
+
+- **❓ AskUserQuestion structured tool** (`clawagents.tools.ask_user_question`) — structured HITL primitive: 1-3 multi-choice questions per call, 2-4 options each, implicit `"Other (please specify)"` always appended. Renders cleanly to Telegram inline buttons / WhatsApp quick-replies. Delegates rendering via `on_ask` callback.
+- **⚙️ Settings hierarchy** (`clawagents.settings`) — `user → project → local → flag → policy` precedence, deep-merged. Policy layer (`/etc/clawagents/policy-settings.json`) ALWAYS wins, so even runtime flags can't override an MDM-style enforced rule. Repo root walks up looking for `.git`/`pyproject.toml`/`package.json`. `get_setting("hooks.before_tool")` for dotted-path access.
+- **🖼️ Image sanitization** (`clawagents.media.images`) — clamps tool-result base64 image blocks to ≤1200px / ≤5MB before transcript ingest, walking quality steps `(90, 75, 60)` until under limit. Closes a silent-failure path on Anthropic's 5MB limit. Pillow is **optional** (`pip install clawagents[media]`).
+
+**Tier 3 — testing infrastructure:**
+
+- **🎭 Mock-provider parity harness** (`clawagents.testing.mock_provider`) — deterministic fake LLM service (`MockLLMService`) bound to `127.0.0.1:0`. Real provider clients point at it via `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` env vars. Routes via `X-Parity-Scenario:` header or `PARITY_SCENARIO: <name>` system message. Five built-in scenarios. Pure stdlib, zero new deps.
+
+**v6.5 backlog (deferred):** Anthropic prompt-cache tracking + cache-break detection, auth-profile rotation with cooldowns, multi-provider routing prefix + LiteLLM extension, file checkpoint snapshots, cache-TTL provider eligibility map, `tool_use_behavior` / `StopAtTools`, granular lifecycle payload widening, skills hot-reload watcher, `finalize` cleanup hook, `edit_scope` allowlist in skills, multi-tier numeric verifier reward, replayable per-task archives.
 
 ### v6.3.0.post1 — Docs Re-publish (no code changes)
 

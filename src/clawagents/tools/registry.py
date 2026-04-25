@@ -277,6 +277,26 @@ class ToolRegistry:
         if not tool:
             return ToolResult(success=False, output="", error=f"Unknown tool: {tool_name}")
 
+        # Plan-mode gate: refuse write-class tools when run_context is in PLAN mode.
+        # Kept at the registry level (not in agent_loop) so all execution paths
+        # see the same gate, including parallel dispatch.
+        from clawagents.permissions.mode import (
+            PermissionMode,
+            is_write_class_tool,
+        )
+
+        if run_context is not None:
+            mode = getattr(run_context, "permission_mode", PermissionMode.DEFAULT)
+            if mode == PermissionMode.PLAN and is_write_class_tool(tool_name):
+                return ToolResult(
+                    success=False, output="",
+                    error=(
+                        f"Refused: '{tool_name}' is a write-class tool and you are in "
+                        "plan mode. Call exit_plan_mode first, or restrict yourself "
+                        "to read-only tools while planning."
+                    ),
+                )
+
         # Parameter validation with lenient coercion
         effective_args = args
         if self._validate_args:

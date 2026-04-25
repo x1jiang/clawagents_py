@@ -93,6 +93,77 @@ class RunHooks(Generic[TContext]):
         to_agent: str,
     ) -> None: ...
 
+    # ── v6.4: extended hook surface ───────────────────────────────────
+    # All additive, default-noop. Existing 8 callbacks above are unchanged.
+
+    async def on_pre_compact(
+        self,
+        context: RunContext[TContext],
+        message_count: int,
+        token_estimate: int,
+    ) -> None:
+        """Fires immediately before context compaction kicks in. Lets observers
+        snapshot the pre-compaction transcript, pause writes, etc."""
+        ...
+
+    async def on_post_compact(
+        self,
+        context: RunContext[TContext],
+        message_count_after: int,
+        summary: str | None,
+    ) -> None: ...
+
+    async def on_subagent_start(
+        self,
+        context: RunContext[TContext],
+        parent_agent: str,
+        subagent_name: str,
+        task: str,
+    ) -> None: ...
+
+    async def on_subagent_end(
+        self,
+        context: RunContext[TContext],
+        parent_agent: str,
+        subagent_name: str,
+        output: Any,
+    ) -> None: ...
+
+    async def on_user_prompt_submit(
+        self,
+        context: RunContext[TContext],
+        prompt: str,
+    ) -> None:
+        """Gateway-relevant: a new user message arrives mid-session.
+        Lets observers gate / classify / annotate prompts at the boundary."""
+        ...
+
+    async def on_session_start(
+        self,
+        context: RunContext[TContext],
+        session_id: str,
+    ) -> None: ...
+
+    async def on_session_end(
+        self,
+        context: RunContext[TContext],
+        session_id: str,
+    ) -> None: ...
+
+    async def on_tool_failure(
+        self,
+        context: RunContext[TContext],
+        tool_name: str,
+        call_id: str,
+        error: str,
+    ) -> None:
+        """Specialised handler for a tool that returned ``success=False``.
+
+        Still receives ``on_tool_end`` (with ``success=False``) too — this
+        method exists so observers can route failures to a separate sink
+        without having to filter every ``on_tool_end`` call."""
+        ...
+
 
 class AgentHooks(RunHooks[TContext]):
     """Alias for per-agent hooks.
@@ -110,6 +181,12 @@ _HOOK_METHODS: tuple[str, ...] = (
     "on_llm_start", "on_llm_end",
     "on_tool_start", "on_tool_end",
     "on_handoff",
+    # v6.4 additive surface — keep in sync with RunHooks above
+    "on_pre_compact", "on_post_compact",
+    "on_subagent_start", "on_subagent_end",
+    "on_user_prompt_submit",
+    "on_session_start", "on_session_end",
+    "on_tool_failure",
 )
 
 
