@@ -450,78 +450,100 @@ Traditional Stack (DeepAgents):           ClawAgents:
 
 ## Feature Matrix
 
-| Feature |  ClawAgents v6.4 | DeepAgents | OpenClaw |
-|:---|:---:|:---:|:---:|
-| **Core** | | | |
-| ReAct loop | ✅ | ✅ | ✅ |
-| Tool loop detection (soft + hard + ping-pong) | ✅ | ❌ | ✅ |
-| Circuit breaker (30 no-progress calls) | ✅ | ❌ | ❌ |
-| Efficiency rules (system prompt) | ✅ | ❌ | ❌ |
-| Adaptive token estimation (tiktoken) | ✅ | ❌ | ❌ |
-| Model-aware context budgeting | ✅ | ❌ | ❌ |
-| Fraction-based summarization triggers | ✅ | ✅ | ❌ |
-| **Tools** | | | |
-| Pluggable sandbox backend | ✅ | ✅ | ✅ |
-| In-memory VFS (testing) | ✅ | ❌ | ❌ |
-| Cross-provider conformance tests | ✅ | ✅ | ❌ |
-| Lazy tool registry (deferred imports) | ✅ | ❌ | ❌ |
-| Tool result caching (LRU) | ✅ | ❌ | ❌ |
-| JSON Schema param validation + coercion | ✅ | ❌ | ❌ |
-| ComposeTool (deterministic pipelines) | ✅ | ❌ | ❌ |
-| `think` tool (structured reasoning) | ✅ | ❌ | ❌ |
-| LangChain tool adapter | ✅ | N/A | ❌ |
-| MCP server integration (stdio / SSE / Streamable HTTP) | ✅ (v6.4) | ❌ | ❌ |
-| **Agents & Orchestration** | | | |
-| Sub-agent delegation | ✅ | ✅ | ✅ |
-| Subagent state isolation | ✅ | ✅ | ❌ |
-| Coordinator/swarm mode | ✅ | ❌ | ✅ |
-| Barrier-based request scheduling | ✅ | ❌ | ❌ |
-| Planning / TodoList | ✅ | ✅ | ❌ |
-| **Providers & Resilience** | | | |
-| Three-tier provider fallback + quarantine | ✅ | ❌ | ❌ |
-| Native + text tool call repair | ✅ | ✅ | ❌ |
-| Streaming with stall detection | ✅ | ❌ | ✅ |
-| Truncated JSON repair + retry | ✅ | ❌ | ❌ |
-| Model-specific temperature override | ✅ | ❌ | ❌ |
-| Gemini 3 thought_signature support | ✅ | ❌ | ❌ |
-| Thinking token preservation (`<think>`) | ✅ | ❌ | ❌ |
-| Model control token stripping | ✅ | ❌ | ✅ |
-| **Memory & Context** | | | |
-| Persistent memory (AGENTS.md) | ✅ | ✅ | ✅ |
-| Auto-summarization + history offloading | ✅ | ✅ | ✅ |
-| Pre-compact transcript archival | ✅ | ❌ | ❌ |
-| Atomic file writes (crash-safe) | ✅ | ❌ | ❌ |
-| Session persistence + resume | ✅ | ❌ | ❌ |
-| Session heartbeat + auto-cleanup | ✅ | ❌ | ❌ |
-| Background memory extraction | ✅ | ❌ | ❌ |
-| **Security & Hooks** | | | |
-| Rich hook result model (block/redirect/inject) | ✅ | ✅ | ✅ |
-| Credential proxy for sandboxed agents | ✅ | ❌ | ✅ |
-| External shell hooks (pre/post tool + LLM) | ✅ | ❌ | ✅ |
-| Declarative permission rules | ✅ | ❌ | ❌ |
-| Tool access control (block/allow) | ✅ | ❌ | ❌ |
-| Human-in-the-loop | ✅ | ✅ | ✅ |
-| **Skills** | | | |
-| SKILL.md with constraint documents | ✅ | ✅ | ✅ |
-| Skill eligibility gating (OS/bins/env) | ✅ | ✅ | ❌ |
-| **RL & Self-Improvement** | | | |
-| Prompt-Time RL (PTRL) — learn from past runs | ✅ | ❌ | ❌ |
-| Trajectory logging + run scoring | ✅ | ❌ | ❌ |
-| Consecutive-failure rethink | ✅ | ❌ | ❌ |
-| Adaptive rethink threshold | ✅ | ❌ | ❌ |
-| Deterministic verification (exit codes, tests) | ✅ | ❌ | ❌ |
-| GRPO-inspired multi-sample comparison | ✅ | ❌ | ❌ |
-| Task-type-aware verification | ✅ | ❌ | ❌ |
-| LLM-as-Judge verification | ✅ | ❌ | ❌ |
-| RFT-ready transition export | ✅ | ❌ | ❌ |
-| **Infrastructure** | | | |
-| Gateway HTTP server + SSE | ✅ | ❌ | ✅ |
-| WebSocket gateway | ✅ | ❌ | ✅ |
-| Multi-channel messaging (Telegram, WhatsApp, Signal) | ✅ | ❌ | ✅ |
-| Per-session message serialization | ✅ | ❌ | ✅ |
-| Error taxonomy + recovery recipes | ✅ | ❌ | ❌ |
-| Prompt cache boundary (Anthropic) | ✅ | ✅ | ❌ |
-| Lane-based command queue | ✅ | ❌ | ✅ |
+> Compares **ClawAgents v6.5** against three peer agent frameworks: **Hermes Agent**
+> ([metaspartan/hermes-agent](https://github.com/metaspartan/hermes-agent)), **DeepAgents**
+> ([langchain-ai/deepagents](https://github.com/langchain-ai/deepagents)), and **OpenClaw**.
+> The 10 hardening patterns introduced in v6.5 (subagent depth limits, memory-isolated forks,
+> activity heartbeats, per-agent IterationBudget, path-scoped parallel tool execution, plugin
+> hook expansion, runtime `display_clawagents_home()`, prompt-cache-aware `CommandDef`,
+> documented prompt-cache policy, and the hermetic `run_tests.sh` runner) were directly
+> inspired by Hermes — so several previously ❌ rows in the ClawAgents column have flipped to ✅.
+
+| Feature | ClawAgents v6.5 | Hermes Agent | DeepAgents | OpenClaw |
+|:---|:---:|:---:|:---:|:---:|
+| **Core** | | | | |
+| ReAct loop | ✅ | ✅ | ✅ | ✅ |
+| Tool loop detection (soft + hard + ping-pong) | ✅ | ✅ | ❌ | ✅ |
+| Circuit breaker (no-progress / tool failure) | ✅ | ✅ | ❌ | ❌ |
+| Efficiency rules (system prompt) | ✅ | ❌ | ❌ | ❌ |
+| Adaptive token estimation (tiktoken) | ✅ | ✅ | ❌ | ❌ |
+| Model-aware context budgeting | ✅ | ✅ | ❌ | ❌ |
+| Fraction-based summarization triggers | ✅ | ✅ | ✅ | ❌ |
+| **Tools** | | | | |
+| Pluggable sandbox backend | ✅ | ✅ | ✅ | ✅ |
+| In-memory VFS (testing) | ✅ | ❌ | ❌ | ❌ |
+| Cross-provider conformance tests | ✅ | ✅ | ✅ | ❌ |
+| Lazy tool registry (deferred imports) | ✅ | ✅ | ❌ | ❌ |
+| Tool result caching (LRU) | ✅ | ❌ | ❌ | ❌ |
+| JSON Schema param validation + coercion | ✅ | ✅ | ❌ | ❌ |
+| ComposeTool (deterministic pipelines) | ✅ | ❌ | ❌ | ❌ |
+| `think` tool (structured reasoning) | ✅ | ✅ | ❌ | ❌ |
+| LangChain tool adapter | ✅ | N/A | N/A | ❌ |
+| MCP server integration (stdio / SSE / Streamable HTTP) | ✅ (v6.4) | ✅ | ❌ | ❌ |
+| Path-scoped parallel tool execution | ✅ (v6.5) | ✅ | ❌ | ❌ |
+| **Agents & Orchestration** | | | | |
+| Sub-agent delegation | ✅ | ✅ | ✅ | ✅ |
+| Subagent depth limit (≤ 2, no recursion) | ✅ (v6.5) | ✅ | ❌ | ❌ |
+| Subagent / forked-agent memory isolation | ✅ (v6.5) | ✅ | ✅ | ❌ |
+| Per-agent IterationBudget | ✅ (v6.5) | ✅ | ❌ | ❌ |
+| Coordinator / swarm mode | ✅ | ❌ | ❌ | ✅ |
+| Barrier-based request scheduling | ✅ | ❌ | ❌ | ❌ |
+| Planning / TodoList | ✅ | ✅ | ✅ | ❌ |
+| Plugin hook expansion (priority chain) | ✅ (v6.5) | ✅ | ❌ | ❌ |
+| **Providers & Resilience** | | | | |
+| Three-tier provider fallback + quarantine | ✅ | ✅ | ❌ | ❌ |
+| Native + text tool call repair | ✅ | ✅ | ✅ | ❌ |
+| Streaming with stall detection | ✅ | ✅ | ❌ | ✅ |
+| Truncated JSON repair + retry | ✅ | ✅ | ❌ | ❌ |
+| Model-specific temperature override | ✅ | ✅ | ❌ | ❌ |
+| Gemini 3 thought_signature support | ✅ | ❌ | ❌ | ❌ |
+| Thinking token preservation (`<think>`) | ✅ | ✅ | ❌ | ❌ |
+| Model control token stripping | ✅ | ✅ | ❌ | ✅ |
+| **Memory & Context** | | | | |
+| Persistent memory (AGENTS.md) | ✅ | ✅ | ✅ | ✅ |
+| Auto-summarization + history offloading | ✅ | ✅ | ✅ | ✅ |
+| Pre-compact transcript archival | ✅ | ✅ | ❌ | ❌ |
+| Atomic file writes (crash-safe) | ✅ | ✅ | ❌ | ❌ |
+| Session persistence + resume | ✅ | ✅ | ❌ | ❌ |
+| Session heartbeat + auto-cleanup | ✅ (v6.5) | ✅ | ❌ | ❌ |
+| Background memory extraction | ✅ | ✅ | ❌ | ❌ |
+| **Security & Hooks** | | | | |
+| Rich hook result model (block/redirect/inject) | ✅ | ✅ | ✅ | ✅ |
+| Credential proxy for sandboxed agents | ✅ | ✅ | ❌ | ✅ |
+| External shell hooks (pre/post tool + LLM) | ✅ | ✅ | ❌ | ✅ |
+| Declarative permission rules | ✅ | ✅ | ❌ | ❌ |
+| Tool access control (block/allow) | ✅ | ✅ | ❌ | ❌ |
+| Human-in-the-loop | ✅ | ✅ | ✅ | ✅ |
+| **Skills** | | | | |
+| SKILL.md with constraint documents | ✅ | ✅ | ✅ | ✅ |
+| Skill eligibility gating (OS/bins/env) | ✅ | ✅ | ✅ | ❌ |
+| Runtime `display_clawagents_home()` (path rendering in tool descriptions) | ✅ (v6.5) | ✅ | ❌ | ❌ |
+| **RL & Self-Improvement** | | | | |
+| Prompt-Time RL (PTRL) — learn from past runs | ✅ | ❌ | ❌ | ❌ |
+| Trajectory logging + run scoring | ✅ | ✅ | ❌ | ❌ |
+| Trajectory compression (RLAIF / fine-tuning ready) | ✅ | ✅ | ❌ | ❌ |
+| Consecutive-failure rethink | ✅ | ❌ | ❌ | ❌ |
+| Adaptive rethink threshold | ✅ | ❌ | ❌ | ❌ |
+| Deterministic verification (exit codes, tests) | ✅ | ✅ | ❌ | ❌ |
+| GRPO-inspired multi-sample comparison | ✅ | ❌ | ❌ | ❌ |
+| Task-type-aware verification | ✅ | ❌ | ❌ | ❌ |
+| LLM-as-Judge verification | ✅ | ✅ | ❌ | ❌ |
+| RL fine-tuning hooks (TRL / SLIME / Atropos) | ❌ | ✅ | ❌ | ❌ |
+| RFT-ready transition export | ✅ | ✅ | ❌ | ❌ |
+| **Infrastructure** | | | | |
+| Gateway HTTP server + SSE | ✅ | ✅ | ❌ | ✅ |
+| WebSocket gateway | ✅ | ✅ | ❌ | ✅ |
+| Activity heartbeats (prevent gateway false-timeouts) | ✅ (v6.5) | ✅ | ❌ | ❌ |
+| Multi-channel messaging (Telegram, WhatsApp, Signal) | ✅ | ✅ (+ Discord, Slack, Feishu, WeChat, QQ) | ❌ | ✅ |
+| Per-session message serialization | ✅ | ✅ | ❌ | ✅ |
+| Error taxonomy + recovery recipes | ✅ | ✅ | ❌ | ❌ |
+| Prompt cache boundary (Anthropic) | ✅ | ✅ | ✅ | ❌ |
+| Prompt-cache-aware `CommandDef` (deferred state mutation) | ✅ (v6.5) | ✅ | ❌ | ❌ |
+| Lane-based command queue | ✅ | ✅ | ❌ | ✅ |
+| Hermetic test runner with concurrency pinning | ✅ (v6.5) | ✅ | ❌ | ❌ |
+| Cron / scheduled jobs | ❌ | ✅ | ❌ | ❌ |
+| ACP (Agent Communication Protocol) adapter | ❌ | ✅ | ❌ | ❌ |
+| Browser tools (Playwright / CDP / Camoufox) | ❌ | ✅ | ❌ | ❌ |
 
 ---
 
