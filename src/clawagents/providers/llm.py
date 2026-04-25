@@ -371,7 +371,8 @@ def _to_gemini_tools(schemas: list[NativeToolSchema]) -> list[dict[str, Any]]:
     """Convert NativeToolSchema list → Gemini FunctionDeclaration format."""
     declarations = []
     for s in schemas:
-        properties: dict[str, dict[str, str]] = {}
+        # Inner dict carries str values plus nested dict for "items" — use Any.
+        properties: dict[str, dict[str, Any]] = {}
         required: list[str] = []
         for k, v in s.parameters.items():
             properties[k] = {"type": v.get("type", "string").upper(), "description": v.get("description", "")}
@@ -458,6 +459,11 @@ class OpenAIProvider(LLMProvider):
         api_version = config.openai_api_version or None
         api_key = config.openai_api_key or ("not-needed" if base_url else "")
 
+        # ``self.client`` may be either ``AsyncAzureOpenAI`` or ``AsyncOpenAI``.
+        # Annotate up front so mypy doesn't pin the variable to the type of the
+        # first assignment branch and complain when the fallback assigns the
+        # other concrete type.
+        self.client: Any
         api_type = (config.openai_api_type or "").lower()
         is_azure = api_type == "azure" or (api_version and base_url and "azure" in base_url.lower())
         if is_azure and api_version and base_url:
@@ -487,7 +493,7 @@ class OpenAIProvider(LLMProvider):
         cancel_event: asyncio.Event | None = None,
         tools: list[NativeToolSchema] | None = None,
     ) -> LLMResponse:
-        formatted = []
+        formatted: list[dict[str, Any]] = []
         for m in messages:
             if m.role == "tool" and m.tool_call_id:
                 formatted.append({"role": "tool", "tool_call_id": m.tool_call_id, "content": m.content})
@@ -513,7 +519,7 @@ class OpenAIProvider(LLMProvider):
         return await self._stream_with_retry(formatted, on_chunk, cancel_event, oai_tools)
 
     async def _request_once(
-        self, messages: list[dict[str, str]],
+        self, messages: list[dict[str, Any]],
         oai_tools: list[dict[str, Any]] | None = None,
     ) -> LLMResponse:
         kwargs: dict[str, Any] = {
@@ -536,7 +542,7 @@ class OpenAIProvider(LLMProvider):
 
     async def _stream_with_retry(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         on_chunk: OnChunkCallback,
         cancel_event: asyncio.Event | None,
         oai_tools: list[dict[str, Any]] | None = None,
@@ -703,8 +709,8 @@ class GeminiProvider(LLMProvider):
                 for tc in m.tool_calls_meta:
                     tc_id_to_name[tc["id"]] = tc["name"]
 
-        system_parts = []
-        user_contents = []
+        system_parts: list[str] = []
+        user_contents: list[dict[str, Any]] = []
 
         for m in messages:
             if m.role == "system":
@@ -722,7 +728,7 @@ class GeminiProvider(LLMProvider):
                 if m.gemini_parts:
                     user_contents.append({"role": "model", "parts": m.gemini_parts})
                 else:
-                    parts = []
+                    parts: list[dict[str, Any]] = []
                     if m.content:
                         parts.append({"text": m.content})
                     for tc in m.tool_calls_meta:
@@ -735,18 +741,18 @@ class GeminiProvider(LLMProvider):
                 if isinstance(m.content, str):
                     user_contents.append({"role": role_name, "parts": [{"text": m.content}]})
                 elif isinstance(m.content, list):
-                    parts = []
+                    parts2: list[dict[str, Any]] = []
                     for part in m.content:
                         if part.get("type") == "text":
-                            parts.append({"text": part.get("text", "")})
+                            parts2.append({"text": part.get("text", "")})
                         elif part.get("type") == "image_url":
                             import base64
                             url = part["image_url"]["url"]
                             if url.startswith("data:"):
                                 mime_b64 = url[5:]
                                 mime, b64_str = mime_b64.split(";base64,")
-                                parts.append({"inline_data": {"mime_type": mime, "data": base64.b64decode(b64_str)}})
-                    user_contents.append({"role": role_name, "parts": parts})
+                                parts2.append({"inline_data": {"mime_type": mime, "data": base64.b64decode(b64_str)}})
+                    user_contents.append({"role": role_name, "parts": parts2})
 
         system_instruction = "\n".join(system_parts)
 
@@ -880,10 +886,12 @@ class GeminiProvider(LLMProvider):
                         _chunk_text_parts: list[str] = []
                         if hasattr(chunk, "candidates") and chunk.candidates:
                             for _cand in chunk.candidates:
-                                if hasattr(_cand, "content") and _cand.content and hasattr(_cand.content, "parts"):
-                                    for _p in _cand.content.parts:
-                                        if getattr(_p, "text", None) and not getattr(_p, "thought", False):
-                                            _chunk_text_parts.append(_p.text)
+                                _cand_parts = getattr(getattr(_cand, "content", None), "parts", None)
+                                if _cand_parts:
+                                    for _p in _cand_parts:
+                                        _text = getattr(_p, "text", None)
+                                        if _text and not getattr(_p, "thought", False):
+                                            _chunk_text_parts.append(_text)
                         if _chunk_text_parts:
                             _joined = "".join(_chunk_text_parts)
                             chunks.append(_joined)
@@ -893,8 +901,9 @@ class GeminiProvider(LLMProvider):
                                 fr = getattr(candidate, "finish_reason", None)
                                 if fr is not None:
                                     last_finish_reason = fr
-                                if hasattr(candidate, "content") and candidate.content and hasattr(candidate.content, "parts"):
-                                    for p in candidate.content.parts:
+                                _cand_parts2 = getattr(getattr(candidate, "content", None), "parts", None)
+                                if _cand_parts2:
+                                    for p in _cand_parts2:
                                         all_stream_parts.append(p)
                                         fc = getattr(p, "function_call", None)
                                         if fc:

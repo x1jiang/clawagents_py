@@ -34,7 +34,7 @@ class ErrorDescriptor:
     recovery_hint: str
     max_retries: int = 3
     failover_model: str | None = None
-    original: Exception | None = None
+    original: BaseException | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -110,11 +110,13 @@ RECOVERY_RECIPES: dict[ErrorClass, RecoveryRecipe] = {
 
 # ─── Classification ──────────────────────────────────────────────────────
 
-def classify_error(err: Exception, provider: str = "") -> ErrorDescriptor:
+def classify_error(err: BaseException, provider: str = "") -> ErrorDescriptor:
     """Classify an exception into a structured ErrorDescriptor.
 
-    Uses string-based inspection to avoid importing provider-specific SDK types
-    at module level (since providers are optional dependencies).
+    Accepts ``BaseException`` (not just ``Exception``) because asyncio task
+    cancellation can surface as ``CancelledError`` which inherits from
+    ``BaseException`` directly. Uses string-based inspection to avoid
+    importing provider-specific SDK types at module level.
     """
     msg = str(err).lower()
     err_type = type(err).__name__.lower()
@@ -229,7 +231,7 @@ def get_recovery_recipe(error_class: ErrorClass) -> RecoveryRecipe:
     return RECOVERY_RECIPES.get(error_class, RECOVERY_RECIPES[ErrorClass.UNKNOWN])
 
 
-def _extract_status(err: Exception) -> int | None:
+def _extract_status(err: BaseException) -> int | None:
     """Extract HTTP status code from exception (provider-agnostic)."""
     # OpenAI SDK
     if hasattr(err, "status_code"):

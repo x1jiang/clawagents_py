@@ -51,11 +51,19 @@ class EngineConfig(BaseSettings):
     streaming: bool = True
     gateway_api_key: str = ""
     claw_learn_model: str = ""
+    advisor_model: str = ""
+    advisor_api_key: str = ""
+    advisor_max_calls: int = 3
 
 
 def load_config() -> EngineConfig:
     _discover_env_file()
-    cfg = EngineConfig(_env_file=env_file) if env_file else EngineConfig()
+    # Pydantic BaseSettings accepts ``_env_file`` as a runtime kwarg even though
+    # it isn't a declared field — mypy doesn't see this dynamic surface.
+    cfg = (
+        EngineConfig(_env_file=env_file)  # type: ignore[call-arg]
+        if env_file else EngineConfig()
+    )
     return cfg
 
 

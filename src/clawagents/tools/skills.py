@@ -211,7 +211,7 @@ def create_skill_tools(store: SkillStore) -> List[Tool]:
     class ListSkillsTool:
         name = "list_skills"
         description = "List all available skills the agent can use."
-        parameters = {}
+        parameters: Dict[str, Dict[str, Any]] = {}
 
         async def execute(self, args: Dict[str, Any]) -> ToolResult:
             skills = store.list()

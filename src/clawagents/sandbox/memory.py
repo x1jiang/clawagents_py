@@ -220,7 +220,7 @@ class InMemoryBackend:
         result = self._exec_stub(command, timeout=timeout, cwd=cwd, env=env)
         if hasattr(result, "__await__"):
             return await result
-        return result  # type: ignore[return-value]
+        return result
 
     # ── Internal ────────────────────────────────────────────────────
 

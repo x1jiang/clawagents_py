@@ -144,7 +144,7 @@ class CredentialProxy:
         creds = self._credentials
 
         class _BoundHandler(_ProxyHandler):
-            credentials = creds  # type: ignore[assignment]
+            credentials = creds
 
         self._server = http.server.HTTPServer((self._host, self._port), _BoundHandler)
         actual_port = self._server.server_address[1]

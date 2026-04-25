@@ -15,7 +15,7 @@ MAX_OUTPUT_CHARS = 10000
 BLOCKED_PATTERNS = [
     "rm -rf /", "rm -rf /*", "rm -rf .", "rm -rf ~",
     "mkfs", "dd if=", "> /dev/sd", ":(){ :|:& };:",
-    "chmod -R 777 /", "chown -R", "> /dev/null",
+    "chmod -R 777 /", "chown -R",
     "wget http", "curl http",
 ]
 
@@ -55,7 +55,7 @@ class ExecTool:
         "Execute a shell command and return its output. Use for running scripts, "
         "installing packages, checking system state, etc. Commands run in the current working directory."
     )
-    parameters = {
+    parameters: Dict[str, Dict[str, Any]] = {
         "command": {"type": "string", "description": "The shell command to execute", "required": True},
         "timeout": {"type": "number", "description": f"Timeout in milliseconds. Default: {DEFAULT_TIMEOUT_MS}"},
     }

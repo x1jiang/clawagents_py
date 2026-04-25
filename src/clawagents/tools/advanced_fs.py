@@ -22,7 +22,7 @@ class TreeTool:
         "Show a recursive directory tree. Much faster than ls for getting a project overview. "
         "Automatically skips node_modules, .git, __pycache__, etc."
     )
-    parameters = {
+    parameters: Dict[str, Dict[str, Any]] = {
         "path": {"type": "string", "description": "Root directory. Default: current directory"},
         "max_depth": {"type": "number", "description": "Max depth to recurse. Default: 4"},
     }
@@ -91,7 +91,7 @@ class DiffTool:
         "Compare two files and show their differences in unified diff format. "
         "Useful for reviewing changes before or after edits."
     )
-    parameters = {
+    parameters: Dict[str, Dict[str, Any]] = {
         "file_a": {"type": "string", "description": "Path to the first file", "required": True},
         "file_b": {"type": "string", "description": "Path to the second file", "required": True},
         "context_lines": {"type": "number", "description": "Lines of context around changes. Default: 3"},
@@ -137,7 +137,7 @@ class InsertLinesTool:
         "Insert text at a specific line number in a file. Line 0 inserts at the top; "
         "a line beyond the file length appends at the end. More precise than edit_file for adding new code."
     )
-    parameters = {
+    parameters: Dict[str, Dict[str, Any]] = {
         "path": {"type": "string", "description": "Path to the file", "required": True},
         "line": {"type": "number", "description": "Line number to insert before (1-indexed). 0 = top of file.", "required": True},
         "content": {"type": "string", "description": "The text to insert", "required": True},

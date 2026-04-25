@@ -1248,6 +1248,35 @@ python -m pytest tests/ -v -m benchmark
 
 ## Changelog
 
+### v6.3.0 — Sandbox & Security Hardening, Strict Type Checking
+
+Security/correctness release. Eleven bugs fixed across both the Python and TypeScript ports, plus a full mypy cleanup. All tests green: **334 passed**, **mypy clean** (0 errors, exit 0).
+
+**Security fixes:**
+- **Sandbox escape via symlink (TS)** — `LocalBackend.safePath` was lexical-only (`path.resolve`), so an agent that ran `ln -s /etc evil` could read `/etc/*` through the symlink. Now uses `realpathSync` for both cwd and resolved paths so symlinks are followed before the containment check. Python was already safe via `Path.resolve()`.
+- **SSRF gap (TS)** — `web_fetch`'s IPv6 link-local check only matched `fe8X`, missing `fe9X`/`feaX`/`febX`. Now matches the full `fe80::/10` range (`/^fe[89ab]/i`). Python uses `ipaddress.is_link_local`, no change needed.
+- **`> /dev/null` blocked legitimate use (both)** — `BLOCKED_PATTERNS` had `"> /dev/null"` (typo for `"> /dev/sd"`), which blocked the common shell idiom `cmd > /dev/null`. Removed.
+- **`rm /` regex parity (TS)** — `DANGEROUS_RE` was missing the `*` quantifier on the flag group, so `rm /` (no flags) slipped past while Python's regex blocked it. Aligned.
+- **`wget http` / `curl http` parity (TS)** — added to TS `BLOCKED_PATTERNS` to match Python. Agents should use the `web_fetch` tool (with SSRF guards) for HTTP, not raw shell utilities.
+
+**Correctness fixes:**
+- **Multimodal system message crashed context shedding (Py)** — `_preflight_context_check` called `.replace()` and string-slicing on system messages without checking if `content` was a `list[dict]` (multimodal). Now guards each tier with `isinstance(content, str)` and emits a `warn` event if the system message is multimodal.
+- **Arbitrary role from `pre_llm` hook (Py)** — external hooks could pass any string as `role`, blowing up Pydantic validation in `LLMMessage`. Now coerces unknown roles to `"user"` and emits a `warn`.
+- **Parallel native tool-call indexing (Py)** — when `before_tool` rejected a call OR returned `updated_args`, `native_tool_call_objects` was indexed by approved-list index (off-by-one) and the identity check `tc is approved_calls[i]` failed (because `updated_args` constructs a new `ParsedToolCall`). Tool-call IDs sent back to the LLM were wrong, causing native function-calling failures. Now tracks `(orig_idx, call)` pairs through the approval loop.
+- **Subagent env-mutation race (Py)** — concurrent subagent runs with `credential_proxy` enabled raced on `os.environ`. The second run captured the first's overrides as its "original" env, then stamped them back into place after the first run had already stopped its proxy. Wrapped the env-mutate / run / env-restore window in an `asyncio.Lock`. No-proxy path is unaffected.
+- **`classify_error` rejected `BaseException` (Py)** — `asyncio.CancelledError` and similar inherit from `BaseException`, not `Exception`. Widened `classify_error`, `_extract_status`, and `ErrorDescriptor.original` to accept `BaseException`.
+- **Gemini provider `None` parts iteration (Py)** — streaming chunks could surface `None` for `candidate.content.parts` after a `hasattr` check that says only the attribute exists. Switched to `getattr(getattr(_cand, "content", None), "parts", None)` and explicit truthiness check.
+
+**Type checking:**
+- Full mypy cleanup: 46 errors → 0. Real bugs fixed (None-iter, `AsyncOpenAI`/`AsyncAzureOpenAI` mismatch, missing telegram updater check, kwargs widening). False positives addressed by renaming reused variables, adding explicit `dict[str, Any]` annotations on union-typed locals, and `parameters: Dict[str, Dict[str, Any]]` annotations on tool implementations to satisfy the `Tool` protocol.
+- Added `[tool.mypy]` block to `pyproject.toml` with `warn_unused_ignores = true` and `ignore_missing_imports = true`. Run `python -m mypy` — clean run shows `Success: no issues found in 72 source files`. Mypy now exits non-zero on errors so CI can gate on it.
+
+**Regression coverage added:**
+- `tests/test_exec_safety.py` — denylist behavior (legitimate idioms allowed, destructive patterns blocked)
+- `tests/test_agent_loop_bugs.py` — multimodal shedding paths + role coercion
+- `tests/test_parallel_native_indexing.py` — both rejection-skip and updated-args indexing paths
+- `tests/test_subagent_env_race.py` — concurrent credential-proxy runs don't corrupt env
+
 ### v6.2.1 — Release Hardening, Redirect-Safe `web_fetch`, and Parity Smokes
 
 Patch release focused on making the v6.2 line safer to install, test, and operate.

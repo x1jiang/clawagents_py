@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "clawagents"
-version = "6.2.1"
+version = "6.3.0"
 description = "Lean, full-stack agentic AI framework with PTRL (Prompt-Time Reinforcement Learning)"
 readme = "README.md"
 license = "MIT"
@@ -59,3 +59,16 @@ markers = ["benchmark: performance benchmark tests (deselect with -m 'not benchm
 # silently bypass local changes (notably the redirect-aware SSRF check).
 pythonpath = ["src"]
 testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src/clawagents"]
+# Don't fail on missing stubs for optional/3rd-party deps that aren't installed
+# in every dev env (telegram, anthropic SDK types, etc.). Real type errors in
+# our own code still surface.
+ignore_missing_imports = true
+# Tools and trajectory recorders use **kwargs for forward-compat — don't insist
+# on exhaustive Literal narrowing for those.
+warn_redundant_casts = true
+warn_unused_ignores = true
+# Per-module overrides go here when needed (e.g. relaxing for vendored code).

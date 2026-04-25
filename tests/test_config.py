@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from clawagents.config.config import (
     EngineConfig,
+    load_config,
     is_gemini_model,
     is_anthropic_model,
     get_default_model,
@@ -64,3 +65,16 @@ def test_engine_config_defaults():
         assert config.max_tokens == 8192
         assert config.temperature == 0.0
         assert config.context_window == 1000000
+
+
+def test_load_config_includes_advisor_env():
+    env_override = {
+        "ADVISOR_MODEL": "gpt-5.4",
+        "ADVISOR_API_KEY": "advisor-key",
+        "ADVISOR_MAX_CALLS": "7",
+    }
+    with patch.dict(os.environ, env_override, clear=False):
+        config = load_config()
+        assert config.advisor_model == "gpt-5.4"
+        assert config.advisor_api_key == "advisor-key"
+        assert config.advisor_max_calls == 7

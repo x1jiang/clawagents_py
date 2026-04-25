@@ -60,7 +60,7 @@ def _encoding_for_model(model: str | None) -> str:
 
 
 @lru_cache(maxsize=8)
-def _get_encoder(encoding_name: str):  # type: ignore[return]
+def _get_encoder(encoding_name: str):
     """Lazy-load and cache a tiktoken encoder.  Returns None if unavailable."""
     try:
         import tiktoken

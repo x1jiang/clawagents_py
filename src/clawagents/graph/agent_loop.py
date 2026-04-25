@@ -82,11 +82,13 @@ def _patch_dangling_tool_calls(messages: list[LLMMessage]) -> list[LLMMessage]:
 
         # Text-mode: look for assistant messages with JSON tool calls without a following [Tool Result]
         if msg.role == "assistant" and isinstance(msg.content, str) and msg.content.startswith('{"tool":'):
+            _next_msg = messages[i + 1] if i + 1 < len(messages) else None
+            _next_content = _next_msg.content if _next_msg is not None else None
             has_result = (
-                i + 1 < len(messages)
-                and messages[i + 1].role == "user"
-                and isinstance(messages[i + 1].content, str)
-                and messages[i + 1].content.startswith("[Tool Result]")
+                _next_msg is not None
+                and _next_msg.role == "user"
+                and isinstance(_next_content, str)
+                and _next_content.startswith("[Tool Result]")
             )
             if not has_result:
                 patched.append(LLMMessage(
@@ -447,13 +449,13 @@ def _coerce_output_type(raw: str, output_type: type) -> Any:
     # Pydantic v2
     if hasattr(output_type, "model_validate_json"):
         try:
-            return output_type.model_validate_json(raw)  # type: ignore[attr-defined]
+            return output_type.model_validate_json(raw)
         except Exception:
             pass
     # Pydantic v1
     if hasattr(output_type, "parse_raw"):
         try:
-            return output_type.parse_raw(raw)  # type: ignore[attr-defined]
+            return output_type.parse_raw(raw)
         except Exception:
             pass
     # Dataclass
@@ -788,12 +790,17 @@ def _preflight_context_check(
             short_parts.append("")
         short_desc = "\n".join(short_parts)
         sys_msg = messages[0]
-        messages = [
-            LLMMessage(role="system", content=sys_msg.content.replace(tool_desc, short_desc)),
-            *messages[1:],
-        ]
-        tool_desc = short_desc
-        emit("context", {"message": f"tier-1: shortened tool descriptions -> ~{_payload_tokens()} tokens"})
+        if isinstance(sys_msg.content, str):
+            messages = [
+                LLMMessage(role="system", content=sys_msg.content.replace(tool_desc, short_desc)),
+                *messages[1:],
+            ]
+            tool_desc = short_desc
+            emit("context", {"message": f"tier-1: shortened tool descriptions -> ~{_payload_tokens()} tokens"})
+        else:
+            emit("warn", {
+                "message": "tier-1 shedding skipped: system message has multimodal content (list), cannot string-replace"
+            })
 
     if _payload_tokens() <= budget:
         return messages, tool_desc, native_schemas
@@ -801,12 +808,17 @@ def _preflight_context_check(
     # ── Tier 2: Drop text tool descriptions if native schemas exist ───
     if tool_desc and native_schemas:
         sys_msg = messages[0]
-        messages = [
-            LLMMessage(role="system", content=sys_msg.content.replace(tool_desc, "").strip()),
-            *messages[1:],
-        ]
-        tool_desc = ""
-        emit("context", {"message": f"tier-2: removed text tool descriptions -> ~{_payload_tokens()} tokens"})
+        if isinstance(sys_msg.content, str):
+            messages = [
+                LLMMessage(role="system", content=sys_msg.content.replace(tool_desc, "").strip()),
+                *messages[1:],
+            ]
+            tool_desc = ""
+            emit("context", {"message": f"tier-2: removed text tool descriptions -> ~{_payload_tokens()} tokens"})
+        else:
+            emit("warn", {
+                "message": "tier-2 shedding skipped: system message has multimodal content (list), cannot string-replace"
+            })
 
     if _payload_tokens() <= budget:
         return messages, tool_desc, native_schemas
@@ -814,10 +826,15 @@ def _preflight_context_check(
     # ── Tier 3: Truncate system prompt, preserving core behavior ──────
     sys_content = messages[0].content
     max_sys_chars = int((budget - native_schema_tokens - _estimate_tokens(messages[1].content if len(messages) > 1 else "")) * _CHARS_PER_TOKEN * 0.8)
-    if max_sys_chars > 200 and len(sys_content) > max_sys_chars:
-        truncated = sys_content[:max_sys_chars] + "\n\n...(system prompt truncated to fit context window)"
-        messages = [LLMMessage(role="system", content=truncated), *messages[1:]]
-        emit("context", {"message": f"tier-3: truncated system prompt -> ~{_payload_tokens()} tokens"})
+    if isinstance(sys_content, str):
+        if max_sys_chars > 200 and len(sys_content) > max_sys_chars:
+            truncated = sys_content[:max_sys_chars] + "\n\n...(system prompt truncated to fit context window)"
+            messages = [LLMMessage(role="system", content=truncated), *messages[1:]]
+            emit("context", {"message": f"tier-3: truncated system prompt -> ~{_payload_tokens()} tokens"})
+    else:
+        emit("warn", {
+            "message": "tier-3 shedding skipped: system message has multimodal content (list), cannot truncate as string"
+        })
 
     if _payload_tokens() > budget:
         emit("warn", {
@@ -1640,8 +1657,24 @@ async def run_agent_graph(
                         [{"role": m.role, "content": m.content[:100] if isinstance(m.content, str) else ""} for m in messages[-3:]]
                     )
                     if extra_msgs:
+                        from typing import Literal as _Literal, cast as _cast
+                        _ALLOWED_ROLES = ("system", "user", "assistant", "tool")
+                        _AllowedRole = _Literal["system", "user", "assistant", "tool"]
                         for em in extra_msgs:
-                            messages.append(LLMMessage(role=em.get("role", "user"), content=em.get("content", "")))
+                            raw_role = em.get("role", "user")
+                            if raw_role not in _ALLOWED_ROLES:
+                                emit("warn", {
+                                    "message": (
+                                        f"external pre_llm hook returned message with unknown role "
+                                        f"{raw_role!r}; coercing to 'user'"
+                                    )
+                                })
+                                role: _AllowedRole = "user"
+                            else:
+                                # raw_role is now provably one of the allowed literal strings,
+                                # but mypy can't narrow ``str`` from a tuple membership test.
+                                role = _cast(_AllowedRole, raw_role)
+                            messages.append(LLMMessage(role=role, content=em.get("content", "")))
                 except Exception as hook_err:
                     emit("warn", {"message": f"external pre_llm hook error: {hook_err}"})
 
@@ -1971,20 +2004,21 @@ async def run_agent_graph(
 
                 if after_tool:
                     try:
-                        hooked = after_tool(call.tool_name, call.args, tool_result)
-                        if hasattr(hooked, "success") and hasattr(hooked, "output"):
-                            tool_result = hooked
+                        hooked_result = after_tool(call.tool_name, call.args, tool_result)
+                        if hasattr(hooked_result, "success") and hasattr(hooked_result, "output"):
+                            tool_result = hooked_result
                         else:
                             emit("warn", {"message": "after_tool returned invalid ToolResult — ignored"})
                     except Exception as hook_err:
                         emit("warn", {"message": f"after_tool hook error: {hook_err}"})
 
-                raw_output = (
+                raw_output: str | list[dict[str, Any]] = (
                     tool_result.output if tool_result.success else f"Error: {tool_result.error}"
                 )
+                tool_output: str | list[dict[str, Any]]
                 if isinstance(raw_output, list):
                     tool_output = raw_output
-                    preview = "[Multimodal Array Content]"
+                    preview: str = "[Multimodal Array Content]"
                 else:
                     tool_output = _evict_large_tool_result(call.tool_name, raw_output)
                     preview = tool_output[:preview_chars]
@@ -2060,7 +2094,11 @@ async def run_agent_graph(
                     messages.append(
                         LLMMessage(role="assistant", content=f'{{"tool": "{call.tool_name}", "args": {json.dumps(call.args)}}}', thinking=_thinking_content)
                     )
-                    user_content = f"[Tool Result] {tool_output}" if isinstance(tool_output, str) else tool_output
+                    user_content: str | list[dict[str, Any]]
+                    if isinstance(tool_output, str):
+                        user_content = f"[Tool Result] {tool_output}"
+                    else:
+                        user_content = tool_output
                     messages.append(
                         LLMMessage(role="user", content=user_content)
                     )
@@ -2094,7 +2132,12 @@ async def run_agent_graph(
 
             else:
                 # ── before_tool hook (parallel) — filter out rejected calls ──
-                approved_calls = tool_calls
+                # Track original tool_calls index alongside each approved call so
+                # native_tool_call_objects[orig_idx] stays correct even when the hook
+                # rejects calls (skipping reduces approved length) or modifies args
+                # (which produces a new ParsedToolCall instance, breaking identity checks).
+                approved_calls: list[ParsedToolCall] = []
+                _approved_orig_indices: list[int] = []
                 if before_tool:
                     def _apply_hook(c):
                         """Return (approved_call_or_None, reason) after running the hook."""
@@ -2116,27 +2159,33 @@ async def run_agent_graph(
                             emit("warn", {"message": f"before_tool hook error: {hook_err}"})
                             return None, "hook error"
 
-                    approved_calls = []
-                    for c in tool_calls:
+                    for _orig_i, c in enumerate(tool_calls):
                         result_call, reason = _apply_hook(c)
                         if result_call is None:
                             emit("tool_skipped", {"name": c.tool_name, "reason": reason})
                         else:
                             approved_calls.append(result_call)
+                            _approved_orig_indices.append(_orig_i)
                     if not approved_calls:
                         messages.append(LLMMessage(role="user", content="[Tool Skipped] All tool calls were not approved."))
                         continue
+                else:
+                    approved_calls = list(tool_calls)
+                    _approved_orig_indices = list(range(len(tool_calls)))
 
                 for call in approved_calls:
                     emit("tool_call", {"name": call.tool_name})
                 loop_tracker.record_batch(approved_calls)
 
                 # Resolve a stable call_id per approved call (prefer native tc id).
+                # Index native_tool_call_objects by ORIGINAL tool_calls index, not
+                # approved_calls index — those diverge when before_tool rejects a call.
                 _approved_call_ids: list[str] = []
                 for _idx, _c in enumerate(approved_calls):
-                    _ntc = native_tool_call_objects[_idx] if (
+                    _orig_idx = _approved_orig_indices[_idx]
+                    _ntc = native_tool_call_objects[_orig_idx] if (
                         native_tool_call_objects
-                        and _idx < len(native_tool_call_objects)
+                        and _orig_idx < len(native_tool_call_objects)
                     ) else None
                     _approved_call_ids.append(
                         (_ntc.tool_call_id if _ntc else None) or _c.tool_name
@@ -2170,12 +2219,12 @@ async def run_agent_graph(
                         )
 
                 if after_tool:
-                    safe_results = []
+                    safe_results: list[ToolResult] = []
                     for c, r in zip(approved_calls, results):
                         try:
-                            hooked = after_tool(c.tool_name, c.args, r)
-                            if hasattr(hooked, "success") and hasattr(hooked, "output"):
-                                safe_results.append(hooked)
+                            hooked_parallel = after_tool(c.tool_name, c.args, r)
+                            if hasattr(hooked_parallel, "success") and hasattr(hooked_parallel, "output"):
+                                safe_results.append(hooked_parallel)
                             else:
                                 emit("warn", {"message": "after_tool returned invalid ToolResult — ignored"})
                                 safe_results.append(r)
@@ -2184,21 +2233,23 @@ async def run_agent_graph(
                             safe_results.append(r)
                     results = safe_results
 
-                # Build a map from ParsedToolCall index to NativeToolCall for ID lookup
+                # Build a map from approved-list index to NativeToolCall for ID lookup.
+                # Use the orig-index list captured during approval — identity-checking
+                # `tc is approved_calls[i]` fails when before_tool returns updated_args
+                # (which constructs a new ParsedToolCall).
                 native_tc_map: dict[int, NativeToolCall] = {}
                 if native_tool_call_objects:
-                    # Match by index (approved_calls is a subset of tool_calls)
-                    tc_idx = 0
-                    for i, tc in enumerate(tool_calls):
-                        if tc_idx < len(approved_calls) and tc is approved_calls[tc_idx]:
-                            if i < len(native_tool_call_objects):
-                                native_tc_map[tc_idx] = native_tool_call_objects[i]
-                            tc_idx += 1
+                    for _idx, _orig_idx in enumerate(_approved_orig_indices):
+                        if _orig_idx < len(native_tool_call_objects):
+                            native_tc_map[_idx] = native_tool_call_objects[_orig_idx]
 
                 call_summaries: list[str] = []
                 tool_outputs: list[str] = []
                 for _idx2, (call, result) in enumerate(zip(approved_calls, results)):
-                    raw_out = result.output if result.success else f"Error: {result.error}"
+                    raw_out: str | list[dict[str, Any]] = (
+                        result.output if result.success else f"Error: {result.error}"
+                    )
+                    output: str | list[dict[str, Any]]
                     if isinstance(raw_out, list):
                         output = raw_out
                         preview = "[Multimodal Array Content]"
@@ -2246,7 +2297,14 @@ async def run_agent_graph(
                     from clawagents.trajectory.recorder import ToolCallRecord
                     tc_records = []
                     for call, result in zip(approved_calls, results):
-                        raw_p = result.output[:preview_chars] if result.success else (result.error or "")[:preview_chars]
+                        if not result.success:
+                            raw_p = (result.error or "")[:preview_chars]
+                        elif isinstance(result.output, str):
+                            raw_p = result.output[:preview_chars]
+                        else:
+                            # Multimodal output (list of content blocks) — store a marker
+                            # because ToolCallRecord.output_preview expects a str.
+                            raw_p = "[multimodal]"
                         tc_records.append(ToolCallRecord(
                             tool_name=call.tool_name,
                             args=call.args,

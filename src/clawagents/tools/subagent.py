@@ -22,6 +22,15 @@ EXCLUDED_STATE_KEYS: frozenset[str] = frozenset({
     "messages", "todos", "trajectory", "lessons", "session"
 })
 
+# Serialises the credential-proxy code path. Without this, two concurrent
+# subagent invocations both mutate ``os.environ`` and the second one's "restore
+# original" step picks up the FIRST one's overrides and stamps them back into
+# place — leaving stale OPENAI_BASE_URL / ANTHROPIC_BASE_URL pointing at a
+# proxy that has already stopped. The lock is only acquired when env mutation
+# is actually happening (use_cred_proxy=True with API keys present); the
+# common no-proxy path is unaffected.
+_credential_proxy_env_lock = asyncio.Lock()
+
 
 @dataclass
 class SubAgentSpec:
@@ -79,7 +88,7 @@ class TaskTool:
             "The sub-agent has access to the same tools but a fresh conversation."
             + agent_list
         )
-        self.parameters = {
+        self.parameters: Dict[str, Dict[str, Any]] = {
             "description": {
                 "type": "string",
                 "description": "What the sub-agent should accomplish",
@@ -148,34 +157,44 @@ class TaskTool:
                         "ANTHROPIC_API_KEY": "proxy",
                     }
 
-            # Restore original env after run
-            _old_env: Dict[str, Optional[str]] = {}
-            for k, v in proxy_env_overrides.items():
-                _old_env[k] = os.environ.get(k)
-                os.environ[k] = v
+            # Build kwargs, stripping any parent-context keys to keep the
+            # child agent isolated (M1: subagent state isolation).
+            run_kwargs: Dict[str, Any] = {
+                k: v for k, v in {
+                    "task": description,
+                    "llm": self._llm,
+                    "tools": self._tools,
+                    "system_prompt": effective_prompt,
+                    "max_iterations": effective_max_iter,
+                    "streaming": False,
+                    "use_native_tools": effective_native_tools,
+                }.items() if k not in EXCLUDED_STATE_KEYS
+            }
 
-            try:
-                # Build kwargs, stripping any parent-context keys to keep the
-                # child agent isolated (M1: subagent state isolation).
-                run_kwargs: Dict[str, Any] = {
-                    k: v for k, v in {
-                        "task": description,
-                        "llm": self._llm,
-                        "tools": self._tools,
-                        "system_prompt": effective_prompt,
-                        "max_iterations": effective_max_iter,
-                        "streaming": False,
-                        "use_native_tools": effective_native_tools,
-                    }.items() if k not in EXCLUDED_STATE_KEYS
-                }
+            if proxy_env_overrides:
+                # Hold the lock across env mutate -> run -> env restore to
+                # serialise concurrent subagent runs that share os.environ.
+                async with _credential_proxy_env_lock:
+                    _old_env: Dict[str, Optional[str]] = {}
+                    for k, v in proxy_env_overrides.items():
+                        _old_env[k] = os.environ.get(k)
+                        os.environ[k] = v
+                    try:
+                        state = await run_agent_graph(**run_kwargs)
+                    finally:
+                        for k, orig in _old_env.items():
+                            if orig is None:
+                                os.environ.pop(k, None)
+                            else:
+                                os.environ[k] = orig
+                        if proxy is not None:
+                            proxy.stop()
+            else:
+                # No proxy → no env mutation → no race → no lock needed.
                 state = await run_agent_graph(**run_kwargs)
-            finally:
-                for k, orig in _old_env.items():
-                    if orig is None:
-                        os.environ.pop(k, None)
-                    else:
-                        os.environ[k] = orig
                 if proxy is not None:
+                    # Defensive: shouldn't happen (we only build proxy when
+                    # there are overrides), but keep the cleanup symmetric.
                     proxy.stop()
 
             if state.status == "error":

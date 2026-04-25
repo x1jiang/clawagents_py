@@ -63,6 +63,8 @@ class TelegramAdapter:
 
         await self._app.initialize()
         await self._app.start()
+        if self._app.updater is None:
+            raise RuntimeError("TelegramAdapter: updater unavailable — was the Application built with .updater(False)?")
         await self._app.updater.start_polling()
         print(f"[Telegram] Bot started ({token[:6]}...)")
 

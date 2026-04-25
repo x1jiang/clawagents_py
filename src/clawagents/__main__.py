@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path
 from textwrap import dedent
+from typing import Any
 
 
 # ─── Init / Scaffold ──────────────────────────────────────────────────────
@@ -319,7 +320,10 @@ async def cmd_task(task: str, timeout_s: int = 0, advisor_model: str | None = No
     from clawagents.agent import create_claw_agent
 
     banner = _build_banner()
-    kwargs = {}
+    # Annotate as Any-valued so mypy doesn't infer dict[str, str] from the
+    # single advisor_model entry — create_claw_agent's kwargs include several
+    # non-string types (lists, callables, bools, ints).
+    kwargs: dict[str, Any] = {}
     if advisor_model:
         kwargs["advisor_model"] = advisor_model
     agent = create_claw_agent(**kwargs)

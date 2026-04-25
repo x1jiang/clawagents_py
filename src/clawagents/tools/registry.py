@@ -176,7 +176,7 @@ class ToolRegistry:
             module_path=module_path,
             class_name=class_name,
         )
-        self.tools[name] = lazy  # type: ignore[assignment]
+        self.tools[name] = lazy
         self._description_cache = None
 
     def get(self, name: str) -> Optional[Tool]:

@@ -83,7 +83,7 @@ class _NoFollowRedirectHandler(HTTPRedirectHandler):
     that error, reads ``Location``, and revalidates the hop.
     """
 
-    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
 
 
@@ -131,7 +131,7 @@ class WebFetchTool:
         "Useful for reading documentation, API responses, or checking web resources. "
         "HTML is stripped for readability. JSON responses are returned as-is."
     )
-    parameters = {
+    parameters: Dict[str, Dict[str, Any]] = {
         "url": {"type": "string", "description": "The URL to fetch", "required": True},
         "timeout": {"type": "number", "description": f"Timeout in seconds. Default: {DEFAULT_TIMEOUT_S}"},
     }
