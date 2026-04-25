@@ -1,4 +1,4 @@
-__version__ = "6.4.0"
+__version__ = "6.4.1"
 
 from clawagents.agent import ClawAgent, create_claw_agent
 from clawagents.graph.agent_loop import (
@@ -23,6 +23,9 @@ from clawagents.errors import (
 )
 from clawagents.hooks import (
     HooksConfig, ExternalHookRunner, load_hooks_config,
+)
+from clawagents.hooks.prompt_hook import (
+    PromptHook, PromptHookVerdict,
 )
 from clawagents.session import (
     SessionWriter, SessionReader, SessionInfo, list_sessions,

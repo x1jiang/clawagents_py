@@ -1345,6 +1345,14 @@ plus the existing `tests/test_web_fetch_ssrf.py` and the broad
 
 ## Changelog
 
+### v6.4.1 — Public-API export polish (no behavior change)
+
+Patch release. Surfaces `PromptHook` and `PromptHookVerdict` at the top-level
+`clawagents` package (Python) and `clawagents` module (TypeScript) so users
+can `from clawagents import PromptHook` instead of reaching into
+`clawagents.hooks.prompt_hook`. No code-path changes; both ports remain at
+516/226 passing.
+
 ### v6.4.0 — Tracing, MCP, Handoffs, Plan Mode (April 2026)
 
 Big feature release. Nine new subsystems shipped on **both** Python and TypeScript ports — every change comes with regression tests on both. Test totals: **Python 516 passed**, **TypeScript 226 passed**, mypy clean, `tsc --noEmit` clean.
