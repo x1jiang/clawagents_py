@@ -64,10 +64,16 @@ _BUILTIN_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     # GitHub PAT / fine-grained tokens / OAuth tokens
     _compile(
         "GITHUB_TOKEN",
-        r"\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{20,})\b",
+        r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b",
     ),
     # AWS access key IDs
     _compile("AWS_ACCESS_KEY_ID", r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
+    # AWS secret access keys (40 chars, base64-ish, paired with KEY/SECRET name)
+    _compile(
+        "AWS_SECRET_KEY",
+        r"(?i)aws[_-]?(?:secret[_-]?access[_-]?key|secret)\s*[:=]\s*['\"]?"
+        r"([A-Za-z0-9/+=]{40})['\"]?",
+    ),
     # Slack tokens
     _compile("SLACK_TOKEN", r"\bxox[abprs]-[A-Za-z0-9\-]{10,}\b"),
     # Three-segment JWTs (header.payload.signature)
@@ -75,19 +81,37 @@ _BUILTIN_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
         "JWT",
         r"\beyJ[A-Za-z0-9_=\-]{4,}\.[A-Za-z0-9_=\-]{4,}\.[A-Za-z0-9_.+/=\-]{4,}\b",
     ),
-    # Generic ``Authorization: Bearer <token>`` headers
+    # PEM private-key blocks (RSA, EC, DSA, OpenSSH, generic).
+    _compile(
+        "PRIVATE_KEY_PEM",
+        r"-----BEGIN (?:RSA |DSA |EC |OPENSSH |ENCRYPTED |PGP )?PRIVATE KEY-----"
+        r"[\s\S]*?-----END (?:RSA |DSA |EC |OPENSSH |ENCRYPTED |PGP )?PRIVATE KEY-----",
+    ),
+    # ``Authorization: Bearer <token>`` and ``Authorization: Basic <token>``.
+    # Also catches ``X-Api-Key: <token>`` style header lines.
     _compile(
         "BEARER",
-        r"(?i)\b(?:authorization|bearer)\s*[:=]\s*['\"]?[A-Za-z0-9_\-.~+/=]{16,}['\"]?",
+        r"(?i)(?:authorization|proxy-authorization|x[_-]?api[_-]?key)\s*[:=]\s*"
+        r"(?:bearer\s+|basic\s+|token\s+)?['\"]?[A-Za-z0-9_\-.~+/=]{16,}['\"]?",
     ),
-    # Generic key=value assignments for known secret-looking names. Matches
-    # lines like ``api_key="abcd1234..."`` / ``password=hunter2`` / etc.
+    # URL basic-auth: ``https://user:pass@host``.
+    _compile(
+        "URL_BASIC_AUTH",
+        r"\b(?:https?|ftp|ssh|git|mongodb|postgres(?:ql)?|mysql|redis|amqp|amqps)"
+        r"://[^\s/@]+:[^\s/@]+@",
+        # Note: anchored on the scheme so we don't flag random "user:pass@…" text.
+    ),
+    # Generic key=value assignments for known secret-looking names. The
+    # alternative patterns are ordered most-specific first; the field
+    # name is matched anywhere in the line (no \\b — so ``AWS_SECRET=…``
+    # works even though ``_`` is a word character).
     _compile(
         "GENERIC_SECRET",
-        r"(?i)\b(?:api[_-]?key|api[_-]?secret|password|passwd|pwd|secret|"
-        r"client[_-]?secret|access[_-]?token|refresh[_-]?token|"
-        r"private[_-]?key|x[_-]?api[_-]?key)"
-        r"\s*[:=]\s*['\"]?([A-Za-z0-9_\-+/=.~]{8,})['\"]?",
+        r"(?i)(?:api[_-]?key|api[_-]?secret|client[_-]?secret|"
+        r"access[_-]?token|refresh[_-]?token|session[_-]?token|"
+        r"private[_-]?key|x[_-]?api[_-]?key|"
+        r"password|passwd|pwd|secret|credential)"
+        r"\s*[:=]\s*['\"]?([A-Za-z0-9_\-+/=.~]{6,})['\"]?",
     ),
 ]
 

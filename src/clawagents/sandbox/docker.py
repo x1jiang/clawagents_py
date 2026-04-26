@@ -6,9 +6,21 @@ import re
 from pathlib import Path
 from typing import Dict, Optional
 
+from clawagents.redact import is_secret_name
 from clawagents.sandbox.backend import DirEntry, ExecResult, FileStat, SandboxBackend
 
-_SENSITIVE_ENV_RE = re.compile(r"(?:^|_)(?:API_KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|PRIVATE_KEY)$", re.I)
+# Vendor-prefixed shapes (``GITHUB_PAT``, ``STRIPE_SK_LIVE``) and infra
+# names (``DATABASE_URL``, ``DSN``) that don't contain any of redact's
+# generic hint words.
+_SANDBOX_EXTRA_ENV_RE = re.compile(
+    r"(?:SK[_-]?LIVE|SK[_-]?TEST|GITHUB[_-]?PAT|"
+    r"DATABASE[_-]?URL|CONNECTION[_-]?STRING|DSN)",
+    re.I,
+)
+
+
+def _is_sensitive_env(name: str) -> bool:
+    return is_secret_name(name) or bool(_SANDBOX_EXTRA_ENV_RE.search(name))
 
 
 class DockerBackend:
@@ -108,7 +120,7 @@ class DockerBackend:
             "-w", container_cwd,
         ]
         for key, value in (env or {}).items():
-            if not _SENSITIVE_ENV_RE.search(key):
+            if not _is_sensitive_env(key):
                 args.extend(["-e", f"{key}={value}"])
         args.extend([self.image, "sh", "-lc", command])
         return args

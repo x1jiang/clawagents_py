@@ -14,6 +14,7 @@ to work unchanged.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any, Generic, TypeVar
 
@@ -84,6 +85,21 @@ class RunContext(Generic[TContext]):
     _approvals: dict[str, ApprovalRecord] = field(default_factory=dict)
     _always_approvals: dict[str, ApprovalRecord] = field(default_factory=dict)
     _metadata: dict[str, Any] = field(default_factory=dict)
+    _budget_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False, compare=False)
+
+    async def ensure_iteration_budget(self, size: int) -> IterationBudget:
+        """Lazily attach an :class:`IterationBudget` if none is set yet.
+
+        Safe under concurrent access: the first caller wins, every other
+        caller observes the same budget. Returns the (now non-None)
+        budget.
+        """
+        if self.iteration_budget is not None:
+            return self.iteration_budget
+        async with self._budget_lock:
+            if self.iteration_budget is None:
+                self.iteration_budget = IterationBudget(max(0, size))
+            return self.iteration_budget
 
     def approve_tool(
         self,

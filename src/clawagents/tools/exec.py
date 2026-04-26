@@ -32,17 +32,19 @@ from clawagents.tracing import tool_span
 DEFAULT_TIMEOUT_MS = 30000
 MAX_OUTPUT_CHARS = 10000
 
-BLOCKED_PATTERNS = [
-    "rm -rf /", "rm -rf /*", "rm -rf .", "rm -rf ~",
-    "mkfs", "dd if=", "> /dev/sd", ":(){ :|:& };:",
-    "chmod -R 777 /", "chown -R",
-    "wget http", "curl http",
+import re
+
+# Legacy substring backstop — must never widen policy beyond the bash
+# validator. Substring match, so anything added here that overlaps with
+# a valid command (e.g. ``"curl http"`` matching ``https://``) breaks
+# real workloads.
+BLOCKED_PATTERNS: list[str] = [
+    ":(){ :|:& };:",
 ]
 
-import re
 _DANGEROUS_RE = re.compile(
     r"(?:sudo\s+)?rm\s+(?:-\w*[rf]\w*\s+)*/\s*$"
-    r"|>\s*/dev/sd"
+    r"|>\s*['\"]?/dev/sd"
     r"|mkfs\."
     r"|dd\s+if="
     r"|:\(\)\s*\{",

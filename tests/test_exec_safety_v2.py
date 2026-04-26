@@ -58,8 +58,8 @@ _VALIDATOR_CORPUS: list[tuple[str, CommandCategory, Decision]] = [
     ("rm file.txt", CommandCategory.DESTRUCTIVE, Decision.WARN),
     ("dd if=in.bin of=out.bin", CommandCategory.DESTRUCTIVE, Decision.WARN),
 
-    # System admin — WARN
-    ("chmod -R 777 /", CommandCategory.SYSTEM_ADMIN, Decision.WARN),
+    # System admin — chmod -R 777 / is BLOCK (catastrophic).
+    ("chmod -R 777 /", CommandCategory.SYSTEM_ADMIN, Decision.BLOCK),
     ("chown -R root /etc", CommandCategory.SYSTEM_ADMIN, Decision.WARN),
     ("sudo apt-get update", CommandCategory.SYSTEM_ADMIN, Decision.WARN),
 

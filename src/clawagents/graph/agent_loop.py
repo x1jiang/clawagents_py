@@ -1444,10 +1444,8 @@ async def run_agent_graph(
     # round_idx in range(effective_max_rounds)`` loop still acts as a
     # belt-and-braces hard ceiling, but the budget is the user-visible
     # control surface.
-    if run_context.iteration_budget is None:
-        from clawagents.iteration_budget import IterationBudget as _IterBudget
-        _budget_size = max(0, max_iterations if max_iterations > 0 else MAX_TOOL_ROUNDS)
-        run_context.iteration_budget = _IterBudget(_budget_size)
+    _budget_size = max_iterations if max_iterations > 0 else MAX_TOOL_ROUNDS
+    await run_context.ensure_iteration_budget(_budget_size)
 
     def _emit_typed(kind: str, data: dict[str, Any] | None = None) -> None:
         """Dispatch a typed StreamEvent alongside the existing ``emit`` hook."""

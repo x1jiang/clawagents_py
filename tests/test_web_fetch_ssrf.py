@@ -66,12 +66,12 @@ def fake_validator(monkeypatch: pytest.MonkeyPatch):
 
     private_overrides: set[str] = set()
 
-    def fake(host: str) -> bool:
+    def fake(host: str, **_kwargs: object) -> bool:
         if host in private_overrides:
             return True
         if host == "127.0.0.1":
             return False
-        return True  # default to private = safer
+        return True
 
     monkeypatch.setattr(web, "_is_private_address", fake)
 

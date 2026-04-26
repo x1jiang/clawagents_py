@@ -176,6 +176,14 @@ class EditFileTool:
         replacement = str(args.get("replacement", ""))
         replace_all = bool(args.get("replace_all", False))
 
+        # Empty target is never valid: ``str.replace("", repl)`` inserts
+        # ``repl`` between every character, silently corrupting the file.
+        if target == "":
+            return ToolResult(
+                success=False, output="",
+                error="edit_file failed: 'target' must be a non-empty string.",
+            )
+
         try:
             if not await sb.exists(file_path):
                 return ToolResult(success=False, output="", error=f"edit_file failed: File does not exist at {file_path}")

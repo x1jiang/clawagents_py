@@ -29,5 +29,9 @@ class TestExecDenylist:
         # Defense-in-depth: ensures the regression doesn't sneak back in.
         assert "> /dev/null" not in BLOCKED_PATTERNS
 
-    def test_dev_sd_still_in_blocked_patterns(self):
-        assert "> /dev/sd" in BLOCKED_PATTERNS
+    def test_dev_sd_caught_by_dangerous_re(self):
+        # Block-device redirect protection moved from BLOCKED_PATTERNS
+        # (substring match) to _DANGEROUS_RE + the bash validator.
+        assert _is_dangerous_command("dd if=/dev/zero of=/dev/sda") is True
+        assert _is_dangerous_command("echo x > /dev/sda") is True
+        assert _is_dangerous_command("echo x >'/dev/sda'") is True

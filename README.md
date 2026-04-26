@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.6.4-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.7.0-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -26,7 +26,7 @@ pip install clawagents[anthropic]   # + Anthropic Claude support
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 6.6.4** — Latest stable release (April 2026). ToolUniverse-style discovery now searches tool names, descriptions, and explicit keyword aliases, so compact tool selection is less brittle when a model uses a related term instead of the exact tool name. This release also adds bounded tool profiles, Docker sandbox support, resumable `RunResult` metadata, SQLite result caching for safe cacheable tools, explorer helpers, gym-style eval aliases, and next-state trajectory exports across the Python and TypeScript packages. **786 Python tests** pass; **509 TypeScript tests** pass plus **49 parity checks**, `tsc --noEmit` clean. See [Changelog](#changelog).
+> **Version 6.7.0** — Security hardening release (April 2026). Closes a cluster of bypasses across the bash validator, the obfuscation detector, the `web_fetch` SSRF protection, the `edit_file` tool, the `redact()` scrubber, and the Docker sandbox env policy. Notable items: DNS-rebinding TOCTOU eliminated by IP-pinned HTTP(S) connections; HTTPS→HTTP redirect downgrades refused; null-byte/control-character commands blocked; `bash -c '<cmd>'`, `(rm -rf /)`, `$(rm -rf /)`, double-space, `$HOME`-shaped, `tee /dev/sda`, `find -exec sh -c`, `chmod -R 777 /` all now `BLOCK`; PEM blocks, `Authorization: Bearer …`, AWS secret keys, and URL basic-auth credentials now redacted; subprocess timeouts kill the whole process group (no orphan grandchildren); `RunContext.iteration_budget` lazy-init now serialised under an `asyncio.Lock`. **835 Python tests** pass (49 new regression tests); **511 TypeScript tests** pass (5 new), `tsc --noEmit` clean. See [Changelog](#changelog).
 
 ---
 
@@ -1467,6 +1467,83 @@ landed in v6.5.0/v6.6.0 — `tests/test_subagent_depth.py`,
 ---
 
 ## Changelog
+
+### v6.7.0 — Security hardening across validator, web_fetch, redact, sandbox (April 2026)
+
+Minor release. Adversarial probing of the v6.6.4 surfaces uncovered a
+cluster of bypasses; this release closes them. Test totals after this
+release: **Python 835 passed, 3 skipped**; **TypeScript 511 passed,
+4 skipped** plus parity checks; `tsc --noEmit` clean. **49 new
+regression tests** ride alongside the fixes (44 Python, 5 TypeScript).
+
+**Bash validator hardening** — `validate_bash` now walks every shell
+clause, including the contents of `(...)`, `$(...)`, backticks, and
+`bash -c '<cmd>'`/`sh -c '<cmd>'` wrappers; the strictest verdict
+across all clauses wins. The previous head-only inspection meant
+`ls && rm -rf /var/log`, `(rm -rf /)`, `echo $(rm -rf /)`, and
+`bash -c 'rm -rf /'` all silently passed. Additional shapes now
+`BLOCK`: `rm -rf "$HOME"` / `rm -rf $HOME/x` and any `rm` of a system
+directory (`/etc`, `/var`, `/usr`, `/home`, …); `tee /dev/sda` and
+`tee /etc/passwd` / `tee -a /etc/sudoers`; quoted block-device
+redirects (`>'/dev/sda'`); FD-prefixed redirects (`1>/dev/sda`);
+`find -exec sh -c '…'` and `find -execdir`; `chmod -R 777 /`;
+`sed --in-place` (long form, previously unrecognised). Null bytes
+and unprintable control characters in any command are also `BLOCK`
+(closes the C-string truncation evasion).
+
+**Web fetch SSRF — DNS-rebinding TOCTOU eliminated** — `web_fetch` now
+resolves the host once per hop and connects to the validated IP
+directly, sending the original hostname via the `Host` header and SNI.
+A controlled DNS server can no longer return a public address to the
+validator and a private one (loopback, `169.254.169.254` / cloud
+metadata) to the actual fetch. Body reads are bounded at 4 MiB and
+truncated streamingly so a hostile server can't OOM the agent. Each
+redirect hop gets its own timeout. `Location` headers that downgrade
+HTTPS → HTTP across a redirect are refused.
+
+**Obfuscation detector — host-suffix bypass closed** — the curl-pipe-
+shell installer allowlist used `\b`-anchored regexes, but `.` is a
+non-word character so `brew\.sh\b` matched `brew.sh.evil.com`.
+Allowlist is now keyed on parsed hostname (with required path prefix
+for `raw.githubusercontent.com`), not regex.
+
+**`edit_file` empty-target corruption** — `target=""` plus
+`replace_all=true` previously inserted the replacement between every
+character of the file, silently corrupting it. Now refused.
+
+**Redaction coverage** — `redact()` now scrubs PEM private-key blocks
+(any `-----BEGIN […] PRIVATE KEY-----` / `END` block), `Authorization:
+Bearer <token>` / `Authorization: Basic …` headers, AWS *secret* access
+keys (the previous regex covered only the access-key ID), URL
+basic-auth credentials (`https://user:pass@host`), and shorter
+generic-secret values. The Docker sandbox env-name policy now reuses
+`is_secret_name()` from `redact.py` plus a small extras regex covering
+vendor-prefixed shapes (`GITHUB_PAT`, `STRIPE_SK_LIVE`,
+`DATABASE_URL`, `DSN`); the previous end-anchored regex missed
+`AWS_SECRET_ACCESS_KEY`, `GITHUB_PAT`, `DATABASE_PASSWORD_PROD`, etc.
+and forwarded them into containers via `-e`.
+
+**Subprocess timeouts no longer orphan children** — the local sandbox
+now starts each shell in a new session and `SIGKILL`s the whole
+process group on timeout, so long-running grandchildren of `sh -c`
+don't outlive the parent.
+
+**Concurrency** — `RunContext.iteration_budget` lazy-init is serialised
+under an `asyncio.Lock`; sub-agents sharing a context can no longer
+clobber each other's budget. Callsite is `await
+run_context.ensure_iteration_budget(size)`.
+
+**Other quality fixes** — `RetryPolicy.shouldRetry` now correctly
+allows `maxRetries=N` to perform `N` retries (was off-by-one); `jitter`
+is clamped to `[0, 1]` to prevent zero-delay retry storms; the MCP
+manager tracks connected servers so a partial-failure `start()`
+doesn't double-register tools on retry, and shutdown errors are
+aggregated into a thrown `Error` instead of a span no caller observes;
+`compressMessagesSafe` no longer produces two consecutive same-role
+messages when the head is empty (Anthropic rejects that). The
+overbroad `"curl http"` / `"wget http"` legacy substring (which also
+matched `https://` because `https` starts with `http`) is removed —
+the bash validator's NETWORK classification now applies cleanly.
 
 ### v6.6.4 — Keyword discovery and infrastructure parity (April 2026)
 

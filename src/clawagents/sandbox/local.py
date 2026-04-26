@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 from pathlib import Path
 
 from clawagents.sandbox.backend import DirEntry, ExecResult, FileStat
@@ -121,12 +122,18 @@ class LocalBackend:
 
         timeout_s = (timeout or 30_000) / 1000.0
 
+        # ``start_new_session`` puts the shell + every child it spawns
+        # into a new process group. On timeout we send SIGKILL to the
+        # whole group so long-running grandchildren (e.g. ``python
+        # script.py`` started by ``sh -c``) don't orphan and keep
+        # writing to a closed pipe.
         proc = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd or self._cwd,
             env=merged_env,
+            start_new_session=True,
         )
 
         try:
@@ -134,7 +141,12 @@ class LocalBackend:
                 proc.communicate(), timeout=timeout_s,
             )
         except asyncio.TimeoutError:
-            proc.kill()
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                # Either the process group is already gone, or we don't
+                # own it — fall back to killing just the parent.
+                proc.kill()
             await proc.wait()
             return ExecResult(stdout="", stderr="", exit_code=1, killed=True)
 

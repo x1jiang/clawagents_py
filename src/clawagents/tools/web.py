@@ -25,70 +25,88 @@ internal docs servers), set the env var or run a custom tool that
 bypasses ``web_fetch``.
 """
 
+import http.client
 import os
 import re
 import asyncio
 import ipaddress
 import socket
-from typing import Any, Dict, List
-from urllib.request import urlopen, Request, build_opener, HTTPRedirectHandler
-from urllib.error import URLError, HTTPError
+import ssl
+from dataclasses import dataclass
+from typing import Any, Dict, List, Tuple
 from urllib.parse import urlparse, urljoin
 
 from clawagents.tools.registry import Tool, ToolResult
 
 MAX_RESPONSE_CHARS = 50_000
+MAX_RESPONSE_BYTES = 4 * 1024 * 1024  # 4 MiB hard cap on body bytes read
 DEFAULT_TIMEOUT_S = 15
 MAX_REDIRECTS = 5
 _ALLOWED_SCHEMES = ("http", "https")
+_DEFAULT_PORTS = {"http": 80, "https": 443}
 
 
-def _is_private_address(host: str) -> bool:
-    """Return True if *host* resolves to a non-public IP we should refuse.
+def _ip_is_private(ip: ipaddress._BaseAddress) -> bool:
+    if (
+        ip.is_loopback
+        or ip.is_link_local
+        or ip.is_private
+        or ip.is_unspecified
+        or ip.is_multicast
+        or ip.is_reserved
+    ):
+        return True
+    return str(ip) in {"169.254.169.254", "fd00:ec2::254"}
 
-    Covers loopback, link-local, private RFC1918, unspecified, multicast,
-    and reserved ranges. Also blocks the EC2/IMDS metadata IP explicitly
-    so it's caught even if a future stdlib release relaxes a category.
+
+def _is_private_address(host: str, *, _resolved: list[str] | None = None) -> bool:
+    """Return True if *host* is or resolves to a non-public IP.
+
+    When *_resolved* is supplied, skip DNS and use those IPs directly —
+    this lets the orchestrator share a single ``getaddrinfo`` between
+    the privacy check and the IP pin. Tests monkey-patch this function
+    to flip 127.0.0.1 between "private" and "public"; their fakes don't
+    inspect *_resolved*, so kwarg-only is fine.
     """
+    if _resolved is not None:
+        for ip_str in _resolved:
+            try:
+                ip = ipaddress.ip_address(ip_str)
+            except ValueError:
+                return True
+            if _ip_is_private(ip):
+                return True
+        return False
+    try:
+        return _ip_is_private(ipaddress.ip_address(host))
+    except ValueError:
+        pass
     try:
         infos = socket.getaddrinfo(host, None)
     except socket.gaierror:
         return True
+    if not infos:
+        return True
     for info in infos:
-        addr = info[4][0]
         try:
-            ip = ipaddress.ip_address(addr)
+            ip = ipaddress.ip_address(info[4][0])
         except ValueError:
             return True
-        if (
-            ip.is_loopback
-            or ip.is_link_local
-            or ip.is_private
-            or ip.is_unspecified
-            or ip.is_multicast
-            or ip.is_reserved
-        ):
-            return True
-        if str(ip) in {"169.254.169.254", "fd00:ec2::254"}:
+        if _ip_is_private(ip):
             return True
     return False
 
 
-class _NoFollowRedirectHandler(HTTPRedirectHandler):
-    """Suppress automatic redirect following.
-
-    Returning ``None`` from :meth:`redirect_request` causes the underlying
-    ``OpenerDirector`` to fall through to ``HTTPDefaultErrorHandler``,
-    which raises ``HTTPError`` for the 3xx response. The caller catches
-    that error, reads ``Location``, and revalidates the hop.
-    """
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
+@dataclass(frozen=True)
+class PinnedTarget:
+    scheme: str
+    host: str
+    port: int
+    ip: str
+    path: str
 
 
-def _validate_hop(url: str, allow_private: bool) -> str | None:
-    """Validate a URL prior to network I/O. Returns an error message or None."""
+def _validate_hop(url: str, allow_private: bool) -> str | PinnedTarget:
     try:
         parsed = urlparse(url)
         if not parsed.scheme or not parsed.netloc:
@@ -96,17 +114,96 @@ def _validate_hop(url: str, allow_private: bool) -> str | None:
     except Exception:
         return f"Invalid URL: {url}"
 
-    if parsed.scheme.lower() not in _ALLOWED_SCHEMES:
+    scheme = parsed.scheme.lower()
+    if scheme not in _ALLOWED_SCHEMES:
         return f"Refusing scheme '{parsed.scheme}'. web_fetch only allows http/https."
 
-    if not allow_private:
-        host = parsed.hostname or ""
-        if not host or _is_private_address(host):
-            return (
-                f"Refusing to fetch '{host or url}': resolves to a private/loopback/"
-                "link-local/reserved address. Set CLAWAGENTS_WEB_ALLOW_PRIVATE=1 to override."
-            )
-    return None
+    host = parsed.hostname or ""
+    if not host:
+        return f"Invalid URL (no host): {url}"
+
+    port = parsed.port or _DEFAULT_PORTS[scheme]
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+
+    # One DNS resolution shared between the privacy check and the
+    # connection pin: closes the TOCTOU window between them and saves
+    # an RTT per redirect hop.
+    try:
+        ipaddress.ip_address(host)
+        ip: str | None = host
+        resolved_ips: list[str] | None = None  # IP literal: skip DNS
+    except ValueError:
+        try:
+            infos = socket.getaddrinfo(host, None)
+        except socket.gaierror:
+            return f"DNS lookup failed for '{host}'"
+        if not infos:
+            return f"DNS lookup returned no records for '{host}'"
+        resolved_ips = [info[4][0] for info in infos]
+        ip = resolved_ips[0]
+
+    if not allow_private and _is_private_address(host, _resolved=resolved_ips):
+        return (
+            f"Refusing to fetch '{host}': resolves to a private/loopback/"
+            "link-local/reserved address. Set CLAWAGENTS_WEB_ALLOW_PRIVATE=1 to override."
+        )
+
+    if ip is None:
+        return f"DNS lookup failed for '{host}'"
+    return PinnedTarget(scheme=scheme, host=host, port=port, ip=ip, path=path)
+
+
+def _fetch_pinned(
+    target: PinnedTarget,
+    timeout: int,
+) -> Tuple[int, Dict[str, str], bytes]:
+    """Open a single HTTP(S) connection to ``target.ip`` with the original
+    hostname in the ``Host`` header and (for TLS) as SNI. Pinning the IP
+    neutralises DNS rebinding for this hop. Redirect responses are
+    returned as-is (no auto-follow).
+    """
+    headers = {
+        "Host": target.host if target.port in (80, 443) else f"{target.host}:{target.port}",
+        "User-Agent": "ClawAgents/1.0",
+        "Connection": "close",
+        "Accept-Encoding": "identity",
+    }
+    if target.scheme == "https":
+        ctx = ssl.create_default_context()
+        conn = http.client.HTTPSConnection(
+            target.ip, target.port, timeout=timeout, context=ctx, server_hostname=target.host,
+        )
+    else:
+        conn = http.client.HTTPConnection(target.ip, target.port, timeout=timeout)
+    try:
+        conn.request("GET", target.path, headers=headers)
+        resp = conn.getresponse()
+        status = resp.status
+        # Cap by Content-Length first if reasonable.
+        clen_raw = resp.getheader("Content-Length")
+        try:
+            clen = int(clen_raw) if clen_raw is not None else None
+        except ValueError:
+            clen = None
+        if clen is not None and clen > MAX_RESPONSE_BYTES:
+            # Drain just enough to give a readable preview, then bail.
+            body = resp.read(MAX_RESPONSE_BYTES)
+        else:
+            # Stream-read up to MAX_RESPONSE_BYTES; reject larger payloads.
+            body = resp.read(MAX_RESPONSE_BYTES + 1)
+            if len(body) > MAX_RESPONSE_BYTES:
+                body = body[:MAX_RESPONSE_BYTES]
+        # Snapshot headers as a plain dict (last-write-wins on duplicates).
+        # Lowercase keys so callers can do simple ``hdrs["location"]``
+        # lookups regardless of how the server cased the header.
+        hdrs: Dict[str, str] = {}
+        for k, v in resp.getheaders():
+            hdrs[k.lower()] = v
+        return status, hdrs, body
+    finally:
+        conn.close()
 
 
 def _strip_html(html: str) -> str:
@@ -152,51 +249,65 @@ class WebFetchTool:
         ).strip() in ("1", "true", "yes")
 
         loop = asyncio.get_running_loop()
-        opener = build_opener(_NoFollowRedirectHandler())
-
-        def _fetch_one(target: str):
-            req = Request(target, headers={"User-Agent": "ClawAgents/1.0"})
-            return opener.open(req, timeout=timeout)
-
         current = url
         try:
             for hop in range(MAX_REDIRECTS + 1):
-                err = _validate_hop(current, allow_private)
-                if err is not None:
-                    return ToolResult(success=False, output="", error=err)
+                hop_info = _validate_hop(current, allow_private)
+                if isinstance(hop_info, str):
+                    return ToolResult(success=False, output="", error=hop_info)
 
                 try:
-                    resp = await loop.run_in_executor(None, _fetch_one, current)
-                except HTTPError as e:
-                    if 300 <= e.code < 400:
-                        if hop >= MAX_REDIRECTS:
-                            return ToolResult(
-                                success=False,
-                                output="",
-                                error=f"Too many redirects (>{MAX_REDIRECTS}) starting at {url}",
-                            )
-                        location = e.headers.get("Location")
-                        if not location:
-                            return ToolResult(
-                                success=False,
-                                output="",
-                                error=f"HTTP {e.code} without Location header at {current}",
-                            )
-                        current = urljoin(current, location)
-                        continue
-                    return ToolResult(success=False, output="", error=f"HTTP {e.code}: {e.reason}")
+                    status, headers, body = await loop.run_in_executor(
+                        None, _fetch_pinned, hop_info, timeout
+                    )
+                except TimeoutError:
+                    return ToolResult(
+                        success=False, output="",
+                        error=f"Request timed out after {timeout}s",
+                    )
+                except OSError as e:
+                    return ToolResult(success=False, output="", error=f"web_fetch failed: {e}")
 
-                status = resp.status
-                content_type = resp.headers.get("Content-Type", "")
-                body = resp.read().decode("utf-8", errors="replace")
+                if 300 <= status < 400:
+                    if hop >= MAX_REDIRECTS:
+                        return ToolResult(
+                            success=False,
+                            output="",
+                            error=f"Too many redirects (>{MAX_REDIRECTS}) starting at {url}",
+                        )
+                    location = headers.get("location")
+                    if not location:
+                        return ToolResult(
+                            success=False,
+                            output="",
+                            error=f"HTTP {status} without Location header at {current}",
+                        )
+                    next_url = urljoin(current, location)
+                    if hop_info.scheme == "https" and next_url.lower().startswith("http://"):
+                        return ToolResult(
+                            success=False,
+                            output="",
+                            error=(
+                                "Refusing redirect: HTTPS endpoint sent a "
+                                "Location pointing to http:// (TLS downgrade)"
+                            ),
+                        )
+                    current = next_url
+                    continue
 
-                if len(body) > MAX_RESPONSE_CHARS:
-                    body = body[:MAX_RESPONSE_CHARS] + f"\n...(truncated at {MAX_RESPONSE_CHARS} chars)"
+                if not (200 <= status < 300):
+                    return ToolResult(success=False, output="", error=f"HTTP {status}")
+
+                content_type = headers.get("content-type") or ""
+                text = body.decode("utf-8", errors="replace")
+
+                if len(text) > MAX_RESPONSE_CHARS:
+                    text = text[:MAX_RESPONSE_CHARS] + f"\n...(truncated at {MAX_RESPONSE_CHARS} chars)"
 
                 if "html" in content_type.lower():
-                    body = _strip_html(body)
+                    text = _strip_html(text)
 
-                return ToolResult(success=True, output=f"[{status}] {current}\n\n{body}")
+                return ToolResult(success=True, output=f"[{status}] {current}\n\n{text}")
 
             return ToolResult(
                 success=False,
@@ -204,12 +315,8 @@ class WebFetchTool:
                 error=f"Too many redirects (>{MAX_REDIRECTS}) starting at {url}",
             )
 
-        except URLError as e:
-            return ToolResult(success=False, output="", error=f"web_fetch failed: {e.reason}")
-        except TimeoutError:
-            return ToolResult(success=False, output="", error=f"Request timed out after {timeout}s")
-        except Exception as e:
-            return ToolResult(success=False, output="", error=f"web_fetch failed: {str(e)}")
+        except (OSError, ssl.SSLError) as e:
+            return ToolResult(success=False, output="", error=f"web_fetch failed: {e}")
 
 
 web_tools: List[Tool] = [WebFetchTool()]

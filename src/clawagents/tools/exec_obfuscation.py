@@ -17,6 +17,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
+from urllib.parse import urlparse
 
 
 @dataclass(frozen=True)
@@ -109,33 +110,28 @@ _PATTERNS: List[Tuple[str, str, re.Pattern]] = [
     ),
 ]
 
-# Allowlist suppressions for well-known installers — port of
-# ``FALSE_POSITIVE_SUPPRESSIONS``. Each entry suppresses a specific
-# pattern id when its regex matches and there is at most one URL.
-_SUPPRESSIONS: List[Tuple[List[str], re.Pattern]] = [
-    (
-        ["curl-pipe-shell"],
-        re.compile(
-            r"curl\s+.*https?://(?:raw\.githubusercontent\.com/Homebrew|brew\.sh)\b",
-            re.I,
-        ),
-    ),
-    (
-        ["curl-pipe-shell"],
-        re.compile(
-            r"curl\s+.*https?://(?:raw\.githubusercontent\.com/nvm-sh/nvm"
-            r"|sh\.rustup\.rs|get\.docker\.com|install\.python-poetry\.org)\b",
-            re.I,
-        ),
-    ),
-    (
-        ["curl-pipe-shell"],
-        re.compile(
-            r"curl\s+.*https?://(?:get\.pnpm\.io|bun\.sh/install)\b",
-            re.I,
-        ),
-    ),
-]
+# Allowlist of known-safe installer hostnames. We require an *exact* host
+# match (parsed via urllib) — `\b`-anchored regexes are unsafe because `.`
+# is a non-word char, so `brew\.sh\b` would also match `brew.sh.evil.com`.
+_SUPPRESSION_HOSTS: dict[str, set[str]] = {
+    "curl-pipe-shell": {
+        "raw.githubusercontent.com",  # require Homebrew/nvm-sh path prefix below
+        "brew.sh",
+        "sh.rustup.rs",
+        "get.docker.com",
+        "install.python-poetry.org",
+        "get.pnpm.io",
+        "bun.sh",
+    },
+}
+
+# For raw.githubusercontent.com we additionally require the URL path to
+# begin with one of these owners — otherwise an attacker can host a
+# payload at `raw.githubusercontent.com/evil/...`.
+_RAW_GITHUB_OWNER_PATH_PREFIXES: tuple[str, ...] = (
+    "/Homebrew/",
+    "/nvm-sh/nvm",
+)
 
 _URL_RE = re.compile(r"https?://\S+")
 
@@ -150,7 +146,8 @@ def detect_obfuscation(command: str) -> Optional[ObfuscationFinding]:
     if not command or not command.strip():
         return None
 
-    url_count = len(_URL_RE.findall(command))
+    urls = _URL_RE.findall(command)
+    url_count = len(urls)
     matched_ids: List[str] = []
     reasons: List[str] = []
 
@@ -159,11 +156,17 @@ def detect_obfuscation(command: str) -> Optional[ObfuscationFinding]:
             continue
 
         suppressed = False
-        if url_count <= 1:
-            for ids, supp_re in _SUPPRESSIONS:
-                if pat_id in ids and supp_re.search(command):
+        if url_count == 1 and pat_id in _SUPPRESSION_HOSTS:
+            parsed = urlparse(urls[0].rstrip(".,;)\"'"))
+            host = (parsed.hostname or "").lower()
+            if host in _SUPPRESSION_HOSTS[pat_id]:
+                if host == "raw.githubusercontent.com":
+                    suppressed = any(
+                        parsed.path.startswith(p)
+                        for p in _RAW_GITHUB_OWNER_PATH_PREFIXES
+                    )
+                else:
                     suppressed = True
-                    break
         if suppressed:
             continue
 

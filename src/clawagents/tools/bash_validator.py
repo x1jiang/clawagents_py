@@ -100,7 +100,19 @@ _DESTRUCTIVE_PROGRAMS: frozenset[str] = frozenset({
 
 
 _FORK_BOMB_RE = re.compile(r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:")
-_REDIRECT_TO_BLOCK_DEV_RE = re.compile(r">\s*/dev/(?:sd[a-z]+|nvme\d+|hd[a-z]+|disk\d+)")
+# Block-device redirect detector. Tolerates whitespace/quotes/FD-prefix
+# (``1>``), so ``echo x >'/dev/sda'`` and ``1>/dev/sda`` are both caught.
+_REDIRECT_TO_BLOCK_DEV_RE = re.compile(
+    r"(?:^|[^>])>+\s*['\"]?\s*/dev/(?:sd[a-z]+|nvme\d+|hd[a-z]+|disk\d+)"
+)
+# ``tee`` writing into a block device — same risk class as ``> /dev/sd*``.
+_TEE_BLOCK_DEV_RE = re.compile(r"\btee\b\s+(?:-\S+\s+)*['\"]?/dev/(?:sd[a-z]+|nvme\d+|hd[a-z]+|disk\d+)")
+# ``tee`` writing into root-owned config that gives shell/perm escalation.
+_TEE_SENSITIVE_RE = re.compile(
+    r"\btee\b\s+(?:-\S+\s+)*['\"]?(?:/etc/(?:passwd|shadow|sudoers|hosts|ssh/|pam\.d/)"
+    r"|/root/|/var/spool/cron/)",
+    re.I,
+)
 _GIT_READ_SUBCMD: frozenset[str] = frozenset({
     "status", "log", "diff", "show", "blame", "branch", "remote",
     "config", "describe", "ls-files", "ls-tree", "rev-parse",
@@ -109,43 +121,77 @@ _GIT_READ_SUBCMD: frozenset[str] = frozenset({
 
 
 def _split_first_token(command: str) -> tuple[str, List[str]]:
-    """Return (program_name, full_arg_tokens) for the first command in
-    a (possibly compound) shell line. We split on the first ``;``, ``&&``,
-    ``||``, or ``|`` so we look at the head command only.
+    """Return (program_name, full_arg_tokens) for a single shell clause.
+
+    Caller is expected to pass clauses produced by :func:`_collect_clauses`
+    (no compound separators inside). Still defensive: if the caller passes
+    a compound, only the head is examined — the per-clause walk catches
+    the rest.
     """
     s = command.strip()
-    # Strip env-var assignments at the front: ``FOO=bar baz``
+    while s.startswith("(") and s.endswith(")"):
+        s = s[1:-1].strip()
     while s and re.match(r"[A-Za-z_][A-Za-z0-9_]*=", s):
         idx = s.find(" ")
         if idx < 0:
             break
         s = s[idx + 1 :].lstrip()
-    # Truncate at first compound separator.
     head = re.split(r"\s*(?:\|\||&&|;|\|)\s*", s, maxsplit=1)[0]
     try:
         tokens = shlex.split(head, comments=False, posix=True)
     except ValueError:
-        # Unbalanced quotes, etc. — fall back to whitespace split.
         tokens = head.split()
     if not tokens:
         return "", []
     return tokens[0], tokens
 
 
+_ROOT_LIKE_LITERALS: frozenset[str] = frozenset({
+    "", "/", "/*", ".", "./*", "..", "*", "~", "~/", "$HOME", "${HOME}",
+})
+
+# System directories — ``rm -rf <any of these>`` (or anything beneath
+# them) is treated as destructive enough to BLOCK rather than WARN.
+_SYSTEM_ROOTS: tuple[str, ...] = (
+    "/etc", "/var", "/usr", "/lib", "/lib64", "/sbin", "/bin", "/boot",
+    "/opt", "/srv", "/sys", "/proc", "/dev", "/private", "/Users",
+    "/home", "/root", "/Library", "/Applications", "/System",
+)
+
+
+def _is_root_like_path(raw_path: str) -> bool:
+    """Return True if ``raw_path`` is the filesystem root, a HOME ref, or a
+    system directory (or a path beneath one). Robust to surrounding quotes
+    and ``--`` separators.
+    """
+    p = raw_path.strip().strip("'\"").rstrip("/") or "/"
+    if p in _ROOT_LIKE_LITERALS:
+        return True
+    if p.startswith("~") or p.startswith("$HOME") or p.startswith("${HOME}"):
+        return True
+    for d in _SYSTEM_ROOTS:
+        if p == d or p.startswith(d + "/"):
+            return True
+    return False
+
+
 def _classify_rm(tokens: List[str]) -> BashDecision | None:
     """Sub-classify ``rm`` based on flag shape."""
-    flags = [t for t in tokens[1:] if t.startswith("-")]
-    paths = [t for t in tokens[1:] if not t.startswith("-")]
+    args = [t for t in tokens[1:] if t != "--"]
+    flags = [t for t in args if t.startswith("-")]
+    paths = [t for t in args if not t.startswith("-")]
 
-    has_recursive = any("r" in f.lstrip("-") or "R" in f.lstrip("-") for f in flags)
-    has_force = any("f" in f.lstrip("-") for f in flags)
+    long_recursive = any(f in ("--recursive", "-R", "-r") for f in flags)
+    long_force = any(f == "--force" for f in flags)
+    short_combined = [f.lstrip("-") for f in flags if f.startswith("-") and not f.startswith("--")]
+    has_recursive = long_recursive or any(("r" in f) or ("R" in f) for f in short_combined)
+    has_force = long_force or any("f" in f for f in short_combined)
 
-    bad_targets = {"/", "/*", ".", "./*", "..", "*", "~", "~/"}
-    if any(p in bad_targets for p in paths) and (has_recursive or has_force):
+    if any(_is_root_like_path(p) for p in paths) and (has_recursive or has_force):
         return BashDecision(
             CommandCategory.DESTRUCTIVE,
             Decision.BLOCK,
-            f"rm with recursive/force on root-like target ({paths})",
+            f"rm with recursive/force on root-like or system target ({paths})",
             "rm -rf <root>",
         )
     if has_recursive and has_force:
@@ -189,19 +235,32 @@ def _classify_find(tokens: List[str]) -> BashDecision:
             "find -delete recursively removes matched paths",
             "find -delete",
         )
-    if "-exec" in args:
-        # Best-effort: look for rm as the command after -exec.
-        try:
-            i = args.index("-exec")
-            if i + 1 < len(args) and args[i + 1].endswith("rm"):
-                return BashDecision(
-                    CommandCategory.DESTRUCTIVE,
-                    Decision.BLOCK,
-                    "find -exec rm recursively removes matched paths",
-                    "find -exec rm",
-                )
-        except ValueError:
-            pass
+    EXEC_FLAGS = {"-exec", "-execdir", "-ok", "-okdir"}
+    SHELL_PROGRAMS = {"sh", "bash", "zsh", "dash", "ksh", "fish"}
+    i = 0
+    while i < len(args):
+        if args[i] in EXEC_FLAGS:
+            j = i + 1
+            while j < len(args) and args[j] not in (";", "+", r"\;"):
+                base = args[j].rsplit("/", 1)[-1]
+                if base == "rm" or base == "shred":
+                    return BashDecision(
+                        CommandCategory.DESTRUCTIVE,
+                        Decision.BLOCK,
+                        f"find {args[i]} {base} recursively removes matched paths",
+                        f"find {args[i]} {base}",
+                    )
+                if base in SHELL_PROGRAMS:
+                    return BashDecision(
+                        CommandCategory.DESTRUCTIVE,
+                        Decision.BLOCK,
+                        f"find {args[i]} {base} -c <cmd> obscures the executed command",
+                        f"find {args[i]} {base}",
+                    )
+                j += 1
+            i = j
+        else:
+            i += 1
     return BashDecision(
         CommandCategory.READ_ONLY,
         Decision.ALLOW,
@@ -218,8 +277,8 @@ def _classify_chmod_chown(tokens: List[str]) -> BashDecision:
     if program == "chmod" and "777" in args and has_recursive and any(t in ("/", "/*") for t in targets):
         return BashDecision(
             CommandCategory.SYSTEM_ADMIN,
-            Decision.WARN,
-            "chmod -R 777 / opens the entire filesystem; reviewing",
+            Decision.BLOCK,
+            "chmod -R 777 / opens the entire filesystem",
             "chmod -R 777 /",
         )
     if program == "chown" and has_recursive and any("root" in t for t in targets):
@@ -301,7 +360,15 @@ def _classify_git(tokens: List[str]) -> BashDecision:
 
 def _classify_sed(tokens: List[str]) -> BashDecision:
     args = tokens[1:]
-    in_place = any(a == "-i" or a.startswith("-i") and not a.startswith("--include") for a in args)
+    # Detect both short ``-i`` / ``-i.bak`` and GNU long form ``--in-place``.
+    # ``--include`` (a different flag) must NOT match.
+    in_place = any(
+        a == "-i"
+        or (a.startswith("-i") and not a.startswith("--"))
+        or a == "--in-place"
+        or a.startswith("--in-place=")
+        for a in args
+    )
     if in_place:
         return BashDecision(
             CommandCategory.WRITE,
@@ -317,46 +384,151 @@ def _classify_sed(tokens: List[str]) -> BashDecision:
     )
 
 
+_CLAUSE_SEP_RE = re.compile(r"\s*(?:\|\||&&|\||;|&|\n)\s*")
+_SUBST_RE = re.compile(r"\$\(([^()]+)\)|`([^`]+)`")
+# ``bash -c 'rm -rf /'``: extract the quoted arg after ``-c``.
+_SHELL_C_RE = re.compile(
+    r"\b(?:bash|sh|zsh|dash|ksh|fish)\s+(?:-\S+\s+)*-c\s+"
+    r"(?:'([^']*)'|\"([^\"]*)\"|(\S+))"
+)
+# Redirect into an unquoted variable: we can't statically know the target.
+_REDIRECT_TO_VAR_RE = re.compile(r">+\s*\$\{?[A-Za-z_][A-Za-z0-9_]*\}?")
+
+
+def _strip_subshell(s: str) -> str:
+    s = s.strip()
+    while s.startswith("(") and s.endswith(")"):
+        s = s[1:-1].strip()
+    return s
+
+
+def _collect_clauses(command: str) -> List[str]:
+    """Return every shell clause that ``command`` will execute.
+
+    Splits on ``;`` ``&&`` ``||`` ``|`` ``&`` and newlines, strips outer
+    parentheses, recurses into ``$(...)`` / backtick command
+    substitutions, and unwraps ``bash -c '<cmd>'`` style invocations.
+    Best-effort: we don't fully parse the shell grammar, but this covers
+    the common bypass cases.
+    """
+    out: List[str] = []
+    work = [_strip_subshell(command)]
+    seen: set[str] = set()
+    while work:
+        s = work.pop()
+        if s in seen:
+            continue
+        seen.add(s)
+        for sub in _SUBST_RE.findall(s):
+            inner = sub[0] or sub[1]
+            inner = _strip_subshell(inner)
+            if inner:
+                work.append(inner)
+        for m in _SHELL_C_RE.finditer(s):
+            inner = m.group(1) or m.group(2) or m.group(3) or ""
+            inner = _strip_subshell(inner)
+            if inner:
+                work.append(inner)
+        for part in _CLAUSE_SEP_RE.split(s):
+            part = _strip_subshell(part)
+            if not part:
+                continue
+            out.append(part)
+    return out
+
+
+def _severity(d: BashDecision) -> int:
+    return {Decision.ALLOW: 0, Decision.WARN: 1, Decision.BLOCK: 2}[d.decision]
+
+
+def _validate_single_clause(raw: str) -> BashDecision:
+    """Validate one shell clause (no compound separators inside).
+
+    Whole-clause shape checks run first, then per-program dispatch.
+    """
+    if _REDIRECT_TO_BLOCK_DEV_RE.search(raw):
+        return BashDecision(
+            CommandCategory.DESTRUCTIVE, Decision.BLOCK,
+            "redirect into a block device wipes the disk", "> /dev/sd*",
+        )
+    if _TEE_BLOCK_DEV_RE.search(raw):
+        return BashDecision(
+            CommandCategory.DESTRUCTIVE, Decision.BLOCK,
+            "tee into a block device wipes the disk", "tee /dev/sd*",
+        )
+    if _TEE_SENSITIVE_RE.search(raw):
+        return BashDecision(
+            CommandCategory.SYSTEM_ADMIN, Decision.BLOCK,
+            "tee into a privileged config path can subvert system trust",
+            "tee /etc/...",
+        )
+    if _REDIRECT_TO_VAR_RE.search(raw):
+        # We can't statically resolve the variable's value — flag for
+        # human review rather than blocking outright.
+        return BashDecision(
+            CommandCategory.WRITE, Decision.WARN,
+            "redirecting to an unquoted variable target — verify it",
+            ">$VAR",
+        )
+
+    program, tokens = _split_first_token(raw)
+    if not program:
+        return BashDecision(
+            CommandCategory.UNKNOWN, Decision.ALLOW,
+            "no program name found", "",
+        )
+
+    return _dispatch_program(program, tokens)
+
+
 def validate_bash(command: str) -> BashDecision:
     """Classify a bash command and decide ALLOW / WARN / BLOCK.
 
     The decision is *advisory*: callers (the exec tool) decide what to do
     with WARN — typically prepending a notice to the output and proceeding.
     BLOCK should always cause a refusal.
+
+    Compound commands (``;`` ``&&`` ``||`` ``|`` ``&``), subshells
+    (``(...)``), and command substitutions (``$(...)`` / backticks) are
+    each validated; the strictest decision wins.
     """
     raw = (command or "").strip()
     if not raw:
         return BashDecision(
-            CommandCategory.UNKNOWN,
-            Decision.ALLOW,
-            "empty command",
-            "",
+            CommandCategory.UNKNOWN, Decision.ALLOW, "empty command", "",
         )
 
-    # Whole-command shape checks first (these dominate any program name).
+    # Refuse null bytes / unprintable control chars: C-level path APIs
+    # truncate at the null, so ``rm -rf /\\x00`` would inspect a non-root
+    # path here and operate on ``/`` at execution time.
+    if any(c == "\x00" or (ord(c) < 0x20 and c not in "\t\n\r") for c in raw):
+        return BashDecision(
+            CommandCategory.DESTRUCTIVE, Decision.BLOCK,
+            "command contains a null byte or unprintable control character",
+            "<NUL>",
+        )
+
+    # Whole-command shape checks that don't survive clause splitting.
     if _FORK_BOMB_RE.search(raw):
         return BashDecision(
-            CommandCategory.DESTRUCTIVE,
-            Decision.BLOCK,
-            "fork bomb detected",
-            ":(){ :|:& };:",
-        )
-    if _REDIRECT_TO_BLOCK_DEV_RE.search(raw):
-        return BashDecision(
-            CommandCategory.DESTRUCTIVE,
-            Decision.BLOCK,
-            "redirect into a block device wipes the disk",
-            "> /dev/sd*",
+            CommandCategory.DESTRUCTIVE, Decision.BLOCK,
+            "fork bomb detected", ":(){ :|:& };:",
         )
 
-    program, tokens = _split_first_token(raw)
-    if not program:
-        return BashDecision(
-            CommandCategory.UNKNOWN,
-            Decision.ALLOW,
-            "no program name found",
-            "",
-        )
+    clauses = _collect_clauses(raw) or [raw]
+    worst: BashDecision | None = None
+    for clause in clauses:
+        d = _validate_single_clause(clause)
+        if d.decision == Decision.BLOCK:
+            return d
+        if worst is None or _severity(d) > _severity(worst):
+            worst = d
+    assert worst is not None
+    return worst
+
+
+def _dispatch_program(program: str, tokens: List[str]) -> BashDecision:
+    """Per-program dispatch — the body of the original validate_bash."""
 
     # Per-program dispatch.
     if program == "rm":
