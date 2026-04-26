@@ -64,7 +64,7 @@ class RetryPolicy:
         if descriptor.error_class not in self.retry_on:
             return False
         cap = self.per_class_max.get(descriptor.error_class, self.max_retries)
-        return attempt < cap
+        return attempt <= cap
 
     def compute_delay(
         self,

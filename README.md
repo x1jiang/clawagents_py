@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.7.0-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.7.1-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -26,7 +26,7 @@ pip install clawagents[anthropic]   # + Anthropic Claude support
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 6.7.0** — Security hardening release (April 2026). Closes a cluster of bypasses across the bash validator, the obfuscation detector, the `web_fetch` SSRF protection, the `edit_file` tool, the `redact()` scrubber, and the Docker sandbox env policy. Notable items: DNS-rebinding TOCTOU eliminated by IP-pinned HTTP(S) connections; HTTPS→HTTP redirect downgrades refused; null-byte/control-character commands blocked; `bash -c '<cmd>'`, `(rm -rf /)`, `$(rm -rf /)`, double-space, `$HOME`-shaped, `tee /dev/sda`, `find -exec sh -c`, `chmod -R 777 /` all now `BLOCK`; PEM blocks, `Authorization: Bearer …`, AWS secret keys, and URL basic-auth credentials now redacted; subprocess timeouts kill the whole process group (no orphan grandchildren); `RunContext.iteration_budget` lazy-init now serialised under an `asyncio.Lock`. **835 Python tests** pass (49 new regression tests); **511 TypeScript tests** pass (5 new), `tsc --noEmit` clean. See [Changelog](#changelog).
+> **Version 6.7.1** — Tool discovery and compact-agent recovery release (April 2026). Compact tool-universe discovery is now registered by default, and tool lookup scores names, descriptions, and keyword metadata so small models can recover even when a tool name is imperfect. Failed native-tool observations preserve structured output, `execute` returns command/exit/stdout/stderr details on nonzero exits, and repeated identical failures get a repair hint instead of silently burning turns. The release also keeps recent security hardening from v6.7.0 and verifies the new recovery path with focused Python and TypeScript regression tests. See [Changelog](#changelog).
 
 ---
 
@@ -1440,7 +1440,7 @@ All environment variables are **optional**. They serve as defaults when the corr
 # Install with dev dependencies
 pip install -e ".[dev]"
 
-# Run all tests (full suite passes on v6.6.4)
+# Run all tests
 python -m pytest -q
 
 # Hermetic runner — exactly the environment CI uses (pinned xdist=4,
@@ -1450,7 +1450,7 @@ bash scripts/run_tests.sh
 # Run benchmarks (requires API keys)
 python -m pytest tests/ -v -m benchmark
 
-# Static type check (clean, exit 0 on v6.6.4)
+# Static type check
 python -m mypy
 ```
 
@@ -1467,6 +1467,27 @@ landed in v6.5.0/v6.6.0 — `tests/test_subagent_depth.py`,
 ---
 
 ## Changelog
+
+### v6.7.1 — Tool discovery and compact-agent recovery (April 2026)
+
+Patch release focused on generalizable low-latency tool use for compact
+models. `tool_discover` is registered by default so agents can inspect the
+available tool universe before committing to a call, and lookup now searches
+tool names, descriptions, and keyword metadata. That makes discovery robust
+when a model remembers the action it needs but not the exact tool name.
+
+Native-tool failures now keep useful output in the observation stream instead
+of reducing everything to a generic error. The built-in `execute` tool returns
+structured JSON for nonzero exits (`command`, `exit_code`, `stdout`,
+`stderr`, `output`, `timed_out`), and repeated identical `execute` failures
+include a recovery hint that nudges the agent to inspect the captured output
+or change command strategy.
+
+Planning/todo guidance was also tightened so quick read-only or single-step
+tasks do not pay unnecessary planning overhead, while multi-step repair tasks
+still get explicit progress tracking. Focused release verification covers the
+infra-improvement regression tests and bytecode compilation for Python, plus
+TypeScript typecheck and matching infra-improvement tests.
 
 ### v6.7.0 — Security hardening across validator, web_fetch, redact, sandbox (April 2026)
 

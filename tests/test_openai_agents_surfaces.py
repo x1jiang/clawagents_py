@@ -325,7 +325,8 @@ class TestRetryPolicy:
         )
         desc_rate = type("D", (), {"error_class": ErrorClass.PROVIDER_RATE_LIMIT})()
         assert p.should_retry(_RateLimit("x"), attempt=1, descriptor=desc_rate) is True
-        assert p.should_retry(_RateLimit("x"), attempt=2, descriptor=desc_rate) is False
+        assert p.should_retry(_RateLimit("x"), attempt=2, descriptor=desc_rate) is True
+        assert p.should_retry(_RateLimit("x"), attempt=3, descriptor=desc_rate) is False
 
     def test_should_retry_false_for_unregistered_class(self):
         p = RetryPolicy(retry_on=frozenset({ErrorClass.PROVIDER_RATE_LIMIT}))
