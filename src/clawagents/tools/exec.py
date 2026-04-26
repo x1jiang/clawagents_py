@@ -16,6 +16,8 @@ went.
 
 from __future__ import annotations
 
+import json
+import re
 from typing import Any, Dict, List
 
 from clawagents.permissions.mode import PermissionMode
@@ -31,8 +33,6 @@ from clawagents.tracing import tool_span
 
 DEFAULT_TIMEOUT_MS = 30000
 MAX_OUTPUT_CHARS = 10000
-
-import re
 
 # Legacy substring backstop — must never widen policy beyond the bash
 # validator. Substring match, so anything added here that overlaps with
@@ -69,6 +69,39 @@ def _ensure_brv_command(command: str) -> str:
     if s.startswith("brv "):
         return "npx byterover-cli " + s[4:].strip()
     return command
+
+
+def _truncate_exec_output(output: str) -> str:
+    if len(output) <= MAX_OUTPUT_CHARS:
+        return output
+    original_len = len(output)
+    half = MAX_OUTPUT_CHARS // 2
+    return output[:half] + f"\n\n... [truncated {original_len - MAX_OUTPUT_CHARS} chars] ...\n\n" + output[-half:]
+
+
+def _format_nonzero_command_output(
+    command: str,
+    exit_code: int,
+    stdout: str,
+    stderr: str,
+    warning_prefix: str,
+) -> str:
+    payload: dict[str, Any] = {
+        "command_executed": True,
+        "success": False,
+        "exit_code": exit_code,
+        "command": command,
+        "stdout": _truncate_exec_output(stdout or ""),
+        "stderr": _truncate_exec_output(stderr or ""),
+        "interpretation": (
+            "The command ran and exited nonzero. Treat stdout/stderr as "
+            "diagnostic feedback, not as a tool transport failure."
+        ),
+    }
+    warning = warning_prefix.strip()
+    if warning:
+        payload["warning"] = warning
+    return json.dumps(payload, indent=2)
 
 
 class ExecTool:
@@ -161,22 +194,24 @@ class ExecTool:
                     error=f"Command timed out after {timeout_ms}ms: {command}",
                 )
 
+            success = result.exit_code == 0
+            if not success:
+                return ToolResult(
+                    success=False,
+                    output=_format_nonzero_command_output(
+                        command,
+                        result.exit_code,
+                        result.stdout or "",
+                        result.stderr or "",
+                        warning_prefix,
+                    ),
+                    error=f"Command exited with code {result.exit_code}: {command}",
+                )
+
             output = result.stdout or ""
             if result.stderr:
                 output += ("\n" if output else "") + f"[stderr] {result.stderr}"
-
-            if len(output) > MAX_OUTPUT_CHARS:
-                original_len = len(output)
-                half = MAX_OUTPUT_CHARS // 2
-                output = output[:half] + f"\n\n... [truncated {original_len - MAX_OUTPUT_CHARS} chars] ...\n\n" + output[-half:]
-
-            success = result.exit_code == 0
-            if not success and not output:
-                return ToolResult(
-                    success=False,
-                    output=result.stderr or "",
-                    error=f"Command failed with exit code {result.exit_code}: {command}",
-                )
+            output = _truncate_exec_output(output)
 
             return ToolResult(success=success, output=warning_prefix + (output or "(no output)"))
 

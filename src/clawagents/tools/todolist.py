@@ -18,7 +18,8 @@ class WriteTodosTool:
     name = "write_todos"
     description = (
         "Create or replace a todo list for the current task. "
-        "Use this at the start of a complex task to plan your approach. "
+        "Use this at the start of a broad or long-running task to plan your approach; "
+        "skip it for short lookup, read, compare, or JSON-report tasks. "
         "Pass a JSON array of strings describing each step."
     )
     parameters = {
@@ -51,7 +52,8 @@ class UpdateTodoTool:
     name = "update_todo"
     description = (
         "Mark a todo item as completed by its index (0-based). "
-        "Use after finishing a planned step."
+        "Use after finishing a planned step, but do not call it only to mark "
+        "completion when you already have enough evidence to answer."
     )
     parameters = {
         "index": {

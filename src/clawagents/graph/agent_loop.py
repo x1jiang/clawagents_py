@@ -175,6 +175,16 @@ def _evict_large_tool_result(tool_name: str, output: str) -> str:
         )
 
 
+def _tool_observation(result: ToolResult) -> str | list[dict[str, Any]]:
+    if result.success:
+        return result.output
+    error = f"Error: {result.error}" if result.error else "Error: Tool failed"
+    if isinstance(result.output, list):
+        return [{"type": "text", "text": error}, *result.output]
+    output = str(result.output or "").strip()
+    return f"{error}\nOutput:\n{output}" if output else error
+
+
 # ─── Model-Aware Context Budget (learned from deepagents) ─────────────────
 
 # NOTE: Order matters for prefix matching below. List the *most specific*
@@ -524,7 +534,9 @@ Keep working until the task is fully complete.
 - NEVER re-read a file you already have in context. Use the data from previous tool results.
 - NEVER call the same tool with the same arguments twice. If you already have the result, use it.
 - Batch independent tool calls into a single response when possible (use the array syntax).
-- Prefer fewer, well-targeted tool calls over many exploratory ones."""
+- Prefer fewer, well-targeted tool calls over many exploratory ones.
+- Use todo/planning tools only for broad or long-running tasks. Skip todo bookkeeping for bounded lookup, read, compare, or JSON-report tasks.
+- Once tool results contain enough evidence to answer, stop calling tools and answer directly. Do not call tools only to mark progress complete."""
 
 
 # ─── Adaptive Token Estimation (learned from deepagents) ──────────────────
@@ -2129,19 +2141,32 @@ async def run_agent_graph(
             if loop_tracker.is_soft_looping_batch(tool_calls):
                 loop_tracker.record_batch(tool_calls)
                 n = loop_tracker.bump_soft_warning()
-                repeated_names = ", ".join(
-                    c.tool_name for c in tool_calls
+                repeated_calls = [
+                    c for c in tool_calls
                     if loop_tracker.is_soft_looping(c.tool_name, c.args)
-                )
+                ]
+                repeated_names = ", ".join(c.tool_name for c in repeated_calls)
+                has_repeated_execute = any(c.tool_name == "execute" for c in repeated_calls)
                 emit("warn", {"message": f"repeated tool call warning #{n}: {repeated_names}"})
-                messages.append(LLMMessage(
-                    role="user",
-                    content=(
+                if has_repeated_execute:
+                    hint = (
+                        "[System] You are re-calling the same execute command with the same arguments. "
+                        "The command already ran; if the previous result has success=false or a nonzero "
+                        "exit_code, treat stdout/stderr as diagnostic feedback, not as a tool failure. "
+                        "Read the prior output, then edit code or inspect new evidence before trying again. "
+                        "Do not rerun this command until something relevant changed. "
+                        "If you believe the task is complete, provide your final answer now."
+                    )
+                else:
+                    hint = (
                         f"[System] You are re-calling {repeated_names} with the same arguments. "
                         "You already have the result in the conversation above. "
                         "Use the existing data instead of re-reading. "
                         "If you believe the task is complete, provide your final answer now."
-                    ),
+                    )
+                messages.append(LLMMessage(
+                    role="user",
+                    content=hint,
                 ))
                 state.iterations += 1
                 continue
@@ -2288,9 +2313,7 @@ async def run_agent_graph(
                     except Exception as hook_err:
                         emit("warn", {"message": f"after_tool hook error: {hook_err}"})
 
-                raw_output: str | list[dict[str, Any]] = (
-                    tool_result.output if tool_result.success else f"Error: {tool_result.error}"
-                )
+                raw_output: str | list[dict[str, Any]] = _tool_observation(tool_result)
                 tool_output: str | list[dict[str, Any]]
                 if isinstance(raw_output, list):
                     tool_output = raw_output
@@ -2562,9 +2585,7 @@ async def run_agent_graph(
                 call_summaries: list[str] = []
                 tool_outputs: list[str] = []
                 for _idx2, (call, result) in enumerate(zip(approved_calls, results)):
-                    raw_out: str | list[dict[str, Any]] = (
-                        result.output if result.success else f"Error: {result.error}"
-                    )
+                    raw_out: str | list[dict[str, Any]] = _tool_observation(result)
                     output: str | list[dict[str, Any]]
                     if isinstance(raw_out, list):
                         output = raw_out

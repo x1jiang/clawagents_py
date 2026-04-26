@@ -9,6 +9,44 @@ from clawagents.tools.registry import ToolRegistry, ToolResult
 ToolProfileName = Literal["minimal", "read-only", "write", "full"]
 
 _DISCOVERY_TOOLS = {"tool_discover", "tool_describe", "tool_profile"}
+_SEARCH_STOP_WORDS = {"a", "an", "and", "for", "in", "of", "or", "the", "to", "with"}
+
+
+def _normalize_search_text(value: str) -> str:
+    return "".join(" " if ch in "_-" else ch.lower() for ch in value)
+
+
+def _query_tokens(query: str) -> list[str]:
+    tokens: list[str] = []
+    current: list[str] = []
+    for ch in _normalize_search_text(query):
+        if ch.isalnum():
+            current.append(ch)
+        elif current:
+            token = "".join(current)
+            if token and token not in _SEARCH_STOP_WORDS:
+                tokens.append(token)
+            current = []
+    if current:
+        token = "".join(current)
+        if token and token not in _SEARCH_STOP_WORDS:
+            tokens.append(token)
+    return tokens
+
+
+def _matches_tool_query(tool: Any, query: str) -> bool:
+    q = _normalize_search_text(query).strip()
+    if not q:
+        return True
+    haystack = _normalize_search_text(" ".join([
+        tool.name,
+        tool.description,
+        *_tool_keywords(tool),
+    ]))
+    if q in haystack:
+        return True
+    tokens = _query_tokens(q)
+    return bool(tokens) and all(token in haystack for token in tokens)
 
 
 def _tool_keywords(tool: Any) -> list[str]:
@@ -59,12 +97,7 @@ class _ToolDiscover:
             if profile != "minimal" and tool.name in _DISCOVERY_TOOLS:
                 continue
             keywords = _tool_keywords(tool)
-            if (
-                query
-                and query not in tool.name.lower()
-                and query not in tool.description.lower()
-                and not any(query in keyword.lower() for keyword in keywords)
-            ):
+            if not _matches_tool_query(tool, query):
                 continue
             row = {"name": tool.name, "description": tool.description}
             if keywords:

@@ -471,6 +471,9 @@ def create_claw_agent(
     mcp_servers: Optional[List[Any]] = None,
     handoffs: Optional[List[Handoff]] = None,
     name: Optional[str] = None,
+    tool_discovery: bool = True,
+    tool_discovery_max_results: int = 25,
+    tool_discovery_max_profile: str = "full",
 ) -> ClawAgent:
     """
     Create a ClawAgent with full-stack capabilities.
@@ -528,6 +531,9 @@ def create_claw_agent(
                           "env_override" — env var takes precedence (default),
                           "default"      — constructor argument takes precedence,
                           "fallback"     — env var is last resort.
+        tool_discovery: Register compact tool discovery helpers by default.
+        tool_discovery_max_results: Default result cap for tool_discover.
+        tool_discovery_max_profile: Maximum profile exposed through discovery helpers.
 
     Examples:
         # Zero-config (uses env vars)
@@ -802,6 +808,17 @@ def create_claw_agent(
                     pass
 
         atexit.register(_shutdown_mcp)
+
+    # Compact discovery is registered last so it can see user, subagent, and MCP tools.
+    if tool_discovery:
+        from clawagents.tools.catalog import create_tool_discovery_tools
+        for discovery_tool in create_tool_discovery_tools(
+            registry,
+            max_results=tool_discovery_max_results,
+            max_profile=tool_discovery_max_profile,  # type: ignore[arg-type]
+        ):
+            if registry.get(discovery_tool.name) is None:
+                registry.register(discovery_tool)
 
     return agent
 
