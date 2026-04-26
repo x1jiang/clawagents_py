@@ -627,11 +627,11 @@ def create_claw_agent(
     # module import + sandbox init deferred to first execute()
     from clawagents.tools.registry import LazyTool
 
-    def _make_lazy_sb_tool(name, desc, params, module_path, factory_fn, sb_ref=sb):
+    def _make_lazy_sb_tool(name, desc, params, module_path, factory_fn, sb_ref=sb, keywords=None):
         """Create a LazyTool that calls a factory function with the sandbox on first use."""
         class _SbLazyTool(LazyTool):
             def __init__(self):
-                super().__init__(name, desc, params, module_path, "")
+                super().__init__(name, desc, params, module_path, "", keywords)
             async def execute(self, args):
                 if self._resolved is None:
                     import importlib
@@ -649,6 +649,7 @@ def create_claw_agent(
         registry.register(_make_lazy_sb_tool(
             spec.name, spec.description, spec.parameters,
             "clawagents.tools.filesystem", "create_filesystem_tools",
+            keywords=getattr(spec, "keywords", []),
         ))
 
     from clawagents.tools.exec import create_exec_tools
@@ -656,6 +657,7 @@ def create_claw_agent(
         registry.register(_make_lazy_sb_tool(
             spec.name, spec.description, spec.parameters,
             "clawagents.tools.exec", "create_exec_tools",
+            keywords=getattr(spec, "keywords", []),
         ))
 
     from clawagents.tools.advanced_fs import create_advanced_fs_tools
@@ -663,13 +665,14 @@ def create_claw_agent(
         registry.register(_make_lazy_sb_tool(
             spec.name, spec.description, spec.parameters,
             "clawagents.tools.advanced_fs", "create_advanced_fs_tools",
+            keywords=getattr(spec, "keywords", []),
         ))
 
     class _LazyWebFetch(LazyTool):
         def __init__(self):
             from clawagents.tools.web import web_tools as _wt
             spec = next(t for t in _wt if t.name == "web_fetch")
-            super().__init__(spec.name, spec.description, spec.parameters, "clawagents.tools.web", "")
+            super().__init__(spec.name, spec.description, spec.parameters, "clawagents.tools.web", "", getattr(spec, "keywords", []))
         async def execute(self, args):
             if self._resolved is None:
                 from clawagents.tools.web import web_tools as _wt

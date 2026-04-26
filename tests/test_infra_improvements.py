@@ -7,6 +7,7 @@ import pytest
 
 from clawagents.eval import run_agent_environment
 from clawagents.explorer import create_explorer_tools
+from clawagents.agent import create_claw_agent
 from clawagents.graph.agent_loop import AgentState
 from clawagents.providers.llm import LLMMessage
 from clawagents.rl import Trajectory, to_next_state_transitions
@@ -46,6 +47,13 @@ class BadlyNamedSearchTool:
         return ToolResult(True, "ok")
 
 
+class FakeLLM:
+    name = "fake"
+
+    async def chat(self, *args, **kwargs):
+        raise AssertionError("chat should not be called")
+
+
 @pytest.mark.asyncio
 async def test_compact_tool_discovery_exposes_searchable_catalog_and_profiles():
     registry = ToolRegistry()
@@ -81,6 +89,23 @@ async def test_compact_tool_discovery_exposes_searchable_catalog_and_profiles():
         bounded.register(tool)
     denied = await bounded.execute_tool("tool_describe", {"name": "write_file"})
     assert denied.success is False
+
+
+@pytest.mark.asyncio
+async def test_agent_factory_lazy_tools_preserve_discovery_keywords():
+    agent = create_claw_agent(FakeLLM(), memory=[], skills=[])
+    for tool in create_tool_discovery_tools(agent.tools):
+        agent.tools.register(tool)
+
+    result = await agent.tools.execute_tool(
+        "tool_discover",
+        {"query": "find text", "profile": "read-only"},
+    )
+
+    assert result.success is True
+    found = json.loads(str(result.output))
+    assert found[0]["name"] == "grep"
+    assert "find text" in found[0]["keywords"]
 
 
 def test_sqlite_result_cache_persists_successful_tool_results(tmp_path: Path):

@@ -184,10 +184,12 @@ class LazyTool:
         parameters: Dict[str, Dict[str, Any]],
         module_path: str,
         class_name: str,
+        keywords: Optional[List[str]] = None,
     ):
         self.name = name
         self.description = description
         self.parameters = parameters
+        self.keywords = list(keywords or [])
         self._module_path = module_path
         self._class_name = class_name
         self._resolved: Optional[Tool] = None
