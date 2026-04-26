@@ -159,9 +159,13 @@ def truncate_tool_output(output: str | list[dict[str, Any]], max_chars: int = MA
         return output
     if len(output) <= max_chars:
         return output
-    head = output[:_TRUNCATION_HEAD]
-    tail = output[-_TRUNCATION_TAIL:]
-    dropped = len(output) - _TRUNCATION_HEAD - _TRUNCATION_TAIL
+    marker_budget = 40
+    payload_budget = max(20, max_chars - marker_budget)
+    head_chars = min(_TRUNCATION_HEAD, max(1, int(payload_budget * 0.7)))
+    tail_chars = min(_TRUNCATION_TAIL, max(1, payload_budget - head_chars))
+    head = output[:head_chars]
+    tail = output[-tail_chars:]
+    dropped = max(0, len(output) - len(head) - len(tail))
     return f"{head}\n\n[… truncated {dropped} characters …]\n\n{tail}"
 
 
@@ -243,6 +247,22 @@ class ToolRegistry:
 
     def list(self) -> List[Tool]:
         return list(self.tools.values())
+
+    def inspect_tools(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.parameters,
+                "cacheable": getattr(tool, "cacheable", False) is True,
+                "parallel_safe": _is_parallel_safe(tool),
+                "path_scoped_arg": (
+                    getattr(tool, "path_scoped_arg", None)
+                    or _DEFAULT_PATH_SCOPED_ARGS.get(tool.name)
+                ),
+            }
+            for tool in self.list()
+        ]
 
     def describe_for_llm(self) -> str:
         if self._description_cache is not None:

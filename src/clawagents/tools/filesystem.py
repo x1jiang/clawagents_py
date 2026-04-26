@@ -268,13 +268,23 @@ class GrepTool:
         try:
             content = await sb.read_file(file_path)
             lines = content.splitlines()
-            matches = [{"line": line, "num": i + 1} for i, line in enumerate(lines) if pattern in line]
+            max_matches = 100
+            matches = []
+            truncated = False
+            for i, line in enumerate(lines):
+                if pattern not in line:
+                    continue
+                if len(matches) >= max_matches:
+                    truncated = True
+                    break
+                matches.append({"line": line, "num": i + 1})
 
             if not matches:
                 return ToolResult(success=True, output=f'No matches for "{pattern}" in {file_path}')
 
             output = "\n".join([f"{str(m['num']).rjust(4)}: {m['line']}" for m in matches])
-            return ToolResult(success=True, output=f"{len(matches)} match(es) in {file_path}:\n{output}")
+            suffix = f" (truncated at {max_matches})" if truncated else ""
+            return ToolResult(success=True, output=f"{len(matches)} match(es) in {file_path}{suffix}:\n{output}")
         except Exception as e:
             return ToolResult(success=False, output="", error=f"grep failed: {str(e)}")
 

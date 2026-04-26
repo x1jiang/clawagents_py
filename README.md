@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.6.2-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.6.3-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -26,7 +26,7 @@ pip install clawagents[anthropic]   # + Anthropic Claude support
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 6.6.2** — Latest stable release (April 2026). Performance and release hardening for the Hermes-parity line: local async filesystem work no longer blocks the event loop, trajectory summaries append instead of rewriting the full run log, persisted sessions preload a bounded history by default, and the TypeScript sibling caps large diffs and single-file grep output. **772 Python tests** pass; **492 TypeScript tests** pass, `tsc --noEmit` clean. See [Changelog](#changelog).
+> **Version 6.6.3** — Latest stable release (April 2026). Performance and release hardening for the Hermes-parity line: local async filesystem work no longer blocks the event loop, trajectory summaries append instead of rewriting the full run log, persisted sessions preload a bounded history by default, and the TypeScript sibling caps large diffs and single-file grep output. **778 Python tests** pass; **497 TypeScript tests** pass plus **49 parity checks**, `tsc --noEmit` clean. Real `.env` smoke tests passed against Gemini and OpenAI, including read-only tool use and subagent delegation. See [Changelog](#changelog).
 
 ---
 
@@ -450,6 +450,7 @@ python run_agent.py              # 6. Or use the generated script
 |:---|:---|
 | `clawagents --init` | Scaffold a starter project: `.env` (config template), `run_agent.py` (starter script with 5 provider options), `AGENTS.md` (memory file). Skips existing files. |
 | `clawagents --doctor` | Check configuration health: `.env` discovery, API keys, active model, LLM settings, PTRL flags, local endpoint reachability, trajectory history, `AGENTS.md` presence. |
+| `clawagents --tools [--json]` | Inspect built-in tool schemas without starting a model client. Useful for release checks and native-tool schema debugging. |
 | `clawagents --task "..."` | Run a single task. Prints a startup banner (`provider=X model=Y env=Z ptrl=...`), executes the agent, prints the result to stdout. |
 | `clawagents --trajectory [N]` | Inspect the last N run summaries (default: 1). Shows run ID, model, task, duration, turns, tool calls, score, quality, failure breakdown, verified score, and judge verdict. Requires `CLAW_TRAJECTORY=1`. |
 | `clawagents --serve [--port N]` | Start the HTTP gateway server (default port 3000). Endpoints: `POST /chat`, `POST /chat/stream` (SSE), `WS /ws`, `GET /queue`, `GET /health`. |
@@ -702,6 +703,7 @@ Every agent includes these — no setup needed:
 | `think` | Structured reasoning without side effects |
 | `web_fetch` | URL fetching with HTML stripping (50KB cap) |
 | `write_todos` | Plan tasks as a checklist |
+| `tool_program` | Bounded read-only multi-tool sequence with `${step.output}` substitutions |
 | `update_todo` | Mark plan items complete |
 | `task` | Delegate to a sub-agent with isolated context |
 | `ask_user` | Interactive stdin-based user input |
@@ -1438,7 +1440,7 @@ All environment variables are **optional**. They serve as defaults when the corr
 # Install with dev dependencies
 pip install -e ".[dev]"
 
-# Run all tests (full suite passes on v6.6.2)
+# Run all tests (full suite passes on v6.6.3)
 python -m pytest -q
 
 # Hermetic runner — exactly the environment CI uses (pinned xdist=4,
@@ -1448,7 +1450,7 @@ bash scripts/run_tests.sh
 # Run benchmarks (requires API keys)
 python -m pytest tests/ -v -m benchmark
 
-# Static type check (clean, exit 0 on v6.6.2)
+# Static type check (clean, exit 0 on v6.6.3)
 python -m mypy
 ```
 
@@ -1466,11 +1468,13 @@ landed in v6.5.0/v6.6.0 — `tests/test_subagent_depth.py`,
 
 ## Changelog
 
-### v6.6.2 — Efficiency and release hardening (April 2026)
+### v6.6.3 — Efficiency and release hardening (April 2026)
 
 Patch release for the v6.6 line. Test totals after this release:
-**Python 772 passed, 3 skipped**; **TypeScript 492 passed, 4 skipped**;
-`tsc --noEmit` clean.
+**Python 778 passed, 3 skipped**; **TypeScript 497 passed, 4 skipped**
+plus **49 parity checks**; `tsc --noEmit` clean. Real `.env` smoke tests
+passed for Gemini and OpenAI, including read-only `read_file` tool use and
+`task` subagent delegation in both ports.
 
 - **Non-blocking local filesystem backend** — async `LocalBackend` file,
   directory, and stat operations now offload synchronous pathlib work with

@@ -642,44 +642,34 @@ def create_claw_agent(
                 return await self._resolved.execute(args)
         return _SbLazyTool()
 
-    _lazy_fs_schemas = [
-        ("ls", "List directory contents with size and modification time", {"path": {"type": "string", "description": "Directory path (default: cwd)"}}, "create_filesystem_tools"),
-        ("read_file", "Read a file with line numbers and optional pagination", {"path": {"type": "string", "description": "File path to read", "required": True}, "offset": {"type": "number", "description": "Start line (0-based)"}, "limit": {"type": "number", "description": "Max lines to return"}}, "create_filesystem_tools"),
-        ("write_file", "Write content to a file (creates dirs automatically)", {"path": {"type": "string", "description": "File path", "required": True}, "content": {"type": "string", "description": "Content to write", "required": True}}, "create_filesystem_tools"),
-        ("edit_file", "Replace text in a file", {"path": {"type": "string", "description": "Path to the file to edit", "required": True}, "target": {"type": "string", "description": "The exact block of text to replace", "required": True}, "replacement": {"type": "string", "description": "The new text", "required": True}, "replace_all": {"type": "boolean", "description": "Replace all occurrences (default: false, requires unique match)"}}, "create_filesystem_tools"),
-        ("grep", "Search for text/regex in files", {"path": {"type": "string", "description": "File or directory to search", "required": True}, "pattern": {"type": "string", "description": "Text pattern to search for", "required": True}, "glob_filter": {"type": "string", "description": "Glob pattern to filter files (e.g., '*.py'). Only used when path is a directory."}, "recursive": {"type": "boolean", "description": "Search recursively in subdirectories. Default: false"}}, "create_filesystem_tools"),
-        ("glob", "Find files matching a glob pattern", {"pattern": {"type": "string", "description": "Glob pattern", "required": True}, "path": {"type": "string", "description": "Base directory"}}, "create_filesystem_tools"),
-    ]
-    for name, desc, params, factory_fn in _lazy_fs_schemas:
-        registry.register(_make_lazy_sb_tool(name, desc, params, "clawagents.tools.filesystem", factory_fn))
+    # Schema is copied from the concrete tool implementation so lazy/native
+    # schemas cannot drift from the backing tools.
+    from clawagents.tools.filesystem import create_filesystem_tools
+    for spec in create_filesystem_tools(sb):
+        registry.register(_make_lazy_sb_tool(
+            spec.name, spec.description, spec.parameters,
+            "clawagents.tools.filesystem", "create_filesystem_tools",
+        ))
 
-    registry.register(_make_lazy_sb_tool(
-        "execute", "Execute a shell command and return its output.",
-        {"command": {"type": "string", "description": "The shell command to execute", "required": True}, "timeout": {"type": "number", "description": "Timeout in milliseconds. Default: 30000"}},
-        "clawagents.tools.exec", "create_exec_tools",
-    ))
+    from clawagents.tools.exec import create_exec_tools
+    for spec in create_exec_tools(sb):
+        registry.register(_make_lazy_sb_tool(
+            spec.name, spec.description, spec.parameters,
+            "clawagents.tools.exec", "create_exec_tools",
+        ))
 
-    _lazy_adv_schemas = [
-        ("tree", "Show recursive directory tree", {"path": {"type": "string", "description": "Root directory. Default: current directory"}, "max_depth": {"type": "number", "description": "Max depth to recurse. Default: 4"}}, "create_advanced_fs_tools"),
-        ("diff", "Unified diff between two files", {"file_a": {"type": "string", "description": "First file", "required": True}, "file_b": {"type": "string", "description": "Second file", "required": True}}, "create_advanced_fs_tools"),
-        ("insert_lines", "Insert text at a specific line", {"path": {"type": "string", "description": "File path", "required": True}, "line": {"type": "number", "description": "Line number", "required": True}, "content": {"type": "string", "description": "Content to insert", "required": True}}, "create_advanced_fs_tools"),
-    ]
-    for name, desc, params, factory_fn in _lazy_adv_schemas:
-        registry.register(_make_lazy_sb_tool(name, desc, params, "clawagents.tools.advanced_fs", factory_fn))
+    from clawagents.tools.advanced_fs import create_advanced_fs_tools
+    for spec in create_advanced_fs_tools(sb):
+        registry.register(_make_lazy_sb_tool(
+            spec.name, spec.description, spec.parameters,
+            "clawagents.tools.advanced_fs", "create_advanced_fs_tools",
+        ))
 
-    registry.register(_make_lazy_sb_tool(
-        "web_fetch", "Fetch a URL and return its content (HTML stripped to text, 50KB cap)",
-        {"url": {"type": "string", "description": "URL to fetch", "required": True}},
-        "clawagents.tools.web", "create_web_tools" if False else "web_tools",
-    ))
-
-    # web_tools is a list, not a factory — handle it differently
-    registry.tools.pop("web_fetch", None)  # remove the broken one
     class _LazyWebFetch(LazyTool):
         def __init__(self):
-            super().__init__("web_fetch", "Fetch a URL and return its content (HTML stripped, 50KB cap)",
-                             {"url": {"type": "string", "description": "URL to fetch", "required": True}},
-                             "clawagents.tools.web", "")
+            from clawagents.tools.web import web_tools as _wt
+            spec = next(t for t in _wt if t.name == "web_fetch")
+            super().__init__(spec.name, spec.description, spec.parameters, "clawagents.tools.web", "")
         async def execute(self, args):
             if self._resolved is None:
                 from clawagents.tools.web import web_tools as _wt
@@ -759,6 +749,9 @@ def create_claw_agent(
         advisor_llm=resolved_advisor_llm, advisor_max_calls=resolved_advisor_max_calls,
         handoffs=handoffs, name=name,
     )
+
+    from clawagents.tools.tool_program import create_tool_program_tool
+    registry.register(create_tool_program_tool(registry))
 
     # ── Sub-agent tool (always available) ──────────────────────────────
     from clawagents.tools.subagent import create_task_tool

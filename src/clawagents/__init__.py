@@ -1,4 +1,4 @@
-__version__ = "6.6.2"
+__version__ = "6.6.3"
 
 from clawagents.agent import ClawAgent, create_claw_agent
 from clawagents.graph.agent_loop import (
@@ -63,6 +63,22 @@ from clawagents.handoffs import (
 from clawagents.handoff_filters import remove_all_tools, nest_handoff_history
 from clawagents.function_tool import function_tool
 from clawagents.retry import RetryPolicy, DEFAULT_RETRY_POLICY
+from clawagents.eval import (
+    Message,
+    TextEnvironment,
+    TextEvaluationResult,
+    TextEvaluationStep,
+    run_text_environment,
+)
+from clawagents.tools.tool_program import (
+    ToolProgramTool,
+    create_tool_program_tool,
+)
+from clawagents.sandbox.manifest import (
+    SandboxManifest,
+    SandboxManifestEntry,
+    normalize_sandbox_manifest,
+)
 
 # ── Slash-command registry (v6.5) ──────────────────────────────────────
 from clawagents.commands import (

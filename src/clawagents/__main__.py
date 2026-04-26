@@ -285,12 +285,57 @@ def cmd_doctor():
         _check("Messaging channels", True,
                "none configured (set TELEGRAM_BOT_TOKEN, WHATSAPP_AUTH_DIR, or SIGNAL_ACCOUNT)")
 
+    catalog = _build_builtin_tool_catalog()
+    _check("Tool catalog", bool(catalog), f"{len(catalog)} built-in tools inspectable")
+
     # Summary
     sys.stderr.write("\n" + "=" * 40 + "\n")
     if issues == 0:
         sys.stderr.write("✓ All checks passed. Ready to run.\n\n")
     else:
         sys.stderr.write(f"✗ {issues} issue(s) found. Fix the items above.\n\n")
+
+
+def _build_builtin_tool_catalog() -> list[dict[str, Any]]:
+    from clawagents.sandbox.local import LocalBackend
+    from clawagents.tools.registry import ToolRegistry
+    from clawagents.tools.filesystem import create_filesystem_tools
+    from clawagents.tools.exec import create_exec_tools
+    from clawagents.tools.advanced_fs import create_advanced_fs_tools
+    from clawagents.tools.web import web_tools
+    from clawagents.tools.todolist import todolist_tools
+    from clawagents.tools.think import think_tools
+    from clawagents.tools.interactive import interactive_tools
+    from clawagents.tools.tool_program import create_tool_program_tool
+
+    sb = LocalBackend()
+    registry = ToolRegistry()
+    for tool in [
+        *todolist_tools,
+        *think_tools,
+        *interactive_tools,
+        *create_filesystem_tools(sb),
+        *create_exec_tools(sb),
+        *create_advanced_fs_tools(sb),
+        *[t for t in web_tools if t.name == "web_fetch"],
+    ]:
+        registry.register(tool)
+    registry.register(create_tool_program_tool(registry))
+    return registry.inspect_tools()
+
+
+def cmd_tools(json_output: bool = False):
+    catalog = _build_builtin_tool_catalog()
+    if json_output:
+        print(json.dumps(catalog, indent=2))
+        return
+    for tool in catalog:
+        params = ", ".join(
+            f"{name}{'*' if spec.get('required') else ''}"
+            for name, spec in tool["parameters"].items()
+        )
+        suffix = f" ({params})" if params else ""
+        print(f"{tool['name']}{suffix} — {tool['description']}")
 
 
 # ─── Task Runner ──────────────────────────────────────────────────────────
@@ -518,6 +563,7 @@ def main():
             Examples:
               clawagents --init                    Scaffold a new project (.env, run_agent.py, AGENTS.md)
               clawagents --doctor                  Check configuration health
+              clawagents --tools [--json]          Inspect built-in tool schemas
               clawagents --task "List all files"   Run a task directly from the command line
               clawagents --trajectory              Show last run's trajectory summary
               clawagents --trajectory 5            Show last 5 runs
@@ -537,6 +583,8 @@ def main():
     )
     parser.add_argument("--init", action="store_true", help="Scaffold a starter project in the current directory")
     parser.add_argument("--doctor", action="store_true", help="Check configuration health")
+    parser.add_argument("--tools", action="store_true", help="Inspect built-in tool schemas")
+    parser.add_argument("--json", action="store_true", help="Print machine-readable JSON for commands that support it")
     parser.add_argument("--task", type=str, help="Run a single task from CLI")
     parser.add_argument("--trajectory", nargs="?", const=1, type=int, metavar="N", help="Show last N run summaries (default: 1)")
     parser.add_argument("--serve", action="store_true", help="Start the HTTP gateway server")
@@ -570,6 +618,8 @@ def main():
         cmd_init()
     elif args.doctor:
         cmd_doctor()
+    elif args.tools:
+        cmd_tools(json_output=args.json)
     elif args.trajectory is not None:
         cmd_trajectory(args.trajectory)
     elif args.task:
