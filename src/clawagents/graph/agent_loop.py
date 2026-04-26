@@ -2439,10 +2439,6 @@ async def run_agent_graph(
                     approved_calls = list(tool_calls)
                     _approved_orig_indices = list(range(len(tool_calls)))
 
-                for call in approved_calls:
-                    emit("tool_call", {"name": call.tool_name})
-                loop_tracker.record_batch(approved_calls)
-
                 # Resolve a stable call_id per approved call (prefer native tc id).
                 # Index native_tool_call_objects by ORIGINAL tool_calls index, not
                 # approved_calls index — those diverge when before_tool rejects a call.
@@ -2456,6 +2452,37 @@ async def run_agent_graph(
                     _approved_call_ids.append(
                         (_ntc.tool_call_id if _ntc else None) or _c.tool_name
                     )
+
+                _runnable_calls: list[ParsedToolCall] = []
+                _runnable_call_ids: list[str] = []
+                for _c, _cid in zip(approved_calls, _approved_call_ids):
+                    approval_state = run_context.is_tool_approved(_cid, tool_name=_c.tool_name)
+                    if approval_state is False:
+                        rec = run_context.get_approval(_cid, tool_name=_c.tool_name)
+                        reason = (rec.reason if rec else None) or "rejected via RunContext"
+                        emit("tool_skipped", {"name": _c.tool_name, "reason": reason})
+                        messages.append(LLMMessage(
+                            role="user",
+                            content=f"[Tool Skipped] {_c.tool_name} was rejected: {reason}",
+                        ))
+                        continue
+                    if approval_state is None:
+                        emit("approval_required", {"name": _c.tool_name, "id": _cid})
+                        _emit_typed("approval_required", {
+                            "tool_name": _c.tool_name,
+                            "call_id": _cid,
+                            "args": _c.args,
+                        })
+                    _runnable_calls.append(_c)
+                    _runnable_call_ids.append(_cid)
+                approved_calls = _runnable_calls
+                _approved_call_ids = _runnable_call_ids
+                if not approved_calls:
+                    continue
+
+                for call in approved_calls:
+                    emit("tool_call", {"name": call.tool_name})
+                loop_tracker.record_batch(approved_calls)
 
                 for _c, _cid in zip(approved_calls, _approved_call_ids):
                     _emit_typed("tool_started", {

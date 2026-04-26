@@ -35,7 +35,15 @@ for candidate in \
 done
 
 if [ -z "$VENV" ]; then
-    PYTHON="${PYTHON:-python3}"
+    if [ -z "${PYTHON:-}" ]; then
+        for candidate in python3 python; do
+            if command -v "$candidate" >/dev/null && "$candidate" -c "import pytest, xdist" 2>/dev/null; then
+                PYTHON="$candidate"
+                break
+            fi
+        done
+        PYTHON="${PYTHON:-python3}"
+    fi
     if ! command -v "$PYTHON" >/dev/null; then
         echo "error: no virtualenv found and PYTHON=$PYTHON is not on PATH" >&2
         exit 1
@@ -51,6 +59,9 @@ if ! "$PYTHON" -c "import xdist" 2>/dev/null; then
 fi
 
 # ── Hermetic environment ────────────────────────────────────────────────────
+# Pin xdist to a fixed worker count so local runs match CI.
+WORKERS="${CLAW_TEST_WORKERS:-4}"
+
 # Strip any credential-shaped env var so leaked secrets cannot influence tests.
 while IFS='=' read -r name _; do
     case "$name" in
@@ -75,9 +86,6 @@ export LANG=C.UTF-8
 export LC_ALL=C.UTF-8
 export PYTHONHASHSEED=0
 
-# Pin xdist to a fixed worker count so local runs match CI.
-WORKERS="${CLAW_TEST_WORKERS:-4}"
-
 cd "$REPO_ROOT"
 
 ARGS=("$@")
@@ -91,4 +99,4 @@ exec "$PYTHON" -m pytest \
     --ignore=tests/integration \
     --ignore=tests/e2e \
     -m "not integration" \
-    "${ARGS[@]}"
+    ${ARGS[@]+"${ARGS[@]}"}

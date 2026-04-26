@@ -18,8 +18,22 @@ from __future__ import annotations
 import http.server
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
+
+_DEFAULT_UPSTREAM_BASE_URLS = {
+    "openai": "https://api.openai.com/v1",
+    "anthropic": "https://api.anthropic.com",
+}
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirectHandler)
 
 
 class _ProxyHandler(http.server.BaseHTTPRequestHandler):
@@ -27,34 +41,87 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     # Set by CredentialProxy before the server starts
     credentials: dict[str, str] = {}
+    upstream_base_urls: dict[str, str] = _DEFAULT_UPSTREAM_BASE_URLS
 
     # ── suppress default request logging ──────────────────────────────────
     def log_message(self, fmt: str, *args: Any) -> None:  # noqa: D102
         pass
 
+    def _send_plain(self, status: int, text: str) -> None:
+        body_bytes = text.encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body_bytes)))
+        self.end_headers()
+        self.wfile.write(body_bytes)
+
+    def _select_upstream(self) -> str:
+        if self.headers.get("anthropic-version") or self.headers.get("x-api-key"):
+            return self.upstream_base_urls.get("anthropic", _DEFAULT_UPSTREAM_BASE_URLS["anthropic"])
+        return self.upstream_base_urls.get("openai", _DEFAULT_UPSTREAM_BASE_URLS["openai"])
+
+    def _target_url(self) -> str:
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.scheme and parsed.netloc:
+            return self.path
+
+        base = self._select_upstream().rstrip("/")
+        base_parsed = urllib.parse.urlparse(base)
+        path = self.path if self.path.startswith("/") else f"/{self.path}"
+        base_path = base_parsed.path.rstrip("/")
+        if base_path and path.startswith(f"{base_path}/"):
+            return urllib.parse.urlunparse((
+                base_parsed.scheme, base_parsed.netloc, path, "", "", "",
+            ))
+        return urllib.parse.urljoin(f"{base}/", path.lstrip("/"))
+
+    def _is_allowed_target(self, target: str) -> bool:
+        parsed = urllib.parse.urlparse(target)
+        origin = (parsed.scheme, parsed.netloc)
+        return origin in {
+            (
+                urllib.parse.urlparse(url).scheme,
+                urllib.parse.urlparse(url).netloc,
+            )
+            for url in self.upstream_base_urls.values()
+        }
+
+    def _credential_applies_to_target(self, header_name: str, target: str) -> bool:
+        host = urllib.parse.urlparse(target).hostname or ""
+        lower_name = header_name.lower()
+        if "anthropic" in host:
+            return lower_name == "x-api-key"
+        if "openai" in host:
+            return lower_name == "authorization"
+        return True
+
     def _forward(self, body: bytes | None = None) -> None:
-        target = self.path  # proxy receives absolute URLs or path-only
-
-        # Build the upstream request
-        req = urllib.request.Request(target)
-        req.method = self.command
-
-        # Copy headers from client, then inject credentials
-        for key, value in self.headers.items():
-            lower = key.lower()
-            # skip hop-by-hop headers
-            if lower in ("host", "content-length", "transfer-encoding", "connection"):
-                continue
-            req.add_header(key, value)
-
-        for header_name, header_value in self.credentials.items():
-            req.add_header(header_name, header_value)
-
-        if body:
-            req.data = body
-
         try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
+            target = self._target_url()
+            if not self._is_allowed_target(target):
+                self._send_plain(403, f"Refusing to proxy untrusted upstream: {target}")
+                return
+
+            # Build the upstream request
+            req = urllib.request.Request(target)
+            req.method = self.command
+
+            # Copy headers from client, then inject credentials
+            for key, value in self.headers.items():
+                lower = key.lower()
+                # skip hop-by-hop headers
+                if lower in ("host", "content-length", "transfer-encoding", "connection"):
+                    continue
+                req.add_header(key, value)
+
+            for header_name, header_value in self.credentials.items():
+                if self._credential_applies_to_target(header_name, target):
+                    req.add_header(header_name, header_value)
+
+            if body:
+                req.data = body
+
+            with _NO_REDIRECT_OPENER.open(req, timeout=60) as resp:
                 self.send_response(resp.status)
                 for key, value in resp.headers.items():
                     lower = key.lower()
@@ -123,10 +190,12 @@ class CredentialProxy:
         credentials: dict[str, str],
         host: str = "127.0.0.1",
         port: int = 0,
+        upstream_base_urls: dict[str, str] | None = None,
     ) -> None:
         self._credentials = dict(credentials)
         self._host = host
         self._port = port
+        self._upstream_base_urls = dict(upstream_base_urls or _DEFAULT_UPSTREAM_BASE_URLS)
         self._server: http.server.HTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._url: str | None = None
@@ -145,6 +214,7 @@ class CredentialProxy:
 
         class _BoundHandler(_ProxyHandler):
             credentials = creds
+            upstream_base_urls = self._upstream_base_urls
 
         self._server = http.server.HTTPServer((self._host, self._port), _BoundHandler)
         actual_port = self._server.server_address[1]

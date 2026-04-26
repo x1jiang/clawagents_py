@@ -537,3 +537,21 @@ class TestLazyToolProvisioning:
         assert "ls" in tool_names
         assert "grep" in tool_names
         assert "web_fetch" in tool_names
+
+    def test_factory_lazy_tool_schemas_match_implementations(self):
+        from clawagents.agent import create_claw_agent
+        from clawagents.sandbox.local import LocalBackend
+        from clawagents.tools.advanced_fs import create_advanced_fs_tools
+        from clawagents.tools.filesystem import create_filesystem_tools
+
+        agent = create_claw_agent("gpt-5-nano")
+        by_name = {t.name: t for t in agent.tools.list()}
+        real_tools = {
+            t.name: t for t in [
+                *create_filesystem_tools(LocalBackend()),
+                *create_advanced_fs_tools(LocalBackend()),
+            ]
+        }
+
+        for name in ("edit_file", "grep", "tree"):
+            assert by_name[name].parameters == real_tools[name].parameters

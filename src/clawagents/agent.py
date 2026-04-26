@@ -638,8 +638,8 @@ def create_claw_agent(
         ("ls", "List directory contents with size and modification time", {"path": {"type": "string", "description": "Directory path (default: cwd)"}}, "create_filesystem_tools"),
         ("read_file", "Read a file with line numbers and optional pagination", {"path": {"type": "string", "description": "File path to read", "required": True}, "offset": {"type": "number", "description": "Start line (0-based)"}, "limit": {"type": "number", "description": "Max lines to return"}}, "create_filesystem_tools"),
         ("write_file", "Write content to a file (creates dirs automatically)", {"path": {"type": "string", "description": "File path", "required": True}, "content": {"type": "string", "description": "Content to write", "required": True}}, "create_filesystem_tools"),
-        ("edit_file", "Replace text in a file", {"path": {"type": "string", "description": "File path", "required": True}, "old_text": {"type": "string", "description": "Text to find", "required": True}, "new_text": {"type": "string", "description": "Replacement", "required": True}}, "create_filesystem_tools"),
-        ("grep", "Search for text/regex in files", {"pattern": {"type": "string", "description": "Search pattern", "required": True}, "path": {"type": "string", "description": "File or directory"}, "include": {"type": "string", "description": "Glob filter"}}, "create_filesystem_tools"),
+        ("edit_file", "Replace text in a file", {"path": {"type": "string", "description": "Path to the file to edit", "required": True}, "target": {"type": "string", "description": "The exact block of text to replace", "required": True}, "replacement": {"type": "string", "description": "The new text", "required": True}, "replace_all": {"type": "boolean", "description": "Replace all occurrences (default: false, requires unique match)"}}, "create_filesystem_tools"),
+        ("grep", "Search for text/regex in files", {"path": {"type": "string", "description": "File or directory to search", "required": True}, "pattern": {"type": "string", "description": "Text pattern to search for", "required": True}, "glob_filter": {"type": "string", "description": "Glob pattern to filter files (e.g., '*.py'). Only used when path is a directory."}, "recursive": {"type": "boolean", "description": "Search recursively in subdirectories. Default: false"}}, "create_filesystem_tools"),
         ("glob", "Find files matching a glob pattern", {"pattern": {"type": "string", "description": "Glob pattern", "required": True}, "path": {"type": "string", "description": "Base directory"}}, "create_filesystem_tools"),
     ]
     for name, desc, params, factory_fn in _lazy_fs_schemas:
@@ -652,7 +652,7 @@ def create_claw_agent(
     ))
 
     _lazy_adv_schemas = [
-        ("tree", "Show recursive directory tree", {"path": {"type": "string", "description": "Root directory"}, "depth": {"type": "number", "description": "Max depth"}}, "create_advanced_fs_tools"),
+        ("tree", "Show recursive directory tree", {"path": {"type": "string", "description": "Root directory. Default: current directory"}, "max_depth": {"type": "number", "description": "Max depth to recurse. Default: 4"}}, "create_advanced_fs_tools"),
         ("diff", "Unified diff between two files", {"file_a": {"type": "string", "description": "First file", "required": True}, "file_b": {"type": "string", "description": "Second file", "required": True}}, "create_advanced_fs_tools"),
         ("insert_lines", "Insert text at a specific line", {"path": {"type": "string", "description": "File path", "required": True}, "line": {"type": "number", "description": "Line number", "required": True}, "content": {"type": "string", "description": "Content to insert", "required": True}}, "create_advanced_fs_tools"),
     ]

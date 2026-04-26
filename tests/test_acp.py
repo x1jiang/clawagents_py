@@ -331,6 +331,28 @@ def test_server_run_prompt_falls_back_to_final_message() -> None:
     assert sink[0]["content"]["text"] == "echo: say hi"
 
 
+def test_server_run_prompt_supports_invoke_only_agents() -> None:
+    class InvokeOnlyAgent:
+        async def invoke(self, prompt: str) -> str:
+            return f"invoke: {prompt}"
+
+    server = AcpServer(agent=InvokeOnlyAgent())
+    sink: List[Dict[str, Any]] = []
+
+    async def async_sink(raw: Dict[str, Any]) -> None:
+        sink.append(raw)
+
+    async def run() -> StopReason:
+        return await server.run_prompt(
+            PromptRequest(session_id="s-invoke", text="hello"), async_sink
+        )
+
+    stop = asyncio.run(run())
+    assert stop == StopReason.END_TURN
+    assert len(sink) == 1
+    assert sink[0]["content"]["text"] == "invoke: hello"
+
+
 def test_server_run_prompt_reports_runner_error() -> None:
     class BoomAgent:
         on_event = None

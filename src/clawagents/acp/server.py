@@ -120,15 +120,21 @@ async def _default_runner(
 
     drain_task = asyncio.create_task(drainer())
     try:
-        run_fn = getattr(agent, "arun", None) or getattr(agent, "run", None)
+        run_fn = (
+            getattr(agent, "arun", None)
+            or getattr(agent, "run", None)
+            or getattr(agent, "invoke", None)
+        )
         if run_fn is None:
-            raise RuntimeError("agent has no run() / arun() method")
+            raise RuntimeError("agent has no run() / arun() / invoke() method")
 
         result = run_fn(prompt.text)
         if asyncio.iscoroutine(result):
             output = await result
         else:
             output = result
+        if not isinstance(output, str) and hasattr(output, "result"):
+            output = output.result
 
         await queue.put(None)
         await drained_done.wait()

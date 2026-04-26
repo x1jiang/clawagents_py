@@ -29,6 +29,7 @@ from clawagents.providers.llm import (
     NativeToolCall,
     NativeToolSchema,
 )
+from clawagents.run_context import RunContext
 from clawagents.tools.registry import ToolRegistry, ToolResult
 
 
@@ -182,3 +183,37 @@ async def test_native_indexing_with_before_tool_modifying_args():
     # Args must reflect the hook's modification (proves the new call was used)
     assert tools[0].calls and tools[0].calls[0]["x"] == "sanitised:raw"
     assert tools[1].calls and tools[1].calls[0]["x"] == "sanitised:raw"
+
+
+@pytest.mark.asyncio
+async def test_parallel_native_calls_honor_run_context_rejection():
+    rounds = [
+        LLMResponse(
+            content="",
+            model="mock",
+            tokens_used=1,
+            tool_calls=[
+                NativeToolCall("alpha", {"x": "1"}, tool_call_id="id_a"),
+                NativeToolCall("beta", {"x": "2"}, tool_call_id="id_b"),
+            ],
+        ),
+        LLMResponse(content="done", model="mock", tokens_used=1),
+    ]
+    llm = _NativeMockLLM(rounds)
+    reg, tools = _build_registry("alpha", "beta")
+    ctx = RunContext()
+    ctx.reject_tool("id_b", tool_name="beta", reason="blocked beta")
+
+    await run_agent_graph(
+        "task",
+        llm,
+        tools=reg,
+        streaming=False,
+        on_event=lambda k, d: None,
+        use_native_tools=True,
+        max_iterations=3,
+        run_context=ctx,
+    )
+
+    assert tools[0].calls == [{"x": "1"}]
+    assert tools[1].calls == []
