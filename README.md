@@ -60,12 +60,17 @@ ClawAgents loads `.env` from **the directory you run the command from** (your cu
 └── src/
 ```
 
-**Four ways to configure** (in priority order):
+**Three ways to configure** (in priority order, highest → lowest):
 
-1. **`create_claw_agent()` parameters** — highest priority, overrides everything
-2. **Shell environment variables** — `export OPENAI_API_KEY=sk-...` in `~/.zshrc` (works globally)
-3. **`CLAWAGENTS_ENV_FILE`** — set this env var to point to an explicit `.env` file path (useful for CI/Docker/multi-project)
-4. **`.env` file** — project-level config, loaded from `cwd/.env` or `cwd/../.env`
+1. **`create_claw_agent()` parameters** — explicit values passed to the factory always win.
+2. **`.env` file values** — loaded with `override=True`, so they take precedence over any pre-existing shell env vars. This is intentional: it prevents the "stale `OPENAI_API_KEY` exported from `~/.zshrc` silently shadows the fresh key in `.env`" bug class.
+3. **Shell environment variables** — used as a fallback when no `.env` is found, or for keys the `.env` doesn't define.
+
+**Where ClawAgents looks for `.env`** (first match wins):
+
+1. **`$CLAWAGENTS_ENV_FILE`** — explicit absolute path (handy for CI / Docker / multi-project setups).
+2. **`./.env`** — the directory you ran the command from.
+3. **`../.env`** — parent directory (monorepo-friendly).
 
 A ready-to-use template is included in the repo:
 
