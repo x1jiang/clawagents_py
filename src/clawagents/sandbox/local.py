@@ -49,40 +49,46 @@ class LocalBackend:
     # ── File I/O ────────────────────────────────────────────────────
 
     async def read_file(self, path: str) -> str:
-        return Path(path).read_text("utf-8")
+        return await asyncio.to_thread(Path(path).read_text, encoding="utf-8")
 
     async def read_file_bytes(self, path: str) -> bytes:
-        return Path(path).read_bytes()
+        return await asyncio.to_thread(Path(path).read_bytes)
 
     async def write_file(self, path: str, content: str) -> None:
-        Path(path).write_text(content, "utf-8")
+        await asyncio.to_thread(Path(path).write_text, content, encoding="utf-8")
 
     # ── Directory operations ────────────────────────────────────────
 
     async def read_dir(self, path: str) -> list[DirEntry]:
-        p = Path(path)
-        return [
-            DirEntry(name=e.name, is_directory=e.is_dir(), is_file=e.is_file())
-            for e in sorted(p.iterdir(), key=lambda x: x.name)
-        ]
+        def _read_dir() -> list[DirEntry]:
+            p = Path(path)
+            return [
+                DirEntry(name=e.name, is_directory=e.is_dir(), is_file=e.is_file())
+                for e in sorted(p.iterdir(), key=lambda x: x.name)
+            ]
+
+        return await asyncio.to_thread(_read_dir)
 
     async def mkdir(self, path: str, recursive: bool = False) -> None:
-        Path(path).mkdir(parents=recursive, exist_ok=True)
+        await asyncio.to_thread(Path(path).mkdir, parents=recursive, exist_ok=True)
 
     # ── Metadata ────────────────────────────────────────────────────
 
     async def exists(self, path: str) -> bool:
-        return Path(path).exists()
+        return await asyncio.to_thread(Path(path).exists)
 
     async def stat(self, path: str) -> FileStat:
-        s = Path(path).stat()
-        p = Path(path)
-        return FileStat(
-            is_file=p.is_file(),
-            is_directory=p.is_dir(),
-            size=s.st_size,
-            mtime_ms=s.st_mtime * 1000,
-        )
+        def _stat() -> FileStat:
+            p = Path(path)
+            s = p.stat()
+            return FileStat(
+                is_file=p.is_file(),
+                is_directory=p.is_dir(),
+                size=s.st_size,
+                mtime_ms=s.st_mtime * 1000,
+            )
+
+        return await asyncio.to_thread(_stat)
 
     # ── Credential isolation ────────────────────────────────────────
     # Keys stripped from subprocess env to prevent credential leakage.

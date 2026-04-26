@@ -22,6 +22,7 @@ Efficiency features (learned from deepagents/openclaw):
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import math
@@ -395,12 +396,22 @@ async def _run_output_guardrails(
     return (output, None)
 
 
-async def _session_get_items(session: Any) -> list[LLMMessage]:
+async def _session_get_items(session: Any, limit: int | None = None) -> list[LLMMessage]:
     """Fetch prior messages from a Session-protocol backend (async or sync)."""
     get_items = getattr(session, "get_items", None)
     if get_items is None:
         return []
-    res = get_items()
+    accepts_limit = False
+    if limit is not None:
+        try:
+            sig = inspect.signature(get_items)
+            accepts_limit = "limit" in sig.parameters or any(
+                p.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+                for p in sig.parameters.values()
+            )
+        except (TypeError, ValueError):
+            accepts_limit = True
+    res = get_items(limit=limit) if accepts_limit else get_items()
     if asyncio.iscoroutine(res):
         res = await res
     out: list[LLMMessage] = []
@@ -1366,6 +1377,7 @@ async def run_agent_graph(
     output_type: Optional[type] = None,
     on_stream_event: Optional[Callable[[StreamEvent], None]] = None,
     session: Optional[Any] = None,  # clawagents.session.Session protocol
+    session_preload_limit: int | None = 200,
     handoffs: Optional[list[Handoff]] = None,
     agent_name: Optional[str] = None,
 ) -> AgentState:
@@ -1597,7 +1609,7 @@ async def run_agent_graph(
     _session_preloaded_count = 0
     if session is not None:
         try:
-            prior = await _session_get_items(session)
+            prior = await _session_get_items(session, limit=session_preload_limit)
             if prior:
                 # Keep original system + user (task), append replayed history after.
                 messages = messages + prior

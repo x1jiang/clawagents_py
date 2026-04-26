@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.6.1-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.6.2-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -26,7 +26,7 @@ pip install clawagents[anthropic]   # + Anthropic Claude support
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 6.6.1** — Latest stable release (April 2026). Patch/security hardening for the Hermes-parity line: parallel native tools now honor sticky approvals, the credential proxy supports SDK base-URL mode without cross-origin credential injection, lazy tool schemas match their implementations, ACP accepts real `ClawAgent.invoke()` agents, and the hermetic test runner preserves `CLAW_TEST_WORKERS`. **769 Python tests** pass, mypy clean; **489 TypeScript tests** pass, `tsc --noEmit` clean. See [Changelog](#changelog).
+> **Version 6.6.2** — Latest stable release (April 2026). Performance and release hardening for the Hermes-parity line: local async filesystem work no longer blocks the event loop, trajectory summaries append instead of rewriting the full run log, persisted sessions preload a bounded history by default, and the TypeScript sibling caps large diffs and single-file grep output. **772 Python tests** pass; **492 TypeScript tests** pass, `tsc --noEmit` clean. See [Changelog](#changelog).
 
 ---
 
@@ -1438,7 +1438,7 @@ All environment variables are **optional**. They serve as defaults when the corr
 # Install with dev dependencies
 pip install -e ".[dev]"
 
-# Run all tests (full suite passes on v6.6.1)
+# Run all tests (full suite passes on v6.6.2)
 python -m pytest -q
 
 # Hermetic runner — exactly the environment CI uses (pinned xdist=4,
@@ -1448,7 +1448,7 @@ bash scripts/run_tests.sh
 # Run benchmarks (requires API keys)
 python -m pytest tests/ -v -m benchmark
 
-# Static type check (clean, exit 0 on v6.6.1)
+# Static type check (clean, exit 0 on v6.6.2)
 python -m mypy
 ```
 
@@ -1465,6 +1465,27 @@ landed in v6.5.0/v6.6.0 — `tests/test_subagent_depth.py`,
 ---
 
 ## Changelog
+
+### v6.6.2 — Efficiency and release hardening (April 2026)
+
+Patch release for the v6.6 line. Test totals after this release:
+**Python 772 passed, 3 skipped**; **TypeScript 492 passed, 4 skipped**;
+`tsc --noEmit` clean.
+
+- **Non-blocking local filesystem backend** — async `LocalBackend` file,
+  directory, and stat operations now offload synchronous pathlib work with
+  `asyncio.to_thread()`, so parallel-safe tool calls can yield the event loop
+  instead of serializing on local disk I/O.
+- **Append-only run summaries** — trajectory finalization now appends one
+  JSONL row to `runs.jsonl` instead of reading and atomically rewriting the
+  full historical log for every run.
+- **Bounded session preload** — agent session hydration now passes a default
+  preload limit of 200 prior messages to session backends, with
+  `session_preload_limit=None` available when callers explicitly want the
+  full persisted history.
+- **Cross-package efficiency parity** — the TypeScript sibling now caps large
+  in-process diffs and single-file grep matches, and its session preload uses
+  the same bounded default.
 
 ### v6.6.1 — Approval, proxy, ACP, and release hardening (April 2026)
 

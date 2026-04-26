@@ -45,6 +45,27 @@ def test_recorder_basic(tmp_path):
         assert summary.outcome == "success"
 
 
+def test_run_summary_appends_without_reading_existing_log(tmp_path, monkeypatch):
+    with patch("clawagents.trajectory.recorder._get_trajectories_dir", return_value=tmp_path):
+        runs_file = tmp_path / "runs.jsonl"
+        runs_file.write_text('{"old": true}\n', encoding="utf-8")
+        original_read_text = Path.read_text
+
+        def forbidden_read_text(self, *args, **kwargs):
+            if self == runs_file:
+                raise AssertionError("runs.jsonl should be appended without reading prior content")
+            return original_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", forbidden_read_text)
+        rec = TrajectoryRecorder(task="test task", model="test-model")
+        rec.finalize("success")
+
+        lines = original_read_text(runs_file, encoding="utf-8").splitlines()
+        assert len(lines) == 2
+        assert json.loads(lines[0]) == {"old": True}
+        assert json.loads(lines[1])["outcome"] == "success"
+
+
 def test_prune_trajectories(tmp_path):
     import time
     with patch("clawagents.trajectory.recorder._get_trajectories_dir", return_value=tmp_path):

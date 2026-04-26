@@ -3,6 +3,8 @@
 Shared tests that all SandboxBackend implementations must pass.
 """
 import pytest
+import threading
+from pathlib import Path
 from clawagents.sandbox.backend import SandboxBackend
 from clawagents.sandbox.local import LocalBackend
 from clawagents.sandbox.memory import InMemoryBackend
@@ -77,6 +79,25 @@ class TestLocalBackendConformance(BackendConformanceSuite):
     def get_backend(self) -> SandboxBackend:
         import tempfile
         return LocalBackend(root=tempfile.mkdtemp())
+
+    @pytest.mark.asyncio
+    async def test_file_reads_run_off_event_loop_thread(self, tmp_path, monkeypatch):
+        file_path = tmp_path / "threaded.txt"
+        file_path.write_text("hello", encoding="utf-8")
+        main_thread = threading.get_ident()
+        seen_threads: list[int] = []
+        original_read_text = Path.read_text
+
+        def wrapped_read_text(self, *args, **kwargs):
+            seen_threads.append(threading.get_ident())
+            return original_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", wrapped_read_text)
+        backend = LocalBackend(root=str(tmp_path))
+
+        assert await backend.read_file(str(file_path)) == "hello"
+        assert seen_threads
+        assert all(thread_id != main_thread for thread_id in seen_threads)
 
 
 class TestInMemoryBackendConformance(BackendConformanceSuite):

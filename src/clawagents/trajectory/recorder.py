@@ -427,16 +427,11 @@ class TrajectoryRecorder:
 
     def _write_summary(self, summary: RunSummary) -> None:
         try:
-            from clawagents.utils.atomic_write import atomic_write_text
             runs_file = _get_trajectories_dir() / "runs.jsonl"
             data = asdict(summary)
-            # Read existing lines, append new one, then write atomically.
-            existing = ""
-            try:
-                existing = runs_file.read_text(encoding="utf-8")
-            except FileNotFoundError:
-                pass
-            atomic_write_text(runs_file, existing + json.dumps(data, default=str) + "\n")
+            runs_file.parent.mkdir(parents=True, exist_ok=True)
+            with runs_file.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(data, default=str) + "\n")
         except Exception:
             logger.debug("Failed to write run summary", exc_info=True)
 

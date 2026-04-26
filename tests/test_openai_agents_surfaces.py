@@ -122,6 +122,27 @@ class TestRunContext:
         assert rec.reason is None
 
 
+def test_session_preload_uses_bounded_default_limit():
+    from clawagents.graph.agent_loop import _session_get_items
+
+    class RecordingSession:
+        def __init__(self):
+            self.seen_limit = None
+
+        async def get_items(self, limit=None):
+            self.seen_limit = limit
+            return [
+                {"role": "user", "content": "old"},
+                {"role": "assistant", "content": "new"},
+            ]
+
+    session = RecordingSession()
+    items = asyncio.run(_session_get_items(session, limit=200))
+
+    assert session.seen_limit == 200
+    assert [item.content for item in items] == ["old", "new"]
+
+
 # ── #2  @function_tool decorator ──────────────────────────────────────────
 
 

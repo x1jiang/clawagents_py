@@ -90,6 +90,7 @@ class ClawAgent:
         output_guardrails: Optional[list[OutputGuardrail]] = None,
         output_type: Optional[type] = None,
         session: Any = None,
+        session_preload_limit: int | None = 200,
         on_stream_event: Optional[Callable[[StreamEvent], None]] = None,
         # ── v6.4: Handoffs + Agent.as_tool ──
         handoffs: Optional[list[Handoff]] = None,
@@ -140,6 +141,7 @@ class ClawAgent:
         self.output_guardrails = output_guardrails
         self.output_type = output_type
         self.session = session
+        self.session_preload_limit = session_preload_limit
         self.on_stream_event = on_stream_event
         self.handoffs: list[Handoff] = list(handoffs) if handoffs else []
         self.name = name
@@ -160,6 +162,7 @@ class ClawAgent:
         output_guardrails: Optional[list[OutputGuardrail]] = None,
         output_type: Optional[type] = None,
         session: Any = None,
+        session_preload_limit: Optional[int] = None,
         on_stream_event: Optional[Callable[[StreamEvent], None]] = None,
         handoffs: Optional[list[Handoff]] = None,
     ) -> AgentState:
@@ -203,6 +206,11 @@ class ClawAgent:
             ),
             output_type=output_type if output_type is not None else self.output_type,
             session=session if session is not None else self.session,
+            session_preload_limit=(
+                session_preload_limit
+                if session_preload_limit is not None
+                else self.session_preload_limit
+            ),
             on_stream_event=(
                 on_stream_event if on_stream_event is not None else self.on_stream_event
             ),
