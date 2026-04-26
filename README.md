@@ -339,7 +339,78 @@ mcp_servers = [
 ]
 ```
 
-### 12. CLI
+### 12. Browser tools (v6.6)
+
+Give the agent a Playwright-backed browser. Install once: `pip install 'clawagents[browser]' && playwright install chromium`.
+
+```python
+from clawagents import create_claw_agent
+from clawagents.browser import create_browser_tools
+
+agent = create_claw_agent(
+    "gpt-5-mini",
+    tools=create_browser_tools(),  # navigate / snapshot / click / type / screenshot / ...
+)
+result = await agent.invoke("Open https://example.com and summarise the page")
+```
+
+`create_browser_tools()` lazily instantiates a sandboxed `BrowserSession` on first use, applies SSRF + scheme checks before every navigation, and registers a shutdown hook so the headless Chromium is torn down when the agent exits. Cloud providers (Browserbase, browser-use) plug in via `BrowserConfig(provider="browserbase")` — see `clawagents.browser.providers.get_provider()`.
+
+### 13. Scheduled jobs / cron (v6.6)
+
+Run agent prompts on a schedule. Interval (`every 5m`) and one-shot (`@once`) schedules work out of the box; cron expressions (`0 9 * * *`) require `pip install 'clawagents[cron]'`.
+
+```python
+from clawagents import create_claw_agent, Scheduler, create_job
+
+# Persisted to ~/.clawagents/<profile>/cron/jobs.json
+create_job("Summarise overnight logs", "0 9 * * *", name="daily-summary")
+create_job("Heartbeat ping", "every 5m")
+
+async def run_prompt(job: dict) -> str:
+    agent = create_claw_agent("gpt-5-nano")
+    return (await agent.invoke(job["prompt"])).result
+
+scheduler = Scheduler(runner=run_prompt)
+await scheduler.start()        # poll every 30s, dispatch due jobs
+# ... later ...
+await scheduler.stop()
+```
+
+`list_jobs()`, `pause_job()`, `trigger_job()`, and `remove_job()` round out the management API. Each successful run records its output under `~/.clawagents/<profile>/cron/runs/<job_id>/<timestamp>.json` so you can audit history.
+
+### 14. ACP adapter (v6.6)
+
+Serve a ClawAgents agent over Zed's [Agent Client Protocol](https://github.com/zed-industries/agent-client-protocol) (JSON-RPC over stdio) so any ACP-compatible client (Zed, Cursor with ACP plugin, custom UIs) can drive the agent. Install: `pip install 'clawagents[acp]'`.
+
+```python
+from clawagents import create_claw_agent, AcpServer
+
+agent = create_claw_agent("gpt-5-mini")
+AcpServer(agent=agent).serve()  # blocks on stdin/stdout until EOF
+```
+
+Streaming chunks (`AgentMessageChunk`, `AgentThoughtChunk`), tool-call updates, and permission prompts are all bridged to ACP `SessionUpdate` events. Pass `permission_requester=` to wire HITL approval into the host UI.
+
+### 15. RL fine-tuning hooks (v6.6)
+
+Capture agent runs as training-ready trajectories and export them to TRL / SLIME / Atropos / generic JSONL. The recorder works without any RL framework installed; `trl` and `atropos` are only needed when you actually drive a trainer.
+
+```python
+from clawagents import create_claw_agent, RLRecorder
+from clawagents.rl import export_jsonl
+
+recorder = RLRecorder(task="Fix the bug in app.py", model="gpt-5-mini")
+agent = create_claw_agent("gpt-5-mini", on_event=recorder.observe)
+result = await agent.invoke("Fix the bug in app.py")
+recorder.finalise(final=result.result, reward=1.0 if result.status == "done" else 0.0)
+
+export_jsonl([recorder.trajectory], "runs.jsonl")
+```
+
+For online rollouts, swap `export_jsonl` for the `AtroposAdapter` HTTP submitter, or hand the trajectory to `to_trl_sft()` / `to_trl_dpo()` for offline SFT / DPO fine-tuning.
+
+### 16. CLI
 
 ```bash
 # Scaffold a project (generates .env, run_agent.py, AGENTS.md)
@@ -381,7 +452,7 @@ python run_agent.py              # 6. Or use the generated script
 | `clawagents --doctor` | Check configuration health: `.env` discovery, API keys, active model, LLM settings, PTRL flags, local endpoint reachability, trajectory history, `AGENTS.md` presence. |
 | `clawagents --task "..."` | Run a single task. Prints a startup banner (`provider=X model=Y env=Z ptrl=...`), executes the agent, prints the result to stdout. |
 | `clawagents --trajectory [N]` | Inspect the last N run summaries (default: 1). Shows run ID, model, task, duration, turns, tool calls, score, quality, failure breakdown, verified score, and judge verdict. Requires `CLAW_TRAJECTORY=1`. |
-| `clawagents --serve [--port N]` | Start the HTTP gateway server (default port 3000). Endpoints: `POST /chat`, `POST /chat/stream` (SSE), `GET /queue`, `GET /health`. |
+| `clawagents --serve [--port N]` | Start the HTTP gateway server (default port 3000). Endpoints: `POST /chat`, `POST /chat/stream` (SSE), `WS /ws`, `GET /queue`, `GET /health`. |
 | `clawagents --sessions` | List saved sessions (requires `CLAW_FEATURE_SESSION_PERSISTENCE=1`). Shows session ID, turn count, status, and task. |
 | `clawagents --resume [ID\|latest]` | Resume a saved session. Loads messages from JSONL and continues the conversation. Defaults to `latest`. |
 | `clawagents --help` | Show all options with examples. |
@@ -1069,14 +1140,21 @@ All parameters are **optional** — zero-config usage (`create_claw_agent()`) wo
 
 | Param | Type | Default | Required? | Description |
 |:---|:---|:---|:---:|:---|
+| `name` | `str \| None` | `None` | No | Optional human-readable name for this agent. Used in handoff routing and tracing |
 | `instruction` | `str \| None` | `None` | No | System prompt — what the agent should do and how it should behave |
 | `tools` | `list \| None` | `None` | No | Additional tools to register. Built-in tools (filesystem, exec, grep, etc.) are always included |
-| `skills` | `str \| list \| None` | auto-discover | No | Skill directories to load. Default: checks `./skills`, `./.skills`. Bundled skills (ByteRover, OpenViking) are always included when eligible. |
+| `skills` | `str \| list \| None` | auto-discover | No | Skill directories to load. Default: checks `./skills`, `./.skills`, `./skill`, `./.skill`, `./Skills`. Bundled skills (ByteRover, OpenViking) are always included when eligible. |
 | `memory` | `str \| list \| None` | auto-discover | No | Memory files to inject into system prompt. Default: checks `./AGENTS.md`, `./CLAWAGENTS.md` |
 | `sandbox` | `SandboxBackend` | `LocalBackend()` | No | Pluggable sandbox backend for file/shell operations. Use `InMemoryBackend` for testing |
 | `streaming` | `bool` | `True` | No | Enable streaming responses |
 | `use_native_tools` | `bool` | `True` | No | Use provider native function calling. Set `False` for text-based JSON tool calls |
 | `on_event` | `callable \| None` | `None` | No | Callback for agent events (tool calls, errors, context messages, etc.) |
+| `handoffs` | `list[Handoff] \| None` | `None` | No | Sub-agents this agent can delegate to. See the **Handoffs** docs for the routing protocol |
+| `mcp_servers` | `list \| None` | `None` | No | MCP servers to expose as tools. See the **MCP Servers** section for configuration |
+| `fallback_models` | `list[str] \| None` | env `CLAWAGENTS_FALLBACK_MODELS` / `None` | No | Ordered fallback model names; tried in order if the primary provider fails. Precedence between env and arg is controlled by `CLAWAGENTS_PROVIDER_CONFIG_MODE` (`env_override` \| `default` \| `fallback`) |
+| `advisor_model` | `str \| LLMProvider \| None` | env `ADVISOR_MODEL` / `None` | No | A stronger model that advises the primary model 2–3 times per task. See **Configuration § Advisor Model** |
+| `advisor_api_key` | `str \| None` | env `ADVISOR_API_KEY` / `None` | No | API key for the advisor model when it lives on a different provider |
+| `advisor_max_calls` | `int \| None` | env `ADVISOR_MAX_CALLS` / `3` | No | Maximum advisor consultations per task |
 
 **LLM Tuning**
 
@@ -1084,7 +1162,7 @@ All parameters are **optional** — zero-config usage (`create_claw_agent()`) wo
 |:---|:---|:---|:---:|:---|
 | `context_window` | `int \| None` | env `CONTEXT_WINDOW` / `1000000` | No | Token budget. When messages exceed this, older turns are compacted |
 | `max_tokens` | `int \| None` | env `MAX_TOKENS` / `8192` | No | Max output tokens per LLM response. Sent as `max_completion_tokens` (OpenAI) or `max_output_tokens` (Gemini) |
-| `temperature` | `float \| None` | env `TEMPERATURE` / `0.0` | No | LLM sampling temperature. Automatically overridden for reasoning models (o1/o3/o4-mini, gpt-5/gpt-5-mini/gpt-5-turbo → 1.0). Non-reasoning models (gpt-5-nano, gpt-5-micro, gpt-4o) respect the configured value |
+| `temperature` | `float \| None` | env `TEMPERATURE` / `0.0` | No | LLM sampling temperature. Automatically forced to `1.0` for reasoning models (o1 / o3 / o4-mini, bare `gpt-5`, and `gpt-5-nano` / `gpt-5-mini` / `gpt-5-turbo`). Non-reasoning models (`gpt-5-micro`, `gpt-4o`, `gpt-4o-mini`) respect the configured value |
 | `max_iterations` | `int \| None` | env `MAX_ITERATIONS` / `200` | No | Max tool rounds before the agent stops and returns |
 
 **PTRL & Trajectory**
@@ -1129,8 +1207,8 @@ agent.after_tool = lambda name, args, result: result # modify tool results
 
 | Method | Description |
 |:---|:---|
-| `await agent.invoke(task, max_iterations=None)` | Run the agent on a task. Returns `AgentState` with `.result`, `.status`, `.iterations`, `.tool_calls` |
-| `await agent.compare(task, n_samples=3, max_iterations=None)` | Run the task N times and return the best result based on objective scoring (GRPO-inspired). Returns `{"best_result", "best_score", "best_index", "all_scores"}` |
+| `await agent.invoke(task, max_iterations=None)` | Run the agent on a task. Returns `AgentState` with `.result`, `.status` (`"running" \| "done" \| "error" \| "max_iterations"`), `.iterations`, `.tool_calls` |
+| `await agent.compare(task, n_samples=3, max_iterations=None, on_event=None)` | Run the task N times and return the best result based on objective scoring (GRPO-inspired). Returns `{"best_result", "best_score", "best_index", "all_scores", "comparison_method", "n_samples"}` |
 | `agent.block_tools(*names)` | Block specific tools at runtime |
 | `agent.allow_only_tools(*names)` | Whitelist-only mode — all other tools blocked |
 | `agent.inject_context(text)` | Inject extra context into every LLM call |
@@ -1183,12 +1261,12 @@ agent = create_claw_agent(
 ## Memory & Context Management
 
 ### Project Memory
-Loads `AGENTS.md` files and injects content into every LLM call. Use for project-level context and conventions.
+Loads `AGENTS.md` (and `CLAWAGENTS.md`) from the working directory and injects their content into every LLM call. Use for project-level context and conventions.
 
 ### Auto-Compaction
 When the conversation exceeds **75% of `CONTEXT_WINDOW`**:
-1. Full history **offloaded** to `.clawagents/history/compacted_*.json`
-2. Older messages **summarized** into `[Compacted History]`
+1. Full history **offloaded** to `.clawagents/history/compacted_<ts>_<N>msgs.json`
+2. Older messages **summarized** into a single placeholder message tagged `[System — Compacted History]`
 3. Last 20 messages kept intact
 
 This provides **unlimited conversation length** with full audit trail preservation.
@@ -1209,10 +1287,11 @@ start_gateway(port=3000, host="0.0.0.0")  # explicit LAN exposure — REQUIRES a
 ### Bind & auth
 
 The gateway binds to **`127.0.0.1` (loopback)** by default in v6.2+. To expose
-it on the LAN, set `GATEWAY_HOST=0.0.0.0` (or pass `host=`), and *also* set
-`GATEWAY_API_KEY=<secret>` to require Bearer auth. Starting on a non-loopback
-address without an API key prints a loud warning at startup — anyone on the
-network can otherwise hit `/chat`, `/chat/stream`, and `/ws`.
+it on the LAN, pass `host="0.0.0.0"` or set `GATEWAY_HOST=0.0.0.0` (the env
+var wins over the `host=` argument), and *also* set `GATEWAY_API_KEY=<secret>`
+to require Bearer auth. Starting on a non-loopback address without an API key
+prints a loud warning at startup — anyone on the network can otherwise hit
+`/chat`, `/chat/stream`, and `/ws`.
 
 ### Endpoints
 
@@ -1220,6 +1299,7 @@ network can otherwise hit `/chat`, `/chat/stream`, and `/ws`.
 |:---|:---|:---|
 | `/chat` | POST | Synchronous agent invocation |
 | `/chat/stream` | POST | SSE streaming (events: `queued`, `started`, `agent`, `done`, `error`) |
+| `/ws` | WS | WebSocket session (bidirectional, same Bearer-auth as `/chat`) |
 | `/queue` | GET | Queue status for all lanes |
 | `/health` | GET | Health check |
 
@@ -1239,7 +1319,7 @@ A few surfaces are deliberately powerful — they exist for trusted operators,
 and you should treat them as such when running ClawAgents in environments with
 untrusted prompts or LAN exposure:
 
-- **`exec_shell` tool** — runs arbitrary commands inside the configured sandbox.
+- **`execute` tool** — runs arbitrary commands inside the configured sandbox.
   Pair with the `LocalBackend(cwd=...)` constraint and ideally a containerized
   runtime; the tool's blocklist is a guardrail, not a security boundary.
 - **External hooks** (`CLAW_FEATURE_EXTERNAL_HOOKS=1`, `CLAW_HOOK_*`) execute
@@ -1286,13 +1366,15 @@ All environment variables are **optional**. They serve as defaults when the corr
 
 | Variable | Default | Required? | Description |
 |:---|:---|:---:|:---|
-| `PROVIDER` | auto-detect | No | Hint: `"openai"` or `"gemini"`. Auto-detected from which API key is set |
+| `PROVIDER` | auto-detect | No | Hint: `"openai"`, `"gemini"`, or `"anthropic"`. Auto-detected from which API key is set |
 | `OPENAI_API_KEY` | — | **Yes** *(for OpenAI/Azure)* | OpenAI or Azure API key. **Not needed for local models** — when `OPENAI_BASE_URL` is set, a placeholder is used automatically |
 | `OPENAI_MODEL` | `gpt-5-nano` | No | Model name, Azure deployment name, or local model ID (e.g. `llama3.1`) |
 | `OPENAI_BASE_URL` | *(unset)* | No | Custom endpoint for OpenAI-compatible APIs: Azure, Bedrock gateway, Ollama, vLLM, LM Studio. Omit to use `api.openai.com` |
 | `OPENAI_API_VERSION` | *(unset)* | No | **Azure only.** API version string (e.g. `2024-12-01-preview`). Ignored by all other providers |
 | `GEMINI_API_KEY` | — | **Yes** *(for Gemini)* | Google Gemini API key |
 | `GEMINI_MODEL` | `gemini-3-flash-preview` | No | Gemini model name |
+| `ANTHROPIC_API_KEY` | — | **Yes** *(for Anthropic)* | Anthropic API key |
+| `ANTHROPIC_MODEL` | `claude-sonnet-4-5` | No | Anthropic model name (e.g. `claude-sonnet-4-5`, `claude-opus-4`) |
 
 **LLM Tuning**
 
@@ -1301,7 +1383,7 @@ All environment variables are **optional**. They serve as defaults when the corr
 | `STREAMING` | `1` | No | `1` = streaming enabled, `0` = disabled |
 | `CONTEXT_WINDOW` | `1000000` | No | Token budget. Older messages are compacted when exceeded |
 | `MAX_TOKENS` | `8192` | No | Max output tokens per response (`max_completion_tokens` for OpenAI, `max_output_tokens` for Gemini) |
-| `TEMPERATURE` | `0.0` | No | Sampling temperature. Auto-overridden for reasoning models (o-series + gpt-5/gpt-5-mini/gpt-5-turbo → 1.0). Non-reasoning models (gpt-5-nano, gpt-5-micro, gpt-4o) use the configured value |
+| `TEMPERATURE` | `0.0` | No | Sampling temperature. Auto-forced to `1.0` for reasoning models (o-series + bare `gpt-5` + `gpt-5-nano` / `gpt-5-mini` / `gpt-5-turbo`). Non-reasoning models (`gpt-5-micro`, `gpt-4o`, `gpt-4o-mini`) use the configured value |
 | `MAX_ITERATIONS` | `200` | No | Max tool rounds before the agent stops. Override per-run: `agent.invoke(task, max_iterations=N)` |
 
 **PTRL & Trajectory Flags** — all off by default, opt-in with `1`/`true`/`yes`
@@ -1327,6 +1409,8 @@ All environment variables are **optional**. They serve as defaults when the corr
 | `CLAW_FEATURE_BACKGROUND_MEMORY` | `0` | No | Background thread extracting agent state/metadata implicitly |
 | `CLAW_FEATURE_FORKED_AGENTS` | `0` | No | Enable the `run_forked_agent` sandboxed sub-agent API |
 | `CLAW_FEATURE_COORDINATOR` | `0` | No | Enable the `run_coordinator` swarm routing orchestration mode |
+| `CLAW_FEATURE_TRANSCRIPT_ARCHIVAL` | `0` | No | Archive full pre-compaction messages to `.clawagents/transcripts/pre_compact_*.md` (audit trail) |
+| `CLAW_FEATURE_CREDENTIAL_PROXY` | `0` | No | Route subagent credentials through a least-privilege proxy instead of inheriting parent env |
 
 **v5.28.0 Features** — inspired by [claw-code-main](https://github.com/anthropics/claw-code) (Rust reference)
 
@@ -1354,7 +1438,7 @@ All environment variables are **optional**. They serve as defaults when the corr
 # Install with dev dependencies
 pip install -e ".[dev]"
 
-# Run all tests (expected: 662 passed, 2 skipped on v6.5.0)
+# Run all tests (full suite passes on v6.6.0)
 python -m pytest -q
 
 # Hermetic runner — exactly the environment CI uses (pinned xdist=4,
@@ -1364,17 +1448,19 @@ bash scripts/run_tests.sh
 # Run benchmarks (requires API keys)
 python -m pytest tests/ -v -m benchmark
 
-# Static type check (expected: clean, exit 0 on v6.5.0)
+# Static type check (clean, exit 0 on v6.6.0)
 python -m mypy
 ```
 
 The test suite includes regression tests for every Hermes-inspired pattern
-landed in v6.5.0 — `tests/test_subagent_depth.py`, `tests/test_compaction_hardened.py`,
-`tests/test_mcp_env_scrub.py`, `tests/test_paths.py`, `tests/test_redact.py`,
-`tests/test_steer.py`, `tests/test_transport.py`, `tests/test_commands.py`,
-`tests/test_aux_models.py`, `tests/test_background.py` — alongside the
-v6.3.0/6.4.0 regression sets and the broad `tests/simulated_test.py` parity
-sweep.
+landed in v6.5.0/v6.6.0 — `tests/test_subagent_depth.py`,
+`tests/test_compaction_hardened.py`, `tests/test_mcp_env_scrub.py`,
+`tests/test_paths.py`, `tests/test_redact.py`, `tests/test_steer.py`,
+`tests/test_transport.py`, `tests/test_commands.py`, `tests/test_aux_models.py`,
+`tests/test_background.py` — and the four v6.6 feature suites
+(`tests/test_browser.py`, `tests/test_cron.py`, `tests/test_acp.py`,
+`tests/test_rl.py`) alongside the v6.3.0/6.4.0 regression sets and the broad
+`tests/simulated_test.py` parity sweep.
 
 ---
 
