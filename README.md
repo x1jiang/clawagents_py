@@ -450,16 +450,18 @@ Traditional Stack (DeepAgents):           ClawAgents:
 
 ## Feature Matrix
 
-> Compares **ClawAgents v6.5** against three peer agent frameworks: **Hermes Agent**
+> Compares **ClawAgents v6.6** against three peer agent frameworks: **Hermes Agent**
 > ([metaspartan/hermes-agent](https://github.com/metaspartan/hermes-agent)), **DeepAgents**
 > ([langchain-ai/deepagents](https://github.com/langchain-ai/deepagents)), and **OpenClaw**.
 > The 10 hardening patterns introduced in v6.5 (subagent depth limits, memory-isolated forks,
 > activity heartbeats, per-agent IterationBudget, path-scoped parallel tool execution, plugin
 > hook expansion, runtime `display_clawagents_home()`, prompt-cache-aware `CommandDef`,
-> documented prompt-cache policy, and the hermetic `run_tests.sh` runner) were directly
-> inspired by Hermes — so several previously ❌ rows in the ClawAgents column have flipped to ✅.
+> documented prompt-cache policy, and the hermetic `run_tests.sh` runner) and the four
+> Hermes-parity feature areas added in v6.6 (browser tools, cron / scheduler, ACP adapter,
+> RL fine-tuning hooks) closed the remaining gaps — every row in the ClawAgents column is
+> now ✅.
 
-| Feature | ClawAgents v6.5 | Hermes Agent | DeepAgents | OpenClaw |
+| Feature | ClawAgents v6.6 | Hermes Agent | DeepAgents | OpenClaw |
 |:---|:---:|:---:|:---:|:---:|
 | **Core** | | | | |
 | ReAct loop | ✅ | ✅ | ✅ | ✅ |
@@ -528,7 +530,7 @@ Traditional Stack (DeepAgents):           ClawAgents:
 | GRPO-inspired multi-sample comparison | ✅ | ❌ | ❌ | ❌ |
 | Task-type-aware verification | ✅ | ❌ | ❌ | ❌ |
 | LLM-as-Judge verification | ✅ | ✅ | ❌ | ❌ |
-| RL fine-tuning hooks (TRL / SLIME / Atropos) | ❌ | ✅ | ❌ | ❌ |
+| RL fine-tuning hooks (TRL / SLIME / Atropos) | ✅ (v6.6) | ✅ | ❌ | ❌ |
 | RFT-ready transition export | ✅ | ✅ | ❌ | ❌ |
 | **Infrastructure** | | | | |
 | Gateway HTTP server + SSE | ✅ | ✅ | ❌ | ✅ |
@@ -541,9 +543,9 @@ Traditional Stack (DeepAgents):           ClawAgents:
 | Prompt-cache-aware `CommandDef` (deferred state mutation) | ✅ (v6.5) | ✅ | ❌ | ❌ |
 | Lane-based command queue | ✅ | ✅ | ❌ | ✅ |
 | Hermetic test runner with concurrency pinning | ✅ (v6.5) | ✅ | ❌ | ❌ |
-| Cron / scheduled jobs | ❌ | ✅ | ❌ | ❌ |
-| ACP (Agent Communication Protocol) adapter | ❌ | ✅ | ❌ | ❌ |
-| Browser tools (Playwright / CDP / Camoufox) | ❌ | ✅ | ❌ | ❌ |
+| Cron / scheduled jobs | ✅ (v6.6) | ✅ | ❌ | ❌ |
+| ACP (Agent Communication Protocol) adapter | ✅ (v6.6) | ✅ | ❌ | ❌ |
+| Browser tools (Playwright / CDP / Camoufox) | ✅ (v6.6) | ✅ | ❌ | ❌ |
 
 ---
 
