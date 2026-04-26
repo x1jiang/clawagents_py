@@ -110,6 +110,14 @@ class TrajectoryStep:
         )
 
 
+def _is_feedback_step(step: TrajectoryStep) -> bool:
+    return (
+        step.role == "user"
+        or step.metadata.get("feedback") is True
+        or step.metadata.get("next_state") is True
+    )
+
+
 @dataclass
 class Trajectory:
     """A complete agent run normalised for training pipelines."""
@@ -240,3 +248,38 @@ class Trajectory:
 def trajectories_to_dicts(trajs: Iterable[Trajectory]) -> list[dict[str, Any]]:
     """Convenience: materialise an iterable of trajectories as plain dicts."""
     return [t.to_dict() for t in trajs]
+
+
+def to_next_state_transitions(traj: Trajectory) -> list[dict[str, Any]]:
+    """Export assistant actions paired with following user/environment feedback."""
+    transitions: list[dict[str, Any]] = []
+    for idx, action in enumerate(traj.steps):
+        if action.role != "assistant":
+            continue
+        next_idx = next(
+            (
+                j
+                for j, step in enumerate(traj.steps[idx + 1:], start=idx + 1)
+                if _is_feedback_step(step)
+            ),
+            None,
+        )
+        if next_idx is None:
+            continue
+        prior = next(
+            (step for step in reversed(traj.steps[:idx]) if step.role in ("user", "system")),
+            TrajectoryStep(role="user", content=traj.task),
+        )
+        transitions.append({
+            "run_id": traj.run_id,
+            "task": traj.task,
+            "model": traj.model,
+            "step_index": idx,
+            "state": prior.to_dict(),
+            "action": action.to_dict(),
+            "next_state": traj.steps[next_idx].to_dict(),
+            "reward": traj.reward,
+            "done": next_idx == len(traj.steps) - 1,
+            "metadata": {**traj.metadata, **action.metadata},
+        })
+    return transitions

@@ -51,6 +51,7 @@ from clawagents.rl.trajectory import (
     TrajectoryRole,
     TrajectoryStep,
     ToolCall,
+    to_next_state_transitions,
 )
 from clawagents.rl.recorder import (
     RLRecorder,
@@ -88,6 +89,7 @@ __all__ = [
     "TrajectoryRole",
     "TrajectoryStep",
     "ToolCall",
+    "to_next_state_transitions",
     # Recorder
     "RLRecorder",
     "RecorderConfig",

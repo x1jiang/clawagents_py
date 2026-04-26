@@ -19,6 +19,8 @@ class TextEnvironment(Protocol):
 
 
 Responder = Callable[[list[Message]], str | Awaitable[str]]
+AgentEnvironment = TextEnvironment
+AgentResponder = Responder
 
 
 @dataclass(frozen=True)
@@ -89,3 +91,12 @@ async def run_text_environment(
         metrics=dict(metrics or {}),
         metadata=dict(initial.get("metadata") or {}),
     )
+
+
+async def run_agent_environment(
+    responder: AgentResponder,
+    env: Any,
+    *,
+    max_turns: int = 20,
+) -> TextEvaluationResult:
+    return await run_text_environment(responder, env, max_turns=max_turns)

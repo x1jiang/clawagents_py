@@ -41,6 +41,7 @@ def _matches_glob(name: str, pattern: str) -> bool:
 
 class LsTool:
     name = "ls"
+    keywords = ["list files", "directory listing", "folder contents", "file metadata"]
     description = "List files and directories with metadata (size, modified time)."
     parameters: Dict[str, Dict[str, Any]] = {
         "path": {"type": "string", "description": "Path to list. Default: current directory", "required": True}
@@ -77,6 +78,7 @@ class LsTool:
 class ReadFileTool:
     name = "read_file"
     cacheable = True
+    keywords = ["open file", "view file", "show file", "file contents", "cat"]
     description = "Read file contents with line numbers. Supports offset/limit for pagination."
     parameters: Dict[str, Dict[str, Any]] = {
         "path": {"type": "string", "description": "Path to the file to read", "required": True},
@@ -128,6 +130,7 @@ class ReadFileTool:
 
 class WriteFileTool:
     name = "write_file"
+    keywords = ["create file", "save file", "overwrite file", "write content"]
     description = "Write content to a file. Creates parent directories if needed."
     parameters: Dict[str, Dict[str, Any]] = {
         "path": {"type": "string", "description": "Path to write the file", "required": True},
@@ -154,6 +157,7 @@ class WriteFileTool:
 
 class EditFileTool:
     name = "edit_file"
+    keywords = ["replace text", "modify file", "patch file", "change file", "update file"]
     description = "Edit a file by replacing a specific block of text. The target must exactly match existing content."
     parameters: Dict[str, Dict[str, Any]] = {
         "path": {"type": "string", "description": "Path to the file to edit", "required": True},
@@ -202,6 +206,7 @@ class EditFileTool:
 class GrepTool:
     name = "grep"
     cacheable = True
+    keywords = ["search", "find text", "match text", "file contents", "ripgrep", "rg"]
     description = "Search for a text pattern in files. Supports recursive multi-file search with glob filtering."
     parameters: Dict[str, Dict[str, Any]] = {
         "path": {"type": "string", "description": "File or directory to search", "required": True},
@@ -291,6 +296,7 @@ class GrepTool:
 
 class GlobTool:
     name = "glob"
+    keywords = ["find files", "file pattern", "filename search", "wildcard"]
     description = "Find files matching a glob pattern. Use '**/*.py' for recursive search."
     parameters: Dict[str, Dict[str, Any]] = {
         "pattern": {"type": "string", "description": "Glob pattern (e.g., '**/*.py', 'src/**/*.ts')", "required": True},

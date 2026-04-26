@@ -18,6 +18,7 @@ IGNORE_DIRS = {
 
 class TreeTool:
     name = "tree"
+    keywords = ["directory tree", "project overview", "folder structure", "list files"]
     description = (
         "Show a recursive directory tree. Much faster than ls for getting a project overview. "
         "Automatically skips node_modules, .git, __pycache__, etc."
@@ -87,6 +88,7 @@ class TreeTool:
 
 class DiffTool:
     name = "diff"
+    keywords = ["compare files", "file changes", "unified diff", "patch preview"]
     description = (
         "Compare two files and show their differences in unified diff format. "
         "Useful for reviewing changes before or after edits."
@@ -133,6 +135,7 @@ class DiffTool:
 
 class InsertLinesTool:
     name = "insert_lines"
+    keywords = ["insert text", "add lines", "append code", "modify file"]
     description = (
         "Insert text at a specific line number in a file. Line 0 inserts at the top; "
         "a line beyond the file length appends at the end. More precise than edit_file for adding new code."

@@ -1,6 +1,7 @@
-__version__ = "6.6.3"
+__version__ = "6.6.4"
 
 from clawagents.agent import ClawAgent, create_claw_agent
+from clawagents.run_result import RunResult
 from clawagents.graph.agent_loop import (
     AgentState, OnEvent, EventKind,
     BeforeLLMHook, BeforeToolHook, AfterToolHook, HookResult,
@@ -65,15 +66,22 @@ from clawagents.function_tool import function_tool
 from clawagents.retry import RetryPolicy, DEFAULT_RETRY_POLICY
 from clawagents.eval import (
     Message,
+    AgentEnvironment,
+    AgentResponder,
     TextEnvironment,
     TextEvaluationResult,
     TextEvaluationStep,
+    run_agent_environment,
     run_text_environment,
 )
 from clawagents.tools.tool_program import (
     ToolProgramTool,
     create_tool_program_tool,
 )
+from clawagents.tools.cache import SqliteResultCacheManager
+from clawagents.tools.catalog import create_tool_discovery_tools, names_for_tool_profile
+from clawagents.explorer import create_explorer_tools
+from clawagents.sandbox import DockerBackend
 from clawagents.sandbox.manifest import (
     SandboxManifest,
     SandboxManifestEntry,
@@ -267,6 +275,7 @@ from clawagents.rl import (
     to_trl_sft,
     to_trl_dpo,
     to_atropos_rollout,
+    to_next_state_transitions,
     TrlAdapter,
     AtroposAdapter,
     TRL_AVAILABLE,

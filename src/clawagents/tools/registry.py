@@ -24,6 +24,7 @@ class ToolResult:
 class Tool(Protocol):
     name: str
     description: str
+    keywords: List[str]
     parameters: Dict[str, Dict[str, Any]]
 
     async def execute(self, args: Dict[str, Any]) -> ToolResult:
@@ -31,6 +32,7 @@ class Tool(Protocol):
 
     # Optional attribute — set ``cacheable = True`` to enable result caching.
     # Not required by Protocol; checked via getattr at runtime.
+    # Optional attribute — set ``keywords = [...]`` to improve compact discovery.
 
 
 class ParsedToolCall:
@@ -206,14 +208,18 @@ class ToolRegistry:
         cache_max_size: int = 256,
         cache_ttl_s: float = 60.0,
         validate_args: bool = True,
+        result_cache: Any = None,
     ):
         self.tools: Dict[str, Tool] = {}
         self._description_cache: Optional[str] = None
         self._tool_timeout_s = tool_timeout_s
         self._validate_args = validate_args
 
-        from clawagents.tools.cache import ResultCacheManager
-        self._result_cache = ResultCacheManager(max_size=cache_max_size, default_ttl_s=cache_ttl_s)
+        if result_cache is not None:
+            self._result_cache = result_cache
+        else:
+            from clawagents.tools.cache import ResultCacheManager
+            self._result_cache = ResultCacheManager(max_size=cache_max_size, default_ttl_s=cache_ttl_s)
 
     @property
     def result_cache(self):
@@ -254,6 +260,7 @@ class ToolRegistry:
                 "name": tool.name,
                 "description": tool.description,
                 "parameters": tool.parameters,
+                "keywords": list(getattr(tool, "keywords", [])),
                 "cacheable": getattr(tool, "cacheable", False) is True,
                 "parallel_safe": _is_parallel_safe(tool),
                 "path_scoped_arg": (

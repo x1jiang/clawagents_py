@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.6.3-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.6.4-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -26,7 +26,7 @@ pip install clawagents[anthropic]   # + Anthropic Claude support
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 6.6.3** — Latest stable release (April 2026). Performance and release hardening for the Hermes-parity line: local async filesystem work no longer blocks the event loop, trajectory summaries append instead of rewriting the full run log, persisted sessions preload a bounded history by default, and the TypeScript sibling caps large diffs and single-file grep output. **778 Python tests** pass; **497 TypeScript tests** pass plus **49 parity checks**, `tsc --noEmit` clean. Real `.env` smoke tests passed against Gemini and OpenAI, including read-only tool use and subagent delegation. See [Changelog](#changelog).
+> **Version 6.6.4** — Latest stable release (April 2026). ToolUniverse-style discovery now searches tool names, descriptions, and explicit keyword aliases, so compact tool selection is less brittle when a model uses a related term instead of the exact tool name. This release also adds bounded tool profiles, Docker sandbox support, resumable `RunResult` metadata, SQLite result caching for safe cacheable tools, explorer helpers, gym-style eval aliases, and next-state trajectory exports across the Python and TypeScript packages. **786 Python tests** pass; **509 TypeScript tests** pass plus **49 parity checks**, `tsc --noEmit` clean. See [Changelog](#changelog).
 
 ---
 
@@ -1440,7 +1440,7 @@ All environment variables are **optional**. They serve as defaults when the corr
 # Install with dev dependencies
 pip install -e ".[dev]"
 
-# Run all tests (full suite passes on v6.6.3)
+# Run all tests (full suite passes on v6.6.4)
 python -m pytest -q
 
 # Hermetic runner — exactly the environment CI uses (pinned xdist=4,
@@ -1450,7 +1450,7 @@ bash scripts/run_tests.sh
 # Run benchmarks (requires API keys)
 python -m pytest tests/ -v -m benchmark
 
-# Static type check (clean, exit 0 on v6.6.3)
+# Static type check (clean, exit 0 on v6.6.4)
 python -m mypy
 ```
 
@@ -1467,6 +1467,27 @@ landed in v6.5.0/v6.6.0 — `tests/test_subagent_depth.py`,
 ---
 
 ## Changelog
+
+### v6.6.4 — Keyword discovery and infrastructure parity (April 2026)
+
+Patch release for the v6.6 line. Test totals after this release:
+**Python 786 passed, 3 skipped**; **TypeScript 509 passed, 4 skipped**
+plus **49 parity checks**; `tsc --noEmit` clean.
+
+- **Keyword-backed compact discovery** — tools can now declare explicit
+  keyword aliases, `tool_discover` searches names, descriptions, and those
+  aliases, and `tool_describe`/registry inspection expose the metadata so
+  compact tool universes stay useful even when the model uses a near-synonym.
+- **Bounded tool profiles** — catalog helpers can publish smaller tool views
+  for focused agents while preserving the full registry for callers that need
+  it.
+- **Infrastructure parity** — Docker sandbox support, resumable `RunResult`
+  metadata, SQLite result caching for safe cacheable tools, explorer helpers,
+  gym-style eval aliases, and next-state trajectory export helpers now ship in
+  both the Python and TypeScript packages.
+- **Cache safety defaults** — read/search-style filesystem outputs remain
+  uncached by default to avoid persisting sensitive repository contents, while
+  explicitly cacheable pure tools can reuse results across runs.
 
 ### v6.6.3 — Efficiency and release hardening (April 2026)
 

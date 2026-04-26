@@ -126,6 +126,7 @@ def _strip_html(html: str) -> str:
 class WebFetchTool:
     name = "web_fetch"
     cacheable = True
+    keywords = ["fetch url", "http request", "read webpage", "download text", "documentation"]
     description = (
         "Fetch content from a URL. Returns the text content of the page. "
         "Useful for reading documentation, API responses, or checking web resources. "
