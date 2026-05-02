@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.8.0-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.8.1-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -26,14 +26,17 @@ pip install clawagents[anthropic]   # + Anthropic Claude support
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 6.8.0** — OpenHarness-inspired operational surfaces release (May 2026). Adds static `--dry-run` readiness previews, named provider profiles (`--profile ollama/openai/gemini/anthropic`), structured permission decisions, first-class background task tools, metadata-only plugin compatibility loading, and an MCP auth/reconnect helper. The release keeps v6.7.1 compact tool-discovery recovery and v6.7.0 security hardening, with full Python and TypeScript regression suites passing. See [Changelog](#changelog).
+> **Version 6.8.1** — Prompt architecture and packaged-surface polish (May 2026). Adds shared prompt assembly helpers, preserves cache-boundary behavior across memory/skill injection, refreshes the OpenHarness comparison, and keeps the v6.8.0 operational surfaces plus v6.7.1 compact tool-discovery recovery and v6.7.0 security hardening. See [Changelog](#changelog).
 
-### New In v6.8.0
+### New In v6.8.1
 
 ```bash
 clawagents --dry-run --profile ollama --task "inspect this repo"
 ```
 
+- **Shared prompt assembly** centralizes system prompt construction, lesson preambles, cache-boundary placement, and dynamic memory/skill injection in `clawagents.prompts`.
+- **Legacy hook compatibility** keeps dict-shaped `before_llm` messages working while exposing reusable prompt helpers for downstream integrations.
+- **OpenHarness comparison** adds [HKUDS/OpenHarness](https://github.com/HKUDS/OpenHarness) as a peer in the feature matrix with conservative full/partial markers.
 - **Dry-run previews** report provider resolution, auth readiness, inspectable tools, likely matching tools, and next actions without calling an LLM or executing tools.
 - **Provider profiles** give stable aliases for common backends while still letting explicit `create_claw_agent()` parameters override profile values.
 - **Background task tools** expose long-running command management (`task_create`, `task_status`, `task_output`, `task_stop`, `task_list`) through the normal tool registry.
@@ -539,103 +542,104 @@ Traditional Stack (DeepAgents):           ClawAgents:
 
 ## Feature Matrix
 
-> Compares **ClawAgents v6.8.0** against three peer agent frameworks: **Hermes Agent**
+> Compares **ClawAgents v6.8.1** against four peer agent frameworks: **Hermes Agent**
 > ([metaspartan/hermes-agent](https://github.com/metaspartan/hermes-agent)), **DeepAgents**
-> ([langchain-ai/deepagents](https://github.com/langchain-ai/deepagents)), and **OpenClaw**.
-> The v6.5 hardening work, v6.6 Hermes-parity areas, v6.7.0 security fixes,
-> v6.7.1 compact tool-discovery recovery, and v6.8.0 OpenHarness-inspired
-> operational surfaces now ship together in the current
-> release — every row in the ClawAgents column is ✅.
+> ([langchain-ai/deepagents](https://github.com/langchain-ai/deepagents)), and **OpenClaw**, plus **OpenHarness** ([HKUDS/OpenHarness](https://github.com/HKUDS/OpenHarness)).
+> The v6.8.1 prompt/packaging polish, v6.8.0 OpenHarness-inspired operational
+> surfaces, v6.7.1 compact tool-discovery recovery, v6.7.0 security fixes, and
+> v6.5/v6.6 Hermes-parity areas now ship together in the current release —
+> every row in the ClawAgents column is ✅. `◐` means partial or comparable
+> coverage rather than exact feature parity.
 
-| Feature | ClawAgents v6.8.0 | Hermes Agent | DeepAgents | OpenClaw |
-|:---|:---:|:---:|:---:|:---:|
-| **Core** | | | | |
-| ReAct loop | ✅ | ✅ | ✅ | ✅ |
-| Tool loop detection (soft + hard + ping-pong) | ✅ | ✅ | ❌ | ✅ |
-| Circuit breaker (no-progress / tool failure) | ✅ | ✅ | ❌ | ❌ |
-| Efficiency rules (system prompt) | ✅ | ❌ | ❌ | ❌ |
-| Adaptive token estimation (tiktoken) | ✅ | ✅ | ❌ | ❌ |
-| Model-aware context budgeting | ✅ | ✅ | ❌ | ❌ |
-| Fraction-based summarization triggers | ✅ | ✅ | ✅ | ❌ |
-| **Tools** | | | | |
-| Pluggable sandbox backend | ✅ | ✅ | ✅ | ✅ |
-| In-memory VFS (testing) | ✅ | ❌ | ❌ | ❌ |
-| Cross-provider conformance tests | ✅ | ✅ | ✅ | ❌ |
-| Lazy tool registry (deferred imports) | ✅ | ✅ | ❌ | ❌ |
-| Compact tool-universe discovery | ✅ | ❌ | ❌ | ❌ |
-| Tool lookup over names, descriptions, and keywords | ✅ | ❌ | ❌ | ❌ |
-| Tool result caching (LRU) | ✅ | ❌ | ❌ | ❌ |
-| JSON Schema param validation + coercion | ✅ | ✅ | ❌ | ❌ |
-| ComposeTool (deterministic pipelines) | ✅ | ❌ | ❌ | ❌ |
-| `think` tool (structured reasoning) | ✅ | ✅ | ❌ | ❌ |
-| LangChain tool adapter | ✅ | N/A | N/A | ❌ |
-| MCP server integration (stdio / SSE / Streamable HTTP) | ✅ | ✅ | ❌ | ❌ |
-| Path-scoped parallel tool execution | ✅ | ✅ | ❌ | ❌ |
-| **Agents & Orchestration** | | | | |
-| Sub-agent delegation | ✅ | ✅ | ✅ | ✅ |
-| Subagent depth limit (≤ 2, no recursion) | ✅ | ✅ | ❌ | ❌ |
-| Subagent / forked-agent memory isolation | ✅ | ✅ | ✅ | ❌ |
-| Per-agent IterationBudget | ✅ | ✅ | ❌ | ❌ |
-| Coordinator / swarm mode | ✅ | ❌ | ❌ | ✅ |
-| Barrier-based request scheduling | ✅ | ❌ | ❌ | ❌ |
-| Planning / TodoList | ✅ | ✅ | ✅ | ❌ |
-| Plugin hook expansion (priority chain) | ✅ | ✅ | ❌ | ❌ |
-| **Providers & Resilience** | | | | |
-| Three-tier provider fallback + quarantine | ✅ | ✅ | ❌ | ❌ |
-| Native + text tool call repair | ✅ | ✅ | ✅ | ❌ |
-| Structured nonzero `execute` output | ✅ | ❌ | ❌ | ❌ |
-| Repeated command-failure recovery hints | ✅ | ❌ | ❌ | ❌ |
-| Streaming with stall detection | ✅ | ✅ | ❌ | ✅ |
-| Truncated JSON repair + retry | ✅ | ✅ | ❌ | ❌ |
-| Model-specific temperature override | ✅ | ✅ | ❌ | ❌ |
-| Gemini 3 thought_signature support | ✅ | ❌ | ❌ | ❌ |
-| Thinking token preservation (`<think>`) | ✅ | ✅ | ❌ | ❌ |
-| Model control token stripping | ✅ | ✅ | ❌ | ✅ |
-| **Memory & Context** | | | | |
-| Persistent memory (AGENTS.md) | ✅ | ✅ | ✅ | ✅ |
-| Auto-summarization + history offloading | ✅ | ✅ | ✅ | ✅ |
-| Pre-compact transcript archival | ✅ | ✅ | ❌ | ❌ |
-| Atomic file writes (crash-safe) | ✅ | ✅ | ❌ | ❌ |
-| Session persistence + resume | ✅ | ✅ | ❌ | ❌ |
-| Session heartbeat + auto-cleanup | ✅ | ✅ | ❌ | ❌ |
-| Background memory extraction | ✅ | ✅ | ❌ | ❌ |
-| **Security & Hooks** | | | | |
-| Rich hook result model (block/redirect/inject) | ✅ | ✅ | ✅ | ✅ |
-| Credential proxy for sandboxed agents | ✅ | ✅ | ❌ | ✅ |
-| External shell hooks (pre/post tool + LLM) | ✅ | ✅ | ❌ | ✅ |
-| Declarative permission rules | ✅ | ✅ | ❌ | ❌ |
-| Tool access control (block/allow) | ✅ | ✅ | ❌ | ❌ |
-| Human-in-the-loop | ✅ | ✅ | ✅ | ✅ |
-| **Skills** | | | | |
-| SKILL.md with constraint documents | ✅ | ✅ | ✅ | ✅ |
-| Skill eligibility gating (OS/bins/env) | ✅ | ✅ | ✅ | ❌ |
-| Runtime `display_clawagents_home()` (path rendering in tool descriptions) | ✅ | ✅ | ❌ | ❌ |
-| **RL & Self-Improvement** | | | | |
-| Prompt-Time RL (PTRL) — learn from past runs | ✅ | ❌ | ❌ | ❌ |
-| Trajectory logging + run scoring | ✅ | ✅ | ❌ | ❌ |
-| Trajectory compression (RLAIF / fine-tuning ready) | ✅ | ✅ | ❌ | ❌ |
-| Consecutive-failure rethink | ✅ | ❌ | ❌ | ❌ |
-| Adaptive rethink threshold | ✅ | ❌ | ❌ | ❌ |
-| Deterministic verification (exit codes, tests) | ✅ | ✅ | ❌ | ❌ |
-| GRPO-inspired multi-sample comparison | ✅ | ❌ | ❌ | ❌ |
-| Task-type-aware verification | ✅ | ❌ | ❌ | ❌ |
-| LLM-as-Judge verification | ✅ | ✅ | ❌ | ❌ |
-| RL fine-tuning hooks (TRL / SLIME / Atropos) | ✅ | ✅ | ❌ | ❌ |
-| RFT-ready transition export | ✅ | ✅ | ❌ | ❌ |
-| **Infrastructure** | | | | |
-| Gateway HTTP server + SSE | ✅ | ✅ | ❌ | ✅ |
-| WebSocket gateway | ✅ | ✅ | ❌ | ✅ |
-| Activity heartbeats (prevent gateway false-timeouts) | ✅ | ✅ | ❌ | ❌ |
-| Multi-channel messaging (Telegram, WhatsApp, Signal) | ✅ | ✅ (+ Discord, Slack, Feishu, WeChat, QQ) | ❌ | ✅ |
-| Per-session message serialization | ✅ | ✅ | ❌ | ✅ |
-| Error taxonomy + recovery recipes | ✅ | ✅ | ❌ | ❌ |
-| Prompt cache boundary (Anthropic) | ✅ | ✅ | ✅ | ❌ |
-| Prompt-cache-aware `CommandDef` (deferred state mutation) | ✅ | ✅ | ❌ | ❌ |
-| Lane-based command queue | ✅ | ✅ | ❌ | ✅ |
-| Hermetic test runner with concurrency pinning | ✅ | ✅ | ❌ | ❌ |
-| Cron / scheduled jobs | ✅ | ✅ | ❌ | ❌ |
-| ACP (Agent Communication Protocol) adapter | ✅ | ✅ | ❌ | ❌ |
-| Browser tools (Playwright / CDP / Camoufox) | ✅ | ✅ | ❌ | ❌ |
+| Feature | ClawAgents v6.8.1 | Hermes Agent | DeepAgents | OpenClaw | OpenHarness |
+|:---|:---:|:---:|:---:|:---:|:---:|
+| **Core** |  |  |  |  |  |
+| ReAct loop | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Tool loop detection (soft + hard + ping-pong) | ✅ | ✅ | ❌ | ✅ | ❌ |
+| Circuit breaker (no-progress / tool failure) | ✅ | ✅ | ❌ | ❌ | ◐ |
+| Efficiency rules (system prompt) | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Adaptive token estimation (tiktoken) | ✅ | ✅ | ❌ | ❌ | ✅ |
+| Model-aware context budgeting | ✅ | ✅ | ❌ | ❌ | ◐ |
+| Fraction-based summarization triggers | ✅ | ✅ | ✅ | ❌ | ✅ |
+| **Tools** |  |  |  |  |  |
+| Pluggable sandbox backend | ✅ | ✅ | ✅ | ✅ | ◐ |
+| In-memory VFS (testing) | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Cross-provider conformance tests | ✅ | ✅ | ✅ | ❌ | ◐ |
+| Lazy tool registry (deferred imports) | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Compact tool-universe discovery | ✅ | ❌ | ❌ | ❌ | ◐ |
+| Tool lookup over names, descriptions, and keywords | ✅ | ❌ | ❌ | ❌ | ✅ |
+| Tool result caching (LRU) | ✅ | ❌ | ❌ | ❌ | ❌ |
+| JSON Schema param validation + coercion | ✅ | ✅ | ❌ | ❌ | ✅ |
+| ComposeTool (deterministic pipelines) | ✅ | ❌ | ❌ | ❌ | ❌ |
+| `think` tool (structured reasoning) | ✅ | ✅ | ❌ | ❌ | ❌ |
+| LangChain tool adapter | ✅ | N/A | N/A | ❌ | N/A |
+| MCP server integration (stdio / SSE / Streamable HTTP) | ✅ | ✅ | ❌ | ❌ | ✅ |
+| Path-scoped parallel tool execution | ✅ | ✅ | ❌ | ❌ | ◐ |
+| **Agents & Orchestration** |  |  |  |  |  |
+| Sub-agent delegation | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Subagent depth limit (≤ 2, no recursion) | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Subagent / forked-agent memory isolation | ✅ | ✅ | ✅ | ❌ | ◐ |
+| Per-agent IterationBudget | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Coordinator / swarm mode | ✅ | ❌ | ❌ | ✅ | ✅ |
+| Barrier-based request scheduling | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Planning / TodoList | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Plugin hook expansion (priority chain) | ✅ | ✅ | ❌ | ❌ | ◐ |
+| **Providers & Resilience** |  |  |  |  |  |
+| Three-tier provider fallback + quarantine | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Native + text tool call repair | ✅ | ✅ | ✅ | ❌ | ❌ |
+| Structured nonzero `execute` output | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Repeated command-failure recovery hints | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Streaming with stall detection | ✅ | ✅ | ❌ | ✅ | ◐ |
+| Truncated JSON repair + retry | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Model-specific temperature override | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Gemini 3 thought_signature support | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Thinking token preservation (`<think>`) | ✅ | ✅ | ❌ | ❌ | ◐ |
+| Model control token stripping | ✅ | ✅ | ❌ | ✅ | ❌ |
+| **Memory & Context** |  |  |  |  |  |
+| Persistent memory (AGENTS.md) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Auto-summarization + history offloading | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Pre-compact transcript archival | ✅ | ✅ | ❌ | ❌ | ◐ |
+| Atomic file writes (crash-safe) | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Session persistence + resume | ✅ | ✅ | ❌ | ❌ | ✅ |
+| Session heartbeat + auto-cleanup | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Background memory extraction | ✅ | ✅ | ❌ | ❌ | ❌ |
+| **Security & Hooks** |  |  |  |  |  |
+| Rich hook result model (block/redirect/inject) | ✅ | ✅ | ✅ | ✅ | ◐ |
+| Credential proxy for sandboxed agents | ✅ | ✅ | ❌ | ✅ | ❌ |
+| External shell hooks (pre/post tool + LLM) | ✅ | ✅ | ❌ | ✅ | ✅ |
+| Declarative permission rules | ✅ | ✅ | ❌ | ❌ | ✅ |
+| Tool access control (block/allow) | ✅ | ✅ | ❌ | ❌ | ✅ |
+| Human-in-the-loop | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Skills** |  |  |  |  |  |
+| SKILL.md with constraint documents | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Skill eligibility gating (OS/bins/env) | ✅ | ✅ | ✅ | ❌ | ❌ |
+| Runtime `display_clawagents_home()` (path rendering in tool descriptions) | ✅ | ✅ | ❌ | ❌ | ❌ |
+| **RL & Self-Improvement** |  |  |  |  |  |
+| Prompt-Time RL (PTRL) — learn from past runs | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Trajectory logging + run scoring | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Trajectory compression (RLAIF / fine-tuning ready) | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Consecutive-failure rethink | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Adaptive rethink threshold | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Deterministic verification (exit codes, tests) | ✅ | ✅ | ❌ | ❌ | ◐ |
+| GRPO-inspired multi-sample comparison | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Task-type-aware verification | ✅ | ❌ | ❌ | ❌ | ❌ |
+| LLM-as-Judge verification | ✅ | ✅ | ❌ | ❌ | ❌ |
+| RL fine-tuning hooks (TRL / SLIME / Atropos) | ✅ | ✅ | ❌ | ❌ | ❌ |
+| RFT-ready transition export | ✅ | ✅ | ❌ | ❌ | ❌ |
+| **Infrastructure** |  |  |  |  |  |
+| Gateway HTTP server + SSE | ✅ | ✅ | ❌ | ✅ | ✅ |
+| WebSocket gateway | ✅ | ✅ | ❌ | ✅ | ◐ |
+| Activity heartbeats (prevent gateway false-timeouts) | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Multi-channel messaging (Telegram, WhatsApp, Signal) | ✅ | ✅ (+ Discord, Slack, Feishu, WeChat, QQ) | ❌ | ✅ | ✅ (+ Feishu, Slack, Discord) |
+| Per-session message serialization | ✅ | ✅ | ❌ | ✅ | ◐ |
+| Error taxonomy + recovery recipes | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Prompt cache boundary (Anthropic) | ✅ | ✅ | ✅ | ❌ | ❌ |
+| Prompt-cache-aware `CommandDef` (deferred state mutation) | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Lane-based command queue | ✅ | ✅ | ❌ | ✅ | ◐ |
+| Hermetic test runner with concurrency pinning | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Cron / scheduled jobs | ✅ | ✅ | ❌ | ❌ | ❌ |
+| ACP (Agent Communication Protocol) adapter | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Browser tools (Playwright / CDP / Camoufox) | ✅ | ✅ | ❌ | ❌ | ◐ |
 
 ---
 
@@ -1474,7 +1478,8 @@ landed in the v6.5/v6.6 line — `tests/test_subagent_depth.py`,
 `tests/test_transport.py`, `tests/test_commands.py`, `tests/test_aux_models.py`,
 `tests/test_background.py` — and the four v6.6 feature suites
 (`tests/test_browser.py`, `tests/test_cron.py`, `tests/test_acp.py`,
-`tests/test_rl.py`). Current v6.8.0 coverage adds
+`tests/test_rl.py`). Current v6.8.1 coverage adds `tests/test_prompts.py` for
+shared prompt assembly and legacy hook injection, while v6.8.0 added
 `tests/test_openharness_inspired_surfaces.py` for dry-run previews, provider
 profiles, structured permission decisions, background task tools, plugin
 metadata compatibility loading, and MCP auth/reconnect helpers. v6.7.1 added
@@ -1486,6 +1491,24 @@ parity sweep.
 ---
 
 ## Changelog
+
+### v6.8.1 — Prompt architecture and release packaging polish (May 2026)
+
+Patch release focused on keeping the Python and TypeScript packages aligned for
+installed users after the OpenHarness-inspired operational surface work.
+
+- **Prompt assembly module** — `clawagents.prompts` now owns system prompt
+  construction, lesson preambles, `__CACHE_BOUNDARY__` placement, and dynamic
+  memory/skill prompt injection.
+- **Hook compatibility** — prompt injection remains compatible with the legacy
+  dict-shaped messages used by older `before_llm` integrations.
+- **OpenHarness comparison** — the feature matrix now includes
+  [HKUDS/OpenHarness](https://github.com/HKUDS/OpenHarness) with conservative
+  full/partial markers.
+
+Release verification: **Python 851 passed, 3 skipped** plus bytecode
+compilation; TypeScript sibling: **526 passed, 4 skipped**, `tsc --noEmit`, and
+build.
 
 ### v6.8.0 — OpenHarness-inspired operational surfaces (May 2026)
 

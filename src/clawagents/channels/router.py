@@ -14,7 +14,11 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Awaitable, Callable, Optional
 
-from clawagents.channels.types import ChannelAdapter, ChannelMessage
+from clawagents.channels.types import (
+    ChannelAdapter,
+    ChannelMessage,
+    channel_message_to_agent_input,
+)
 from clawagents.channels.keyed_queue import KeyedAsyncQueue
 
 AgentFactory = Callable[[], Awaitable[Any]]
@@ -107,6 +111,7 @@ class ChannelRouter:
             conversation_id=messages[-1].conversation_id,
             body="\n".join(m.body for m in messages),
             timestamp=messages[-1].timestamp,
+            media=[attachment for m in messages for attachment in m.media],
             raw=messages[-1].raw,
         )
         await self._dispatch(combined)
@@ -124,7 +129,7 @@ class ChannelRouter:
                         return
 
                 agent = await self._agent_factory()
-                result = await agent.invoke(msg.body)
+                result = await agent.invoke(channel_message_to_agent_input(msg))
                 reply = result.result or ""
 
                 if self._on_outbound:

@@ -1,10 +1,18 @@
-__version__ = "6.8.0"
+__version__ = "6.8.1"
 
 from clawagents.agent import ClawAgent, create_claw_agent
 from clawagents.run_result import RunResult
 from clawagents.graph.agent_loop import (
     AgentState, OnEvent, EventKind,
     BeforeLLMHook, BeforeToolHook, AfterToolHook, HookResult,
+)
+from clawagents.graph.coordinator import (
+    CoordinatorState,
+    ForkedAgentWorkerBackend,
+    SubprocessWorkerBackend,
+    WorkerBackend,
+    WorkerTask,
+    run_coordinator,
 )
 from clawagents.trajectory import (
     TrajectoryRecorder, TurnRecord, RunSummary,
@@ -16,7 +24,9 @@ from clawagents.context import (
     register_context_engine, resolve_context_engine, list_context_engines,
 )
 from clawagents.channels import (
-    ChannelMessage, ChannelAdapter, ChannelRouter, KeyedAsyncQueue,
+    ChannelMessage, ChannelAttachment, ChannelCommand, ChannelAdapter,
+    ChannelRouter, KeyedAsyncQueue, channel_message_to_agent_input,
+    normalize_channel_attachments, parse_channel_command,
 )
 from clawagents.errors import (
     ErrorClass, ErrorDescriptor, RecoveryRecipe,
@@ -55,8 +65,15 @@ from clawagents.stream_events import (
     StreamEvent, TurnStartedEvent, AssistantTextEvent, AssistantDeltaEvent,
     ToolCallPlannedEvent, ToolStartedEvent, ToolResultEvent,
     ApprovalRequiredEvent, UsageEvent, GuardrailTrippedEvent,
+    CompactProgressEvent,
     HandoffOccurredEvent,
     FinalOutputEvent, ErrorStreamEvent, ErrorEvent, stream_event_from_kind,
+)
+from clawagents.context.carryover import (
+    CompactionCarryover,
+    get_compaction_carryover,
+    normalize_compaction_carryover,
+    set_compaction_carryover,
 )
 from clawagents.handoffs import (
     Handoff, HandoffInputData, InputFilter, handoff,
@@ -81,6 +98,12 @@ from clawagents.tools.tool_program import (
 from clawagents.tools.cache import SqliteResultCacheManager
 from clawagents.tools.catalog import create_tool_discovery_tools, names_for_tool_profile
 from clawagents.explorer import create_explorer_tools
+from clawagents.prompts import (
+    PROMPT_CACHE_BOUNDARY,
+    append_prompt_injection,
+    build_prompt_injection,
+    build_system_prompt,
+)
 from clawagents.sandbox import DockerBackend
 from clawagents.sandbox.manifest import (
     SandboxManifest,

@@ -54,7 +54,9 @@ from clawagents.stream_events import (
     StreamEvent,
     stream_event_from_kind,
 )
+from clawagents.context.carryover import get_compaction_carryover
 from clawagents.handoffs import Handoff, HandoffInputData
+from clawagents.prompts import build_system_prompt
 from clawagents.tracing import handoff_span
 
 logger = logging.getLogger(__name__)
@@ -305,6 +307,7 @@ EventKind = Literal[
     "tool_started",
     "usage",
     "guardrail_tripped",
+    "compact_progress",
     "final_output",
 ]
 
@@ -354,6 +357,10 @@ def _default_on_event(kind: EventKind, data: dict[str, Any]) -> None:
         sys.stderr.write(f"[error] {data['phase']}: {data['message']}\n")
     elif kind == "context":
         sys.stderr.write(f"[context] {data['message']}\n")
+    elif kind == "compact_progress":
+        phase = data.get("phase", "")
+        message = data.get("message", "")
+        sys.stderr.write(f"[compact] {phase}: {message}\n")
     sys.stderr.flush()
 
 
@@ -1132,6 +1139,7 @@ async def _compact_if_needed(
     emit: OnEvent,
     token_multiplier: float = 1.0,
     model_name: Optional[str] = None,
+    run_context: Optional[RunContext] = None,
 ) -> list[LLMMessage]:
     messages = _truncate_old_tool_args(messages)
 
@@ -1147,6 +1155,13 @@ async def _compact_if_needed(
         return messages
 
     emit("context", {"message": f"~{current_tokens} tokens exceeds budget {budget} — compacting"})
+    emit("compact_progress", {
+        "phase": "start",
+        "message": "context budget exceeded; compacting older turns",
+        "current_tokens": current_tokens,
+        "budget": budget,
+        "message_count": len(messages),
+    })
 
     system_msgs: list[LLMMessage] = []
     non_system: list[LLMMessage] = []
@@ -1168,6 +1183,7 @@ async def _compact_if_needed(
         if m.role == "user" and not (isinstance(m.content, str) and m.content.startswith("[Tool Result]")):
             task_context = m.content[:500] if isinstance(m.content, str) else ""
             break
+    carryover = get_compaction_carryover(run_context, task_context=task_context)
 
     _archive_pre_compact_transcript(older, task_context)
 
@@ -1189,6 +1205,13 @@ async def _compact_if_needed(
     total_tokens = _estimate_tokens("\n\n".join(text_parts), token_multiplier)
 
     try:
+        emit("compact_progress", {
+            "phase": "summarize",
+            "message": "summarizing compacted turns",
+            "older_messages": len(older),
+            "recent_messages": len(recent),
+            "carryover": carryover.to_dict(),
+        })
         if total_tokens <= _COMPACTION_CHUNK_TOKENS:
             text_log = "\n\n".join(text_parts)
             summary_text = await _summarize_chunk(llm, text_log, task_context)
@@ -1211,6 +1234,13 @@ async def _compact_if_needed(
             emit("context", {
                 "message": f"splitting {len(text_parts)} parts into {len(chunks)} chunks for summarization",
             })
+            emit("compact_progress", {
+                "phase": "chunk",
+                "message": "splitting older turns into summary chunks",
+                "chunks": len(chunks),
+                "older_messages": len(older),
+                "recent_messages": len(recent),
+            })
 
             chunk_summaries: list[str] = []
             for i, chunk in enumerate(chunks):
@@ -1220,17 +1250,42 @@ async def _compact_if_needed(
 
         if not summary_text.strip():
             emit("context", {"message": "compaction returned empty summary — dropping oldest"})
+            emit("compact_progress", {
+                "phase": "dropped",
+                "message": "empty compaction summary; dropped older turns",
+                "older_messages": len(older),
+                "recent_messages": len(recent),
+                "carryover": carryover.to_dict(),
+            })
             return [*system_msgs, *recent]
 
+        carryover_text = carryover.to_markdown()
+        content = f"[System — Compacted History]\n{summary_text}"
+        if carryover_text:
+            content = f"[System — Compacted History]\n{carryover_text}\n\n## Conversation Summary\n{summary_text}"
         summary = LLMMessage(
             role="user",
-            content=f"[System — Compacted History]\n{summary_text}",
+            content=content,
         )
         emit("context", {"message": f"compacted {len(older)} messages into summary"})
+        emit("compact_progress", {
+            "phase": "end",
+            "message": "compaction completed",
+            "older_messages": len(older),
+            "recent_messages": len(recent),
+            "carryover": carryover.to_dict(),
+        })
         return [*system_msgs, summary, *recent]
     except Exception:
         logger.debug("Compaction LLM call failed", exc_info=True)
         emit("context", {"message": "compaction failed — dropping oldest messages"})
+        emit("compact_progress", {
+            "phase": "failed",
+            "message": "compaction failed; dropped older turns",
+            "older_messages": len(older),
+            "recent_messages": len(recent),
+            "carryover": carryover.to_dict(),
+        })
         return [*system_msgs, *recent]
 
 
@@ -1572,18 +1627,23 @@ async def run_agent_graph(
             emit("warn", {"message": f"advisor consultation failed: {err}"})
 
     prompt_to_use = system_prompt or BASE_SYSTEM_PROMPT
+    lesson_preamble = ""
 
     # PTRL Layer 1: Pre-run lesson injection (skipped for isolated subagents).
     if learn and not getattr(run_context, "skip_memory", False):
         from clawagents.trajectory.lessons import build_lesson_preamble
         preamble = build_lesson_preamble()
         if preamble:
-            prompt_to_use = prompt_to_use + preamble
+            lesson_preamble = preamble
             emit("context", {"message": "PTRL: injected lessons from past runs"})
 
     # Insert __CACHE_BOUNDARY__ between static (instructions + tools) and dynamic content.
     # The Anthropic provider splits on this marker to enable prompt caching.
-    system_content = f"{prompt_to_use}\n\n{tool_desc}\n__CACHE_BOUNDARY__"
+    system_content = build_system_prompt(
+        base_prompt=prompt_to_use,
+        tool_description=tool_desc,
+        lesson_preamble=lesson_preamble,
+    )
     messages: list[LLMMessage] = [
         LLMMessage(role="system", content=system_content),
         LLMMessage(role="user", content=task),
@@ -1743,7 +1803,7 @@ async def run_agent_graph(
             messages = _micro_compact_tool_results(messages)  # Claude Code pattern: clear old tool results
             messages = _soft_trim_messages(messages, context_window, token_multiplier, emit, resolved_model_name)
             messages = await _compact_if_needed(
-                messages, context_window, llm, emit, token_multiplier, resolved_model_name,
+                messages, context_window, llm, emit, token_multiplier, resolved_model_name, run_context,
             )
 
             # External pre_llm hook (runs before programmatic hook)
@@ -1864,7 +1924,7 @@ async def run_agent_graph(
                     })
                     messages = _soft_trim_messages(messages, context_window, token_multiplier, emit, resolved_model_name)
                     messages = await _compact_if_needed(
-                        messages, context_window, llm, emit, token_multiplier, resolved_model_name,
+                        messages, context_window, llm, emit, token_multiplier, resolved_model_name, run_context,
                     )
                     continue
 

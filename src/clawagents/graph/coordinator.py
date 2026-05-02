@@ -28,7 +28,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Optional, Protocol
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +96,18 @@ class CoordinatorState:
     final_result: str = ""
 
 
+class WorkerBackend(Protocol):
+    """Backend capable of executing a coordinator worker task."""
+
+    async def run(
+        self,
+        worker_task: WorkerTask,
+        llm: Any,
+        tools: Any,
+        context_window: int,
+    ) -> WorkerTask: ...
+
+
 async def _run_worker(
     worker_task: WorkerTask,
     llm: Any,
@@ -124,6 +136,99 @@ async def _run_worker(
         worker_task.duration_s = time.monotonic() - t0
 
     return worker_task
+
+
+class ForkedAgentWorkerBackend:
+    """Default worker backend that uses the in-process forked-agent runner."""
+
+    async def run(
+        self,
+        worker_task: WorkerTask,
+        llm: Any,
+        tools: Any,
+        context_window: int,
+    ) -> WorkerTask:
+        return await _run_worker(worker_task, llm, tools, context_window)
+
+
+class SubprocessWorkerBackend:
+    """Headless worker backend using a small JSON-over-stdin protocol.
+
+    The child process receives:
+    ``{"id", "prompt", "tools", "context_window"}``
+    and may return JSON with ``status`` and ``result`` fields. Plain stdout is
+    treated as a successful result for lightweight scripts.
+    """
+
+    def __init__(
+        self,
+        command: list[str],
+        *,
+        timeout_s: float = 120.0,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+    ) -> None:
+        if not command:
+            raise ValueError("SubprocessWorkerBackend requires a command")
+        self.command = list(command)
+        self.timeout_s = timeout_s
+        self.cwd = cwd
+        self.env = env
+
+    async def run(
+        self,
+        worker_task: WorkerTask,
+        llm: Any,
+        tools: Any,
+        context_window: int,
+    ) -> WorkerTask:
+        t0 = time.monotonic()
+        payload = {
+            "id": worker_task.id,
+            "prompt": worker_task.prompt,
+            "tools": worker_task.tools,
+            "context_window": context_window,
+        }
+        worker_task.status = "running"
+        proc: asyncio.subprocess.Process | None = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *self.command,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=self.cwd,
+                env=self.env,
+            )
+            input_bytes = json.dumps(payload).encode("utf-8")
+            stdout, stderr = await asyncio.wait_for(proc.communicate(input_bytes), self.timeout_s)
+            out_text = stdout.decode("utf-8", errors="replace").strip()
+            err_text = stderr.decode("utf-8", errors="replace").strip()
+            data: dict[str, Any]
+            try:
+                data = json.loads(out_text) if out_text else {}
+            except json.JSONDecodeError:
+                data = {"status": "done" if proc.returncode == 0 else "error", "result": out_text}
+            status = str(data.get("status") or ("done" if proc.returncode == 0 else "error"))
+            worker_task.status = "done" if status == "done" else "error"
+            result = data.get("result")
+            worker_task.result = str(result if result is not None else out_text or err_text)
+            if proc.returncode not in (0, None) and worker_task.status == "done":
+                worker_task.status = "error"
+        except asyncio.TimeoutError:
+            worker_task.status = "error"
+            worker_task.result = f"Worker subprocess timed out after {self.timeout_s:.1f}s"
+            try:
+                if proc is not None:
+                    proc.kill()
+            except Exception:
+                pass
+        except Exception as exc:
+            worker_task.status = "error"
+            worker_task.result = f"Worker subprocess error: {exc}"
+        finally:
+            worker_task.duration_s = time.monotonic() - t0
+        return worker_task
 
 
 def _parse_coordinator_response(content: str) -> dict[str, Any]:
@@ -156,6 +261,7 @@ async def run_coordinator(
     max_rounds: int = 10,
     context_window: int = 200_000,
     on_event: Any = None,
+    worker_backend: WorkerBackend | None = None,
 ) -> CoordinatorState:
     """Run the coordinator/swarm orchestration loop.
 
@@ -178,6 +284,7 @@ async def run_coordinator(
     from clawagents.providers.llm import LLMMessage
 
     emit = on_event or (lambda *a, **kw: None)
+    backend = worker_backend or ForkedAgentWorkerBackend()
     state = CoordinatorState(task=task, max_workers=max_workers, max_rounds=max_rounds)
 
     # Build coordinator conversation
@@ -238,7 +345,7 @@ async def run_coordinator(
 
             # Execute workers concurrently
             await asyncio.gather(*[
-                _run_worker(wt, llm, tools, context_window)
+                backend.run(wt, llm, tools, context_window)
                 for wt in worker_tasks
             ])
 

@@ -145,3 +145,97 @@ async def test_mcp_auth_tool_updates_config_and_reconnects():
     assert server.params["headers"]["Authorization"] == "Bearer secret"
     assert server.reconnected == 1
 
+
+async def test_compaction_preserves_carryover_and_emits_progress_events(tmp_path, monkeypatch):
+    from clawagents.context.carryover import set_compaction_carryover
+    from clawagents.graph.agent_loop import _compact_if_needed
+    from clawagents.providers.llm import LLMMessage, LLMResponse
+    from clawagents.run_context import RunContext
+
+    monkeypatch.chdir(tmp_path)
+
+    class FakeLLM:
+        async def chat(self, messages, on_chunk=None, cancel_event=None, tools=None):
+            return LLMResponse("summarized old work", model="fake", tokens_used=12)
+
+    messages = [LLMMessage(role="system", content="system")]
+    for idx in range(24):
+        messages.append(LLMMessage(role="user", content=f"history {idx} " + ("x" * 500)))
+
+    ctx = RunContext()
+    set_compaction_carryover(
+        ctx,
+        task_focus="finish runtime continuity",
+        recent_files=["src/clawagents/graph/agent_loop.py"],
+        recent_work_log=["added failing tests"],
+        invoked_skills=["autopilot"],
+        active_workers=["worker-a"],
+        channel_log=[{
+            "channel_id": "telegram",
+            "conversation_id": "chat-1",
+            "body": "/status now",
+        }],
+        metadata={"release": "6.8"},
+    )
+
+    events = []
+    compacted = await _compact_if_needed(
+        messages,
+        200,
+        FakeLLM(),
+        lambda kind, data: events.append((kind, data)),
+        1.0,
+        None,
+        run_context=ctx,
+    )
+
+    summary = next(m.content for m in compacted if isinstance(m.content, str) and "Compacted History" in m.content)
+    assert "## Carryover State" in summary
+    assert "finish runtime continuity" in summary
+    assert "src/clawagents/graph/agent_loop.py" in summary
+    assert "/status now" in summary
+
+    phases = [data["phase"] for kind, data in events if kind == "compact_progress"]
+    assert phases[0] == "start"
+    assert "end" in phases
+
+
+async def test_subprocess_worker_backend_runs_headless_json_protocol():
+    from clawagents.graph.coordinator import SubprocessWorkerBackend, WorkerTask
+
+    script = (
+        "import json,sys;"
+        "payload=json.load(sys.stdin);"
+        "print(json.dumps({'status':'done','result':'subprocess:' + payload['id'] + ':' + payload['prompt']}))"
+    )
+    backend = SubprocessWorkerBackend([sys.executable, "-c", script])
+    task = WorkerTask(id="task_1", prompt="hello", tools=["read_file"], status="running")
+
+    result = await backend.run(task, llm=None, tools=None, context_window=123)
+
+    assert result.status == "done"
+    assert result.result == "subprocess:task_1:hello"
+    assert result.duration_s >= 0
+
+
+def test_channel_messages_parse_commands_and_normalize_attachments():
+    from clawagents.channels import ChannelMessage, channel_message_to_agent_input
+
+    msg = ChannelMessage(
+        channel_id="telegram",
+        sender_id="u1",
+        conversation_id="chat-1",
+        body="/deploy staging now",
+        timestamp=1.0,
+        media=[{"url": "file:///tmp/log.txt", "mimeType": "text/plain", "filename": "log.txt"}],
+    )
+
+    assert msg.command is not None
+    assert msg.command.name == "deploy"
+    assert msg.command.args == "staging now"
+    assert msg.media[0].mime_type == "text/plain"
+
+    prompt = channel_message_to_agent_input(msg)
+    assert "[Channel Command: deploy]" in prompt
+    assert "staging now" in prompt
+    assert "log.txt" in prompt

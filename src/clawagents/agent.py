@@ -989,7 +989,7 @@ def _compose_before_llm(
     skill_summaries: Optional[str],
 ) -> Optional[BeforeLLMHook]:
     """Compose memory loading + skill injection into one before_llm hook."""
-    from clawagents.providers.llm import LLMMessage
+    from clawagents.prompts import append_prompt_injection, build_prompt_injection
 
     memory_content: Optional[str] = None
     if memory_paths:
@@ -998,24 +998,9 @@ def _compose_before_llm(
 
     if not memory_content and not skill_summaries:
         return None
+    injection = build_prompt_injection(memory_content, skill_summaries)
 
     def hook(messages: list) -> list:
-        inject_parts = []
-        if memory_content:
-            inject_parts.append(memory_content)
-        if skill_summaries:
-            inject_parts.append(skill_summaries)
-
-        if inject_parts:
-            joined = "\n\n".join(inject_parts)
-            result = list(messages)
-            for i, m in enumerate(result):
-                role = getattr(m, "role", None) if not isinstance(m, dict) else m.get("role")
-                if role == "system":
-                    content = getattr(m, "content", "") if not isinstance(m, dict) else m.get("content", "")
-                    result[i] = LLMMessage(role="system", content=content + "\n\n" + joined)
-                    break
-            return result
-        return messages
+        return list(append_prompt_injection(messages, injection))
 
     return hook

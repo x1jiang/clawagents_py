@@ -95,6 +95,19 @@ class GuardrailTrippedEvent(StreamEvent):
 
 
 @dataclass
+class CompactProgressEvent(StreamEvent):
+    """Emitted as context compaction starts, retries, completes, or falls back."""
+    phase: str = ""
+    message: str = ""
+    current_tokens: int = 0
+    budget: int = 0
+    message_count: int = 0
+    older_messages: int = 0
+    recent_messages: int = 0
+    kind: str = "compact_progress"
+
+
+@dataclass
 class HandoffOccurredEvent(StreamEvent):
     """Emitted when the loop transfers control to another agent via :class:`Handoff`."""
     from_agent: str = ""
@@ -134,6 +147,7 @@ AnyStreamEvent = Union[
     ApprovalRequiredEvent,
     UsageEvent,
     GuardrailTrippedEvent,
+    CompactProgressEvent,
     HandoffOccurredEvent,
     FinalOutputEvent,
     ErrorStreamEvent,
@@ -151,6 +165,7 @@ _KIND_TO_CLS: dict[str, type[StreamEvent]] = {
     "approval_required": ApprovalRequiredEvent,
     "usage": UsageEvent,
     "guardrail_tripped": GuardrailTrippedEvent,
+    "compact_progress": CompactProgressEvent,
     "handoff_occurred": HandoffOccurredEvent,
     "final_output": FinalOutputEvent,
     "error": ErrorStreamEvent,
