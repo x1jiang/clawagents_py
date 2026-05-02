@@ -370,12 +370,23 @@ class ToolRegistry:
         # see the same gate, including parallel dispatch.
         from clawagents.permissions.mode import (
             PermissionMode,
-            is_write_class_tool,
+            evaluate_tool_permission,
         )
 
         if run_context is not None:
             mode = getattr(run_context, "permission_mode", PermissionMode.DEFAULT)
-            if mode == PermissionMode.PLAN and is_write_class_tool(tool_name):
+            file_path = (
+                args.get("path")
+                or args.get("file_path")
+                or args.get("filePath")
+            )
+            decision = evaluate_tool_permission(
+                tool_name,
+                mode=mode,
+                file_path=file_path if isinstance(file_path, str) else None,
+                command=args.get("command") if isinstance(args.get("command"), str) else None,
+            )
+            if not decision.allowed and not decision.requires_confirmation:
                 return ToolResult(
                     success=False, output="",
                     error=(

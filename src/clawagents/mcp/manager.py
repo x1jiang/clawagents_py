@@ -99,6 +99,61 @@ class MCPServerManager:
                         pass
         self._started = False
 
+    def get_server_config(self, server_name: str) -> Any:
+        """Return mutable transport params for a server when available."""
+        for server in self.servers:
+            if server.name == server_name:
+                return getattr(server, "params", None)
+        raise KeyError(f"No MCP server registered with name '{server_name}'")
+
+    def update_server_config(self, server_name: str, config: Any) -> None:
+        """Replace mutable transport params for a server when supported."""
+        for server in self.servers:
+            if server.name == server_name:
+                if not hasattr(server, "params"):
+                    raise TypeError(f"MCP server '{server_name}' does not expose mutable params")
+                setattr(server, "params", config)
+                return
+        raise KeyError(f"No MCP server registered with name '{server_name}'")
+
+    async def reconnect_all(self) -> None:
+        """Shutdown and reconnect all servers without re-registering tools."""
+        await self.shutdown()
+        for server in self.servers:
+            await server.connect()
+        self._started = True
+
+    async def update_server_auth(
+        self,
+        server_name: str,
+        *,
+        mode: str,
+        value: str,
+        key: str | None = None,
+        reconnect: bool = True,
+    ) -> Any:
+        """Apply auth material to stdio/env or http header params."""
+        config = self.get_server_config(server_name)
+        if not isinstance(config, dict):
+            raise TypeError(f"MCP server '{server_name}' params are not mutable dict config")
+        updated = dict(config)
+        if mode in {"env"}:
+            env_key = key or "MCP_AUTH_TOKEN"
+            env = dict(updated.get("env") or {})
+            env[env_key] = value
+            updated["env"] = env
+        elif mode in {"bearer", "header"}:
+            header_key = key or "Authorization"
+            headers = dict(updated.get("headers") or {})
+            headers[header_key] = f"Bearer {value}" if mode == "bearer" and header_key.lower() == "authorization" else value
+            updated["headers"] = headers
+        else:
+            raise ValueError("mode must be bearer, header, or env")
+        self.update_server_config(server_name, updated)
+        if reconnect:
+            await self.reconnect_all()
+        return updated
+
     async def __aenter__(self) -> "MCPServerManager":
         return self
 

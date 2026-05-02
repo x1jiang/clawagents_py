@@ -1,4 +1,4 @@
-__version__ = "6.7.1"
+__version__ = "6.8.0"
 
 from clawagents.agent import ClawAgent, create_claw_agent
 from clawagents.run_result import RunResult
@@ -136,6 +136,16 @@ from clawagents.transport import (
 from clawagents.background import (
     BackgroundJob, BackgroundJobManager, JobNotifier,
 )
+from clawagents.provider_profiles import (
+    ProviderProfile, ResolvedProviderProfile,
+    resolve_provider_profile, load_provider_profiles,
+)
+from clawagents.dry_run import build_dry_run_preview
+from clawagents.plugin_compat import (
+    LoadedCompatPlugin, PluginSkill, PluginCommand,
+    load_plugin, discover_plugins,
+)
+from clawagents.tools.background_task import create_background_task_tools
 
 # ── Settings hierarchy (v6.4) ──────────────────────────────────────────
 from clawagents.settings import (

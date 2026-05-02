@@ -444,6 +444,7 @@ class _AgentAsTool:
 
 def create_claw_agent(
     model: Union[str, LLMProvider, None] = None,
+    profile: Optional[str] = None,
     api_key: Optional[str] = None,
     base_url: Optional[str] = None,
     api_version: Optional[str] = None,
@@ -481,6 +482,8 @@ def create_claw_agent(
     Args:
         model:          Model name ("gpt-5", "gemini-3-flash") or LLMProvider.
                         None = auto-detect from env.
+        profile:        Optional named provider profile. Explicit model/api_key/base_url
+                        args override profile values.
         api_key:        API key for the model provider. Auto-routed based on model name.
                         Falls back to env vars (OPENAI_API_KEY / GEMINI_API_KEY) if omitted.
         base_url:       Custom base URL for OpenAI-compatible APIs. Enables Azure OpenAI,
@@ -587,6 +590,22 @@ def create_claw_agent(
     if context_window is None:
         from clawagents.config.config import load_config as _lc
         context_window = _lc().context_window  # default: 1_000_000
+
+    # ── Resolve optional provider profile before model construction ─────
+    if profile:
+        from clawagents.provider_profiles import resolve_provider_profile
+        resolved_profile = resolve_provider_profile(
+            profile,
+            model=model if isinstance(model, str) else None,
+            api_key=api_key,
+            base_url=base_url,
+            api_version=api_version,
+        )
+        if isinstance(model, str) or model is None:
+            model = resolved_profile.model
+        api_key = resolved_profile.api_key
+        base_url = resolved_profile.base_url
+        api_version = resolved_profile.api_version
 
     # ── Resolve model → LLMProvider ────────────────────────────────────
     llm = _resolve_model(model, streaming, api_key, context_window, max_tokens, temperature, base_url, api_version)
@@ -759,6 +778,10 @@ def create_claw_agent(
         handoffs=handoffs, name=name,
     )
 
+    from clawagents.tools.background_task import create_background_task_tools
+    for task_tool in create_background_task_tools():
+        registry.register(task_tool)
+
     from clawagents.tools.tool_program import create_tool_program_tool
     registry.register(create_tool_program_tool(registry))
 
@@ -794,6 +817,8 @@ def create_claw_agent(
         # Stash the manager on the agent so callers can shut it down. We also
         # register an atexit finaliser as a backstop for short-lived scripts.
         agent.mcp_manager = manager  # type: ignore[attr-defined]
+        from clawagents.tools.mcp_auth import MCPAuthTool
+        registry.register(MCPAuthTool(manager))
         import atexit
 
         def _shutdown_mcp():  # pragma: no cover — best-effort process exit hook

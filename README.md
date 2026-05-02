@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.7.1-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.8.0-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -26,7 +26,19 @@ pip install clawagents[anthropic]   # + Anthropic Claude support
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 6.7.1** — Tool discovery and compact-agent recovery release (April 2026). Compact tool-universe discovery is now registered by default, and tool lookup scores names, descriptions, and keyword metadata so small models can recover even when a tool name is imperfect. Failed native-tool observations preserve structured output, `execute` returns command/exit/stdout/stderr details on nonzero exits, and repeated identical failures get a repair hint instead of silently burning turns. The release also keeps recent security hardening from v6.7.0 and verifies the new recovery path with focused Python and TypeScript regression tests. See [Changelog](#changelog).
+> **Version 6.8.0** — OpenHarness-inspired operational surfaces release (May 2026). Adds static `--dry-run` readiness previews, named provider profiles (`--profile ollama/openai/gemini/anthropic`), structured permission decisions, first-class background task tools, metadata-only plugin compatibility loading, and an MCP auth/reconnect helper. The release keeps v6.7.1 compact tool-discovery recovery and v6.7.0 security hardening, with full Python and TypeScript regression suites passing. See [Changelog](#changelog).
+
+### New In v6.8.0
+
+```bash
+clawagents --dry-run --profile ollama --task "inspect this repo"
+```
+
+- **Dry-run previews** report provider resolution, auth readiness, inspectable tools, likely matching tools, and next actions without calling an LLM or executing tools.
+- **Provider profiles** give stable aliases for common backends while still letting explicit `create_claw_agent()` parameters override profile values.
+- **Background task tools** expose long-running command management (`task_create`, `task_status`, `task_output`, `task_stop`, `task_list`) through the normal tool registry.
+- **Plugin compatibility loading** reads `plugin.json` / `.claude-plugin/plugin.json` metadata, skills, commands, hooks, and MCP server declarations without executing plugin code.
+- **MCP auth refresh** lets agents update MCP server auth material and reconnect configured servers deliberately.
 
 ---
 
@@ -527,14 +539,15 @@ Traditional Stack (DeepAgents):           ClawAgents:
 
 ## Feature Matrix
 
-> Compares **ClawAgents v6.7.1** against three peer agent frameworks: **Hermes Agent**
+> Compares **ClawAgents v6.8.0** against three peer agent frameworks: **Hermes Agent**
 > ([metaspartan/hermes-agent](https://github.com/metaspartan/hermes-agent)), **DeepAgents**
 > ([langchain-ai/deepagents](https://github.com/langchain-ai/deepagents)), and **OpenClaw**.
 > The v6.5 hardening work, v6.6 Hermes-parity areas, v6.7.0 security fixes,
-> and v6.7.1 compact tool-discovery recovery now ship together in the current
+> v6.7.1 compact tool-discovery recovery, and v6.8.0 OpenHarness-inspired
+> operational surfaces now ship together in the current
 > release — every row in the ClawAgents column is ✅.
 
-| Feature | ClawAgents v6.7.1 | Hermes Agent | DeepAgents | OpenClaw |
+| Feature | ClawAgents v6.8.0 | Hermes Agent | DeepAgents | OpenClaw |
 |:---|:---:|:---:|:---:|:---:|
 | **Core** | | | | |
 | ReAct loop | ✅ | ✅ | ✅ | ✅ |
@@ -1461,7 +1474,10 @@ landed in the v6.5/v6.6 line — `tests/test_subagent_depth.py`,
 `tests/test_transport.py`, `tests/test_commands.py`, `tests/test_aux_models.py`,
 `tests/test_background.py` — and the four v6.6 feature suites
 (`tests/test_browser.py`, `tests/test_cron.py`, `tests/test_acp.py`,
-`tests/test_rl.py`). Current v6.7.1 coverage adds
+`tests/test_rl.py`). Current v6.8.0 coverage adds
+`tests/test_openharness_inspired_surfaces.py` for dry-run previews, provider
+profiles, structured permission decisions, background task tools, plugin
+metadata compatibility loading, and MCP auth/reconnect helpers. v6.7.1 added
 `tests/test_infra_improvements.py` for compact tool discovery, structured
 tool failure observations, recovery hints, and infrastructure behavior,
 alongside the v6.3/v6.4 regression sets and the broad `tests/simulated_test.py`
@@ -1470,6 +1486,34 @@ parity sweep.
 ---
 
 ## Changelog
+
+### v6.8.0 — OpenHarness-inspired operational surfaces (May 2026)
+
+Minor release focused on making ClawAgents easier to inspect, configure,
+recover, and integrate without changing the core agent loop contract.
+
+- **Static readiness previews** — `clawagents --dry-run --profile <name> --task
+  "<prompt>"` reports resolved provider settings, auth readiness, inspectable
+  tools, likely matching tools, and next actions without calling a model or
+  executing tools.
+- **Named provider profiles** — built-in `openai`, `gemini`, `anthropic`, and
+  `ollama` profiles plus project/user profile files give stable provider
+  aliases. Explicit factory parameters still take precedence.
+- **Structured permission decisions** — permission evaluation now returns a
+  reusable decision object with allow/confirmation/reason fields and feeds the
+  registry hard-block path for plan-mode and sensitive-path decisions.
+- **Background task tools** — the registry can expose task create/status/output
+  /stop/list tools backed by the existing background job manager, so long-running
+  work can be tracked instead of blocking an agent turn.
+- **Plugin compatibility loader** — metadata-only loading for `plugin.json` and
+  `.claude-plugin/plugin.json` reads plugin manifests, markdown skills/commands,
+  hooks, and MCP server declarations without executing arbitrary plugin code.
+- **MCP auth/reconnect helper** — MCP manager configs can be updated with new
+  environment/header auth material and reconnected deliberately.
+
+Release verification: **Python 844 passed, 3 skipped** plus bytecode
+compilation and dry-run smoke; TypeScript sibling: **520 passed, 4 skipped**,
+`tsc --noEmit`, build, and matching dry-run smoke.
 
 ### v6.7.1 — Tool discovery and compact-agent recovery (April 2026)
 

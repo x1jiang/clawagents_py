@@ -19,6 +19,8 @@ state directly; they only mutate ``run_context.permission_mode``.
 
 from __future__ import annotations
 
+import fnmatch
+from dataclasses import dataclass
 from enum import Enum
 
 
@@ -29,6 +31,28 @@ class PermissionMode(str, Enum):
     PLAN = "plan"
     ACCEPT_EDITS = "acceptEdits"
     BYPASS = "bypassPermissions"
+
+
+SENSITIVE_PATH_PATTERNS: tuple[str, ...] = (
+    "*/.ssh/*",
+    "*/.aws/credentials",
+    "*/.aws/config",
+    "*/.config/gcloud/*",
+    "*/.azure/*",
+    "*/.gnupg/*",
+    "*/.docker/config.json",
+    "*/.kube/config",
+    "*/.clawagents/credentials.json",
+)
+
+
+@dataclass(frozen=True)
+class PermissionDecision:
+    """Structured tool permission result."""
+
+    allowed: bool
+    requires_confirmation: bool = False
+    reason: str = ""
 
 
 # ─── Write-class tool registry ────────────────────────────────────────────
@@ -65,6 +89,65 @@ WRITE_CLASS_TOOLS: frozenset[str] = frozenset({
 def is_write_class_tool(tool_name: str) -> bool:
     """Return True if the named tool counts as write-class for plan mode."""
     return tool_name in WRITE_CLASS_TOOLS
+
+
+def evaluate_tool_permission(
+    tool_name: str,
+    *,
+    mode: PermissionMode = PermissionMode.DEFAULT,
+    is_read_only: bool = False,
+    file_path: str | None = None,
+    command: str | None = None,
+) -> PermissionDecision:
+    """Return a structured permission decision for one tool call."""
+    if file_path:
+        for candidate in _policy_match_paths(file_path):
+            for pattern in SENSITIVE_PATH_PATTERNS:
+                if fnmatch.fnmatch(candidate, pattern):
+                    return PermissionDecision(
+                        allowed=False,
+                        reason=(
+                            f"Access denied: {file_path} is a sensitive credential path "
+                            f"(matched built-in pattern '{pattern}')"
+                        ),
+                    )
+
+    if mode == PermissionMode.BYPASS:
+        return PermissionDecision(True, reason="bypassPermissions allows this tool")
+    if is_read_only:
+        return PermissionDecision(True, reason="read-only tools are allowed")
+    if mode == PermissionMode.PLAN and is_write_class_tool(tool_name):
+        return PermissionDecision(False, reason="Plan mode blocks mutating tools until exit_plan_mode")
+    if mode == PermissionMode.ACCEPT_EDITS and is_write_class_tool(tool_name):
+        return PermissionDecision(True, reason="acceptEdits allows write-class tools")
+
+    reason = "Mutating tools require user confirmation in default mode."
+    hint = _command_permission_hint(command)
+    if hint:
+        reason = f"{reason} {hint}"
+    return PermissionDecision(False, requires_confirmation=True, reason=reason)
+
+
+def _policy_match_paths(file_path: str) -> tuple[str, ...]:
+    normalized = file_path.rstrip("/")
+    if not normalized:
+        return (file_path,)
+    return (normalized, normalized + "/")
+
+
+def _command_permission_hint(command: str | None) -> str:
+    if not command:
+        return ""
+    lowered = command.lower()
+    markers = (
+        "npm install", "pnpm install", "yarn install", "bun install",
+        "pip install", "uv pip install", "poetry install", "cargo install",
+        "create-next-app", "npm create ", "pnpm create ", "yarn create ",
+        "bun create ", "npx create-", "npm init ", "pnpm init ", "yarn init ",
+    )
+    if any(marker in lowered for marker in markers):
+        return "Package installation and scaffolding commands change the workspace."
+    return ""
 
 
 def permission_mode_from_string(value: str | None) -> PermissionMode:

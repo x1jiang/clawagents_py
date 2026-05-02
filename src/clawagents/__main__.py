@@ -307,6 +307,7 @@ def _build_builtin_tool_catalog() -> list[dict[str, Any]]:
     from clawagents.tools.think import think_tools
     from clawagents.tools.interactive import interactive_tools
     from clawagents.tools.tool_program import create_tool_program_tool
+    from clawagents.tools.background_task import create_background_task_tools
 
     sb = LocalBackend()
     registry = ToolRegistry()
@@ -318,6 +319,7 @@ def _build_builtin_tool_catalog() -> list[dict[str, Any]]:
         *create_exec_tools(sb),
         *create_advanced_fs_tools(sb),
         *[t for t in web_tools if t.name == "web_fetch"],
+        *create_background_task_tools(),
     ]:
         registry.register(tool)
     registry.register(create_tool_program_tool(registry))
@@ -360,7 +362,7 @@ def _build_banner() -> str:
     return f"ClawAgents | provider={provider} model={model} env={env_src} ptrl={flag_str}"
 
 
-async def cmd_task(task: str, timeout_s: int = 0, advisor_model: str | None = None):
+async def cmd_task(task: str, timeout_s: int = 0, advisor_model: str | None = None, profile: str | None = None):
     """Run a single task and print the result."""
     from clawagents.agent import create_claw_agent
 
@@ -371,6 +373,8 @@ async def cmd_task(task: str, timeout_s: int = 0, advisor_model: str | None = No
     kwargs: dict[str, Any] = {}
     if advisor_model:
         kwargs["advisor_model"] = advisor_model
+    if profile:
+        kwargs["profile"] = profile
     agent = create_claw_agent(**kwargs)
     tool_count = len(agent.tools.list())
     advisor_info = f" advisor={advisor_model}" if agent.advisor_llm else ""
@@ -379,6 +383,23 @@ async def cmd_task(task: str, timeout_s: int = 0, advisor_model: str | None = No
     result = await agent.invoke(task, timeout_s=timeout_s)
     if result.result:
         print(result.result)
+
+
+def cmd_dry_run(task: str = "", profile: str | None = None, json_output: bool = False):
+    """Preview runtime readiness without model/tool execution."""
+    from clawagents.dry_run import build_dry_run_preview
+
+    preview = build_dry_run_preview(task=task, profile=profile)
+    if json_output:
+        print(json.dumps(preview, indent=2))
+        return
+    print(f"Dry run: {preview['status']}")
+    provider = preview["provider"]
+    print(f"Provider: profile={provider['profile'] or 'none'} provider={provider['provider']} model={provider['model']}")
+    print(f"Auth: {provider['auth']}  Base URL: {provider['base_url'] or 'default'}")
+    print(f"Tools: {preview['tool_count']} inspectable")
+    print("Likely tools: " + ", ".join(preview["matching_tools"]))
+    print("Next actions: " + "; ".join(preview["next_actions"]))
 
 
 # ─── Trajectory Inspector ────────────────────────────────────────────────
@@ -586,6 +607,8 @@ def main():
     parser.add_argument("--tools", action="store_true", help="Inspect built-in tool schemas")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON for commands that support it")
     parser.add_argument("--task", type=str, help="Run a single task from CLI")
+    parser.add_argument("--dry-run", action="store_true", help="Preview runtime readiness without model/tool execution")
+    parser.add_argument("--profile", type=str, help="Named provider profile to use")
     parser.add_argument("--trajectory", nargs="?", const=1, type=int, metavar="N", help="Show last N run summaries (default: 1)")
     parser.add_argument("--serve", action="store_true", help="Start the HTTP gateway server")
     parser.add_argument("--port", type=int, default=3000, help="Port for the gateway server (default: 3000)")
@@ -620,11 +643,13 @@ def main():
         cmd_doctor()
     elif args.tools:
         cmd_tools(json_output=args.json)
+    elif args.dry_run:
+        cmd_dry_run(task=args.task or "", profile=args.profile, json_output=args.json)
     elif args.trajectory is not None:
         cmd_trajectory(args.trajectory)
     elif args.task:
         try:
-            asyncio.run(cmd_task(args.task, timeout_s=args.timeout, advisor_model=args.advisor))
+            asyncio.run(cmd_task(args.task, timeout_s=args.timeout, advisor_model=args.advisor, profile=args.profile))
         except KeyboardInterrupt:
             sys.stderr.write("\nInterrupted.\n")
             sys.exit(1)
