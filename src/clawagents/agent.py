@@ -705,6 +705,18 @@ def create_claw_agent(
             return await self._resolved.execute(args)
     registry.register(_LazyWebFetch())
 
+    class _LazyExaSearch(LazyTool):
+        def __init__(self):
+            from clawagents.tools.exa_search import exa_search_tools as _es
+            spec = next(t for t in _es if t.name == "web_search")
+            super().__init__(spec.name, spec.description, spec.parameters, "clawagents.tools.exa_search", "", getattr(spec, "keywords", []))
+        async def execute(self, args):
+            if self._resolved is None:
+                from clawagents.tools.exa_search import exa_search_tools as _es
+                self._resolved = next(t for t in _es if t.name == "web_search")
+            return await self._resolved.execute(args)
+    registry.register(_LazyExaSearch())
+
     # ── Adapt and register user-provided tools ─────────────────────────
     if tools:
         for tool in tools:

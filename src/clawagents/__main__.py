@@ -303,6 +303,7 @@ def _build_builtin_tool_catalog() -> list[dict[str, Any]]:
     from clawagents.tools.exec import create_exec_tools
     from clawagents.tools.advanced_fs import create_advanced_fs_tools
     from clawagents.tools.web import web_tools
+    from clawagents.tools.exa_search import exa_search_tools
     from clawagents.tools.todolist import todolist_tools
     from clawagents.tools.think import think_tools
     from clawagents.tools.interactive import interactive_tools
@@ -319,6 +320,7 @@ def _build_builtin_tool_catalog() -> list[dict[str, Any]]:
         *create_exec_tools(sb),
         *create_advanced_fs_tools(sb),
         *[t for t in web_tools if t.name == "web_fetch"],
+        *exa_search_tools,
         *create_background_task_tools(),
     ]:
         registry.register(tool)

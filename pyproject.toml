@@ -53,6 +53,8 @@ cron = ["croniter>=1.4"]
 rl = ["trl>=0.7.0"]
 # Agent Communication Protocol adapter.
 acp = ["agent-client-protocol>=0.1.0"]
+# Exa AI-powered web search (powers the ``web_search`` tool).
+exa = ["exa-py>=2.0.0"]
 all = [
     "google-genai>=0.1.0",
     "anthropic>=0.40.0",
@@ -61,6 +63,7 @@ all = [
     "mcp>=1.0.0",
     "playwright>=1.40.0",
     "croniter>=1.4",
+    "exa-py>=2.0.0",
 ]
 dev = [
     "pytest>=7.0",
