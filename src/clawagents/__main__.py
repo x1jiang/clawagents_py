@@ -362,10 +362,23 @@ def _build_banner() -> str:
     return f"ClawAgents | provider={provider} model={model} env={env_src} ptrl={flag_str}"
 
 
-async def cmd_task(task: str, timeout_s: int = 0, advisor_model: str | None = None, profile: str | None = None):
+async def cmd_task(
+    task: str,
+    timeout_s: int = 0,
+    advisor_model: str | None = None,
+    profile: str | None = None,
+    output_format: str = "text",
+):
     """Run a single task and print the result."""
     from clawagents.agent import create_claw_agent
+    from clawagents.output_format import (
+        OutputFormat,
+        make_stream_json_emitter,
+        parse_output_format,
+        print_agent_output,
+    )
 
+    fmt = parse_output_format(output_format)
     banner = _build_banner()
     # Annotate as Any-valued so mypy doesn't infer dict[str, str] from the
     # single advisor_model entry — create_claw_agent's kwargs include several
@@ -378,11 +391,15 @@ async def cmd_task(task: str, timeout_s: int = 0, advisor_model: str | None = No
     agent = create_claw_agent(**kwargs)
     tool_count = len(agent.tools.list())
     advisor_info = f" advisor={advisor_model}" if agent.advisor_llm else ""
-    sys.stderr.write(f"{banner} | {tool_count} tools{advisor_info}\n")
+    if fmt != OutputFormat.JSON and fmt != OutputFormat.STREAM_JSON:
+        sys.stderr.write(f"{banner} | {tool_count} tools{advisor_info}\n")
 
-    result = await agent.invoke(task, timeout_s=timeout_s)
-    if result.result:
-        print(result.result)
+    on_event = None
+    if fmt == OutputFormat.STREAM_JSON:
+        on_event = make_stream_json_emitter()
+
+    result = await agent.invoke(task, timeout_s=timeout_s, on_event=on_event)
+    print_agent_output(result, fmt)
 
 
 def cmd_dry_run(task: str = "", profile: str | None = None, json_output: bool = False):
@@ -619,6 +636,13 @@ def main():
     parser.add_argument("--sessions", action="store_true", help="List saved sessions")
     parser.add_argument("--resume", type=str, nargs="?", const="latest", metavar="SESSION_ID", help="Resume a saved session (default: latest)")
     parser.add_argument("--advisor", type=str, metavar="MODEL", help="Stronger model for strategic guidance (e.g. gpt-5.4, claude-opus-4-6)")
+    parser.add_argument(
+        "--output-format",
+        type=str,
+        default="text",
+        choices=["text", "json", "stream-json"],
+        help="Output format for --task (text, json, stream-json)",
+    )
     args = parser.parse_args()
 
     if args.prune_trajectories is not None:
@@ -649,7 +673,13 @@ def main():
         cmd_trajectory(args.trajectory)
     elif args.task:
         try:
-            asyncio.run(cmd_task(args.task, timeout_s=args.timeout, advisor_model=args.advisor, profile=args.profile))
+            asyncio.run(cmd_task(
+                args.task,
+                timeout_s=args.timeout,
+                advisor_model=args.advisor,
+                profile=args.profile,
+                output_format=args.output_format,
+            ))
         except KeyboardInterrupt:
             sys.stderr.write("\nInterrupted.\n")
             sys.exit(1)

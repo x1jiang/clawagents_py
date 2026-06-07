@@ -123,6 +123,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("retry", "Re-send the last user message to the agent", "Session"),
     CommandDef("undo", "Remove the last user/assistant exchange", "Session",
                cache_impact="immediate"),
+    CommandDef("search", "Full-text search session history (SQLite sessions)", "Session",
+               args_hint="<query>", cli_only=True),
     CommandDef("title", "Set a title for the current session", "Session",
                args_hint="[name]"),
     # /compress rewrites history → must invalidate the cache.

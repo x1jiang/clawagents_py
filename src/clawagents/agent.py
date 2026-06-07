@@ -760,6 +760,14 @@ def create_claw_agent(
             if skill_tool.name == "use_skill":
                 registry.register(skill_tool)
 
+    from clawagents.tools.skill_workshop import create_skill_workshop_tool
+
+    registry.register(create_skill_workshop_tool(workspace=os.getcwd()))
+
+    from clawagents.tools.search_history import create_search_history_tool
+
+    registry.register(create_search_history_tool(workspace=os.getcwd()))
+
     # ── Auto-discover memory from default locations ────────────────────
     memory_paths = _to_list(memory) if memory is not None else _auto_discover_memory()
     composed_before_llm = _compose_before_llm(

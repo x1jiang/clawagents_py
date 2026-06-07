@@ -355,6 +355,37 @@ def build_rethink_with_lessons(
     return "\n".join(parts)
 
 
+# ─── Lesson bullet utilities (shared with promotion index) ───────────────────
+
+def normalize_lesson(text: str) -> str:
+    return " ".join(text.strip().lstrip("- ").lower().split())
+
+
+def lesson_key(text: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(normalize_lesson(text).encode()).hexdigest()[:16]
+
+
+def parse_lesson_bullets(markdown: str) -> list[str]:
+    bullets: list[str] = []
+    for line in markdown.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("- "):
+            body = stripped[2:].strip()
+            if body:
+                bullets.append(body)
+    return bullets
+
+
+def slugify_lesson_name(text: str) -> str:
+    import re
+
+    words = re.sub(r"[^a-z0-9\s-]", "", normalize_lesson(text)).split()[:5]
+    slug = "-".join(words)[:48].strip("-")
+    return slug or "recurring-lesson"
+
+
 def export_lessons(output_path: str | Path | None = None) -> str:
     """Export current lessons to a JSON file. Returns the file path."""
     lessons = load_lessons(max_chars=999999)

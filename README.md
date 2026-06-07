@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.8.1-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.9.0-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -26,9 +26,22 @@ pip install clawagents[anthropic]   # + Anthropic Claude support
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 6.8.1** — Prompt architecture and packaged-surface polish (May 2026). Adds shared prompt assembly helpers, preserves cache-boundary behavior across memory/skill injection, refreshes the OpenHarness comparison, and keeps the v6.8.0 operational surfaces plus v6.7.1 compact tool-discovery recovery and v6.7.0 security hardening. See [Changelog](#changelog).
+> **Version 6.9.0** — Cross-session history recall, machine-readable CLI output, and governed skill promotion (June 2026). Adds `search_history` for raw past-session message search, `--output-format json|stream-json` for `--task`, PTRL recurring-lesson → `skill_workshop` proposals, consolidated session/history search modules, and the governed `skill_workshop` tool. Builds on v6.8.1 prompt/packaging polish. See [Changelog](#changelog).
 
-### New In v6.8.1
+### New In v6.9.0
+
+```bash
+clawagents --task "summarize prior debugging runs" --output-format json
+clawagents --task "find where we discussed pytest timeouts"  # uses search_history tool
+```
+
+- **`search_history` tool** — cross-session archive search over `.clawagents/sessions.db` plus optional JSONL event logs; returns raw prior user/assistant/tool snippets (not summaries). Current-session search stays on the session backend.
+- **`--output-format`** — `text` (default), `json`, or `stream-json` on `clawagents --task` for automation-friendly stdout.
+- **PTRL → skill promotion** — recurring lesson bullets (≥3 occurrences) auto-create **pending** `skill_workshop` proposals in `.clawagents/lesson-index.json`.
+- **`skill_workshop` tool** — governed skill authoring (`create` / `update` / `apply` / `reject` / `rollback`) without writing live `SKILL.md` directly.
+- **Consolidated search stack** — shared SQLite LIKE helpers (`session/search`) and snippet formatting (`session/snippet`); lesson bullet utilities live in `trajectory/lessons`.
+
+### Previously In v6.8.1
 
 ```bash
 clawagents --dry-run --profile ollama --task "inspect this repo"
@@ -467,6 +480,7 @@ python run_agent.py              # 6. Or use the generated script
 | `clawagents --doctor` | Check configuration health: `.env` discovery, API keys, active model, LLM settings, PTRL flags, local endpoint reachability, trajectory history, `AGENTS.md` presence. |
 | `clawagents --tools [--json]` | Inspect built-in tool schemas without starting a model client. Useful for release checks and native-tool schema debugging. |
 | `clawagents --task "..."` | Run a single task. Prints a startup banner (`provider=X model=Y env=Z ptrl=...`), executes the agent, prints the result to stdout. |
+| `clawagents --task "..." --output-format json` | Same as `--task`, but emit a single JSON object (`status`, `result`, `iterations`, …). Use `stream-json` for NDJSON events. |
 | `clawagents --trajectory [N]` | Inspect the last N run summaries (default: 1). Shows run ID, model, task, duration, turns, tool calls, score, quality, failure breakdown, verified score, and judge verdict. Requires `CLAW_TRAJECTORY=1`. |
 | `clawagents --serve [--port N]` | Start the HTTP gateway server (default port 3000). Endpoints: `POST /chat`, `POST /chat/stream` (SSE), `WS /ws`, `GET /queue`, `GET /health`. |
 | `clawagents --sessions` | List saved sessions (requires `CLAW_FEATURE_SESSION_PERSISTENCE=1`). Shows session ID, turn count, status, and task. |
@@ -542,7 +556,7 @@ Traditional Stack (DeepAgents):           ClawAgents:
 
 ## Feature Matrix
 
-> Compares **ClawAgents v6.8.1** against four peer agent frameworks: **Hermes Agent**
+> Compares **ClawAgents v6.9.0** against four peer agent frameworks: **Hermes Agent**
 > ([metaspartan/hermes-agent](https://github.com/metaspartan/hermes-agent)), **DeepAgents**
 > ([langchain-ai/deepagents](https://github.com/langchain-ai/deepagents)), and **OpenClaw**, plus **OpenHarness** ([HKUDS/OpenHarness](https://github.com/HKUDS/OpenHarness)).
 > The v6.8.1 prompt/packaging polish, v6.8.0 OpenHarness-inspired operational
@@ -551,7 +565,7 @@ Traditional Stack (DeepAgents):           ClawAgents:
 > every row in the ClawAgents column is ✅. `◐` means partial or comparable
 > coverage rather than exact feature parity.
 
-| Feature | ClawAgents v6.8.1 | Hermes Agent | DeepAgents | OpenClaw | OpenHarness |
+| Feature | ClawAgents v6.9.0 | Hermes Agent | DeepAgents | OpenClaw | OpenHarness |
 |:---|:---:|:---:|:---:|:---:|:---:|
 | **Core** |  |  |  |  |  |
 | ReAct loop | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -725,6 +739,8 @@ Every agent includes these — no setup needed:
 | `task` | Delegate to a sub-agent with isolated context |
 | `ask_user` | Interactive stdin-based user input |
 | `use_skill` | Load a skill's instructions (when skills exist) |
+| `search_history` | Cross-session raw message recall from archived sessions |
+| `skill_workshop` | Governed skill proposals (create/update/apply/reject/rollback) |
 
 ### Tool Examples
 
@@ -1491,6 +1507,27 @@ parity sweep.
 ---
 
 ## Changelog
+
+### v6.9.0 — History recall, CLI output formats, governed skill promotion (June 2026)
+
+Minor release focused on machine-readable CLI output, cross-session memory
+recall, and closing the loop from PTRL lessons to governed skill proposals.
+
+- **`search_history` tool** — searches the cross-session archive (SQLite
+  `sessions.db` + optional JSONL logs) and returns raw message snippets with
+  session id, role, and highlighted excerpt. Supports `session_id` filter and
+  `format=json`.
+- **`--output-format`** — `clawagents --task` accepts `text`, `json`, or
+  `stream-json` for scripting and CI integration.
+- **PTRL lesson promotion** — lesson bullets seen ≥3 times create pending
+  `skill_workshop` proposals tracked in `.clawagents/lesson-index.json`.
+- **`skill_workshop` tool** — governed skill authoring workflow aligned with
+  the TypeScript port (create, update, apply, reject, quarantine, rollback).
+- **Search consolidation** — shared `search_sqlite_messages`, `snippet_from_content`,
+  and canonical lesson utilities in `trajectory/lessons`.
+
+Release verification: **Python 18 consolidation/feature tests passed**;
+**TypeScript 545 passed, 4 skipped**, `tsc --noEmit`.
 
 ### v6.8.1 — Prompt architecture and release packaging polish (May 2026)
 

@@ -610,15 +610,21 @@ class _ToolCallTracker:
         soft_limit: int = 3,
         hard_limit: int = 6,
         circuit_breaker_limit: int = 30,
+        loop_config: "LoopDetectionConfig | None" = None,
     ):
+        from clawagents.loop_detection import LoopDetectionConfig, resolve_loop_detection_config
+
         self._history: list[str] = []
+        self._poll_history: list[tuple[str, str, str | None]] = []
         self._window_size = window_size
         self._soft_limit = soft_limit
         self._hard_limit = hard_limit
         self._circuit_breaker_limit = circuit_breaker_limit
+        self._loop_config = resolve_loop_detection_config(loop_config)
         self._result_hashes: dict[str, str] = {}
         self._no_progress_count = 0
         self._soft_warnings = 0
+        self._poll_warnings: set[str] = set()
 
     def _key(self, tool_name: str, args: dict) -> str:
         try:
@@ -641,6 +647,8 @@ class _ToolCallTracker:
 
     def record_result(self, tool_name: str, args: dict, output: str) -> None:
         """Record the result of a tool call for no-progress detection."""
+        from clawagents.loop_detection import hash_tool_call
+
         key = self._key(tool_name, args)
         result_hash = self._hash_result(output)
         prev_hash = self._result_hashes.get(key)
@@ -649,6 +657,10 @@ class _ToolCallTracker:
         else:
             self._no_progress_count = max(0, self._no_progress_count - 1)
         self._result_hashes[key] = result_hash
+        call_hash = hash_tool_call(tool_name, args)
+        self._poll_history.append((tool_name, call_hash, result_hash))
+        if len(self._poll_history) > self._window_size:
+            self._poll_history.pop(0)
 
     def is_ping_ponging(self) -> bool:
         """Detect A->B->A->B ping-pong oscillation (last 6 entries)."""
@@ -692,6 +704,22 @@ class _ToolCallTracker:
     def bump_soft_warning(self) -> int:
         self._soft_warnings += 1
         return self._soft_warnings
+
+    def check_known_poll_no_progress(self, tool_name: str, args: dict):
+        from clawagents.loop_detection import detect_known_poll_no_progress
+
+        result = detect_known_poll_no_progress(
+            tool_name=tool_name,
+            params=args,
+            history=self._poll_history,
+            config=self._loop_config,
+        )
+        if result and result.stuck and result.warning_key in self._poll_warnings:
+            if result.level == "warning":
+                return None
+        if result and result.stuck and result.warning_key:
+            self._poll_warnings.add(result.warning_key)
+        return result
 
 
 # ─── Consecutive Failure Detection ────────────────────────────────────────
@@ -1149,6 +1177,15 @@ async def _compact_if_needed(
         else (context_window, _CONTEXT_BUDGET_RATIO)
     )
     budget = int(effective_window * ratio)
+    from clawagents.memory.compact_tool_results import compact_tool_results
+
+    messages, compacted = compact_tool_results(
+        messages,
+        max_input_tokens=budget,
+        token_multiplier=token_multiplier,
+    )
+    if compacted:
+        emit("context", {"message": "compacted oversized tool results before summarization"})
     current_tokens = _estimate_messages_tokens(messages, token_multiplier)
 
     if current_tokens <= budget:
@@ -2182,6 +2219,18 @@ async def run_agent_graph(
                 state.iterations += 1
                 break
 
+            poll_hit = None
+            for call in tool_calls:
+                poll_hit = loop_tracker.check_known_poll_no_progress(call.tool_name, call.args)
+                if poll_hit and poll_hit.level == "critical":
+                    break
+            if poll_hit and poll_hit.stuck and poll_hit.level == "critical":
+                emit("warn", {"message": poll_hit.message})
+                state.status = "done"
+                state.result = poll_hit.message
+                state.iterations += 1
+                break
+
             if loop_tracker.is_hard_looping_batch(tool_calls):
                 names = ", ".join(c.tool_name for c in tool_calls)
                 emit("warn", {"message": f"tool loop detected ({names}) — breaking"})
@@ -2380,6 +2429,16 @@ async def run_agent_graph(
                     preview: str = "[Multimodal Array Content]"
                 else:
                     tool_output = _evict_large_tool_result(call.tool_name, raw_output)
+                    from clawagents.tool_output_artifacts import offload_tool_output_if_needed
+
+                    inline, artifact_path = offload_tool_output_if_needed(
+                        tool_name=call.tool_name,
+                        tool_use_id=native_tc.tool_call_id if native_tc else call.tool_name,
+                        output=tool_output,
+                    )
+                    tool_output = inline
+                    if artifact_path is not None:
+                        emit("context", {"message": f"tool output offloaded to {artifact_path}"})
                     preview = tool_output[:preview_chars]
 
                 emit("tool_result", {
@@ -2884,6 +2943,19 @@ async def run_agent_graph(
                         model=run_summary.model,
                     )
                     emit("context", {"message": "PTRL: extracted and saved lessons from this run"})
+                    try:
+                        from clawagents.trajectory.lesson_promotion import maybe_promote_recurring_lessons
+
+                        promoted = maybe_promote_recurring_lessons(
+                            lessons_text,
+                            task=run_summary.task,
+                        )
+                        if promoted:
+                            emit("context", {
+                                "message": f"PTRL: promoted {len(promoted)} recurring lesson(s) to skill_workshop",
+                            })
+                    except Exception:
+                        logger.debug("PTRL: lesson promotion failed", exc_info=True)
             else:
                 emit("context", {
                     "message": f"PTRL: skipped lesson extraction (quality={run_summary.quality}, "

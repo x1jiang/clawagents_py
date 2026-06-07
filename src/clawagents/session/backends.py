@@ -233,6 +233,7 @@ class SQLiteSession:
                 "INSERT OR IGNORE INTO sessions(session_id) VALUES (?)",
                 (self.session_id,),
             )
+            conn.commit()
 
     async def get_items(self, limit: int | None = None) -> list[LLMMessage]:
         with self._lock, self._conn() as conn:
@@ -290,3 +291,31 @@ class SQLiteSession:
                 (self.session_id,),
             )
             conn.commit()
+
+    async def search(self, query: str, *, limit: int = 20) -> list[dict[str, Any]]:
+        """FTS5 full-text search over session messages."""
+        from clawagents.session.search import search_session_messages
+
+        with self._lock, self._conn() as conn:
+            hits = search_session_messages(conn, self.session_id, query, limit=limit)
+        return [
+            {
+                "message_id": h.message_id,
+                "ord": h.ord,
+                "role": h.role,
+                "snippet": h.snippet,
+                "rank": h.rank,
+            }
+            for h in hits
+        ]
+
+    async def undo_last(self, count: int = 1) -> list[LLMMessage]:
+        """Pop the last *count* messages (Hermes /undo)."""
+        removed: list[LLMMessage] = []
+        for _ in range(max(1, count)):
+            item = await self.pop_item()
+            if item is None:
+                break
+            removed.append(item)
+        removed.reverse()
+        return removed

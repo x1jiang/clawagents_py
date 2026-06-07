@@ -45,6 +45,10 @@ def build_dry_run_preview(
         "tool_count": len(catalog),
         "matching_tools": matching_tools,
         "next_actions": next_actions,
+        "skills_preview": _skills_preview(),
+        "hooks_preview": _hooks_preview(),
+        "mcp_preview": _mcp_preview(),
+        "harness_profile": _harness_profile_preview(resolved.model),
     }
 
 
@@ -94,4 +98,53 @@ def _matching_tools(task: str, catalog: list[dict[str, Any]]) -> list[str]:
         if len(matches) >= 10:
             break
     return matches
+
+
+def _skills_preview() -> list[str]:
+    from pathlib import Path
+
+    names: list[str] = []
+    for root in (Path.cwd() / "skills", Path.home() / ".clawagents" / "skills"):
+        if not root.is_dir():
+            continue
+        for child in sorted(root.iterdir()):
+            if child.is_dir() and (child / "SKILL.md").is_file():
+                names.append(child.name)
+    return names[:20]
+
+
+def _hooks_preview() -> list[str]:
+    from pathlib import Path
+
+    hooks_dir = Path.cwd() / ".clawagents" / "hooks"
+    if not hooks_dir.is_dir():
+        return []
+    return sorted(p.name for p in hooks_dir.iterdir() if p.suffix in {".py", ".ts", ".js"})
+
+
+def _mcp_preview() -> list[str]:
+    import json
+    from pathlib import Path
+
+    paths = [
+        Path.cwd() / ".clawagents" / "mcp.json",
+        Path.home() / ".clawagents" / "mcp.json",
+    ]
+    servers: list[str] = []
+    for path in paths:
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            continue
+        mcp_servers = raw.get("mcpServers") or raw.get("servers") or raw
+        if isinstance(mcp_servers, dict):
+            servers.extend(sorted(mcp_servers.keys()))
+    return servers[:20]
+
+
+def _harness_profile_preview(model: str | None) -> str | None:
+    from clawagents.harness_profiles import resolve_harness_profile
+
+    profile = resolve_harness_profile(model)
+    return profile.name if profile else None
 
