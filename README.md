@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.9.0-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.9.1-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -26,7 +26,7 @@ pip install clawagents[anthropic]   # + Anthropic Claude support
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 6.9.0** — Cross-session history recall, machine-readable CLI output, and governed skill promotion (June 2026). Adds `search_history` for raw past-session message search, `--output-format json|stream-json` for `--task`, PTRL recurring-lesson → `skill_workshop` proposals, consolidated session/history search modules, and the governed `skill_workshop` tool. Builds on v6.8.1 prompt/packaging polish. See [Changelog](#changelog).
+> **Version 6.9.1** — Patch release (June 2026): CI-green test suite (factory tests no longer require real API keys), plus all v6.9.0 features below. See [Changelog](#changelog).
 
 ### New In v6.9.0
 
@@ -556,7 +556,7 @@ Traditional Stack (DeepAgents):           ClawAgents:
 
 ## Feature Matrix
 
-> Compares **ClawAgents v6.9.0** against four peer agent frameworks: **Hermes Agent**
+> Compares **ClawAgents v6.9.1** against four peer agent frameworks: **Hermes Agent**
 > ([metaspartan/hermes-agent](https://github.com/metaspartan/hermes-agent)), **DeepAgents**
 > ([langchain-ai/deepagents](https://github.com/langchain-ai/deepagents)), and **OpenClaw**, plus **OpenHarness** ([HKUDS/OpenHarness](https://github.com/HKUDS/OpenHarness)).
 > The v6.8.1 prompt/packaging polish, v6.8.0 OpenHarness-inspired operational
@@ -565,7 +565,7 @@ Traditional Stack (DeepAgents):           ClawAgents:
 > every row in the ClawAgents column is ✅. `◐` means partial or comparable
 > coverage rather than exact feature parity.
 
-| Feature | ClawAgents v6.9.0 | Hermes Agent | DeepAgents | OpenClaw | OpenHarness |
+| Feature | ClawAgents v6.9.1 | Hermes Agent | DeepAgents | OpenClaw | OpenHarness |
 |:---|:---:|:---:|:---:|:---:|:---:|
 | **Core** |  |  |  |  |  |
 | ReAct loop | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -1507,6 +1507,13 @@ parity sweep.
 ---
 
 ## Changelog
+
+### v6.9.1 — CI/test hardening (June 2026)
+
+Patch release ensuring the full pytest suite passes in keyless CI environments
+(no `.env`, empty `OPENAI_API_KEY`). Factory and integration tests now mock
+provider construction or pass proper `LLMProvider` stubs instead of relying on
+local API keys leaking in from parent directories.
 
 ### v6.9.0 — History recall, CLI output formats, governed skill promotion (June 2026)
 

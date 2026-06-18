@@ -9,7 +9,7 @@ from clawagents.eval import run_agent_environment
 from clawagents.explorer import create_explorer_tools
 from clawagents.agent import create_claw_agent
 from clawagents.graph.agent_loop import AgentState, run_agent_graph
-from clawagents.providers.llm import LLMMessage, LLMResponse, NativeToolCall
+from clawagents.providers.llm import LLMMessage, LLMResponse, LLMProvider, NativeToolCall
 from clawagents.rl import Trajectory, to_next_state_transitions
 from clawagents.run_result import RunResult
 from clawagents.sandbox.backend import ExecResult
@@ -49,7 +49,7 @@ class BadlyNamedSearchTool:
         return ToolResult(True, "ok")
 
 
-class FakeLLM:
+class FakeLLM(LLMProvider):
     name = "fake"
 
     async def chat(self, *args, **kwargs):

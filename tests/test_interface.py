@@ -17,6 +17,22 @@ import shutil
 from unittest.mock import patch, MagicMock, AsyncMock
 
 
+@pytest.fixture
+def mock_provider_factory():
+    """Patch provider construction so factory tests never need real API keys."""
+    from clawagents.providers.llm import LLMProvider
+
+    with patch("clawagents.config.config.load_config") as mock_config, patch(
+        "clawagents.providers.llm.create_provider"
+    ) as mock_create:
+        mock_cfg = MagicMock()
+        mock_config.return_value = mock_cfg
+        mock_provider = MagicMock(spec=LLMProvider)
+        mock_provider.name = "mock-provider"
+        mock_create.return_value = mock_provider
+        yield mock_create
+
+
 # ─── Test: Factory creates agent with model string ────────────────────────
 
 class TestCreateClawAgent:
@@ -419,7 +435,7 @@ class TestAdvisorModel:
         assert agent.advisor_llm is None
         assert agent.advisor_max_calls == 3
 
-    def test_factory_resolves_advisor_model_string(self):
+    def test_factory_resolves_advisor_model_string(self, mock_provider_factory):
         from clawagents.agent import create_claw_agent
 
         agent = create_claw_agent(
@@ -429,15 +445,17 @@ class TestAdvisorModel:
 
         assert agent.advisor_llm is not None
         assert agent.advisor_max_calls == 3
+        assert mock_provider_factory.call_count == 2
 
-    def test_factory_works_without_advisor(self):
+    def test_factory_works_without_advisor(self, mock_provider_factory):
         from clawagents.agent import create_claw_agent
 
         agent = create_claw_agent("gpt-5-nano")
 
         assert agent.advisor_llm is None
+        mock_provider_factory.assert_called_once()
 
-    def test_advisor_max_calls_from_env(self):
+    def test_advisor_max_calls_from_env(self, mock_provider_factory):
         from clawagents.agent import create_claw_agent
 
         with patch.dict(os.environ, {"ADVISOR_MAX_CALLS": "7"}):
@@ -447,7 +465,7 @@ class TestAdvisorModel:
             )
             assert agent.advisor_max_calls == 7
 
-    def test_advisor_max_calls_param_overrides_env(self):
+    def test_advisor_max_calls_param_overrides_env(self, mock_provider_factory):
         from clawagents.agent import create_claw_agent
 
         with patch.dict(os.environ, {"ADVISOR_MAX_CALLS": "99"}):
@@ -458,7 +476,7 @@ class TestAdvisorModel:
             )
             assert agent.advisor_max_calls == 2
 
-    def test_advisor_model_from_env(self):
+    def test_advisor_model_from_env(self, mock_provider_factory):
         from clawagents.agent import create_claw_agent
 
         with patch.dict(os.environ, {"ADVISOR_MODEL": "gpt-5-nano"}):
@@ -526,7 +544,7 @@ class TestLazyToolProvisioning:
         # Not resolved yet
         assert lazy._resolved is None
 
-    def test_factory_registers_lazy_tools(self):
+    def test_factory_registers_lazy_tools(self, mock_provider_factory):
         from clawagents.agent import create_claw_agent
 
         agent = create_claw_agent("gpt-5-nano")
@@ -538,7 +556,7 @@ class TestLazyToolProvisioning:
         assert "grep" in tool_names
         assert "web_fetch" in tool_names
 
-    def test_factory_lazy_tool_schemas_match_implementations(self):
+    def test_factory_lazy_tool_schemas_match_implementations(self, mock_provider_factory):
         from clawagents.agent import create_claw_agent
         from clawagents.sandbox.local import LocalBackend
         from clawagents.tools.advanced_fs import create_advanced_fs_tools

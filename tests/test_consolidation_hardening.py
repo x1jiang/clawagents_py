@@ -130,14 +130,13 @@ def test_snippet_shared_between_session_and_history_search(tmp_path):
 def test_create_claw_agent_registers_consolidated_tools(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     from clawagents.agent import create_claw_agent
-    from clawagents.providers.llm import LLMMessage, LLMResponse
+    from clawagents.providers.llm import LLMMessage, LLMResponse, LLMProvider
 
-    class FakeLLM:
+    class FakeLLM(LLMProvider):
+        name = "fake"
+
         async def chat(self, messages, **kwargs):
             return LLMResponse(content="ok", role="assistant")
-
-        async def chat_stream(self, messages, **kwargs):
-            yield LLMResponse(content="ok", role="assistant")
 
     agent = create_claw_agent(FakeLLM(), memory=[], skills=[])
     tool_names = {t["name"] for t in agent.tools.inspect_tools()}
