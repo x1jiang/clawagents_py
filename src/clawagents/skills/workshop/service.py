@@ -99,8 +99,14 @@ class SkillWorkshopService:
         if not rec:
             return {"ok": False, "error": "not found"}
         if rec.scan_findings:
-            blocking = [f for f in rec.scan_findings if "exceeds" in f or "invalid" in f or "must be" in f]
-            if blocking:
+            # Every finding the scanner emits is a real reason to refuse writing
+            # the proposal to a live SKILL.md — most importantly the
+            # "suspicious pattern …" findings (rm -rf, ``curl … | sh``, ``eval(``,
+            # ``__import__`` …) and the oversize/too-many/bad-path ones. The old
+            # substring gate ("exceeds"/"invalid"/"must be") let the security and
+            # resource findings through, making the malicious-pattern check
+            # cosmetic. Block on any finding.
+            if rec.scan_findings:
                 return {"ok": False, "error": "scan blocked apply", "findings": rec.scan_findings}
         ok, msg, rollback_id = self.store.apply_proposal(proposal_id)
         return {"ok": ok, "message": msg, "rollback_id": rollback_id}

@@ -320,20 +320,34 @@ async def run_coordinator(
 
         elif action == "delegate":
             tasks = parsed.get("tasks", [])
-            if not tasks:
+            # ``tasks`` is LLM-controlled: it may arrive as a single object, a
+            # list of plain strings, or a list of task objects. Normalize before
+            # indexing so a malformed shape doesn't crash the orchestration with
+            # ``AttributeError``/``TypeError`` instead of feeding the error back.
+            if isinstance(tasks, dict):
+                tasks = [tasks]
+            norm_tasks: list[dict] = []
+            if isinstance(tasks, list):
+                for t in tasks[:max_workers]:
+                    if isinstance(t, str):
+                        norm_tasks.append({"prompt": t})
+                    elif isinstance(t, dict):
+                        norm_tasks.append(t)
+                    # Non-str/non-dict entries are ignored.
+            if not norm_tasks:
                 messages.append(LLMMessage(
                     role="user",
-                    content="[System] No tasks were specified. Please provide tasks to delegate or complete the task.",
+                    content="[System] No valid tasks were specified. Provide a list of task objects (each with a 'prompt') to delegate, or complete the task.",
                 ))
                 continue
 
             # Create worker tasks
             worker_tasks = []
-            for t in tasks[:max_workers]:
+            for t in norm_tasks:
                 wt = WorkerTask(
-                    id=t.get("id", f"task_{len(state.workers) + 1}"),
-                    prompt=t.get("prompt", ""),
-                    tools=t.get("tools", []),
+                    id=str(t.get("id") or f"task_{len(state.workers) + 1}"),
+                    prompt=str(t.get("prompt", "")),
+                    tools=t.get("tools", []) if isinstance(t.get("tools"), list) else [],
                     status="running",
                 )
                 state.workers.append(wt)

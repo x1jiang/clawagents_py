@@ -85,9 +85,11 @@ def test_steer_hook_appends_to_messages_in_place():
 
     asyncio.run(hook.on_llm_start(rc, model="gpt-5", messages=messages))
 
+    # Injected nudges must be real LLMMessage objects (the loop + every provider
+    # read ``.role``/``.content`` attributes, not dict keys).
     assert messages[0] == {"role": "user", "content": "hello"}
-    assert messages[1] == {"role": "user", "content": "[steer] be terse"}
-    assert messages[2] == {"role": "user", "content": "[steer] use bullets"}
+    assert (messages[1].role, messages[1].content) == ("user", "[steer] be terse")
+    assert (messages[2].role, messages[2].content) == ("user", "[steer] use bullets")
     assert peek_steer(rc) == []  # drained
 
 
@@ -103,16 +105,16 @@ def test_steer_hook_custom_prefix_and_no_prefix():
     rc = RunContext()
     steer(rc, "compress now")
     hook = SteerHook(prefix=None)
-    msgs: list[dict[str, str]] = []
+    msgs: list = []
     asyncio.run(hook.on_llm_start(rc, model="x", messages=msgs))
-    assert msgs == [{"role": "user", "content": "compress now"}]
+    assert (msgs[0].role, msgs[0].content) == ("user", "compress now")
 
     rc2 = RunContext()
     steer(rc2, "switch language", role="system")
     hook2 = SteerHook(prefix="[op]")
-    msgs2: list[dict[str, str]] = []
+    msgs2: list = []
     asyncio.run(hook2.on_llm_start(rc2, model="x", messages=msgs2))
-    assert msgs2 == [{"role": "system", "content": "[op] switch language"}]
+    assert (msgs2[0].role, msgs2[0].content) == ("system", "[op] switch language")
 
 
 def test_thread_safe_concurrent_pushes(monkeypatch):

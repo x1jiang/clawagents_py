@@ -221,11 +221,17 @@ class SteerHook(RunHooks[Any]):
         pending = drain_steer(context)
         if not pending:
             return
+        # The loop's message list holds ``LLMMessage`` instances and every
+        # provider reads ``.role``/``.content`` attributes — appending a plain
+        # dict here made the *next* LLM call raise ``AttributeError`` and kill
+        # the run. Build a proper message object instead.
+        from clawagents.providers.llm import LLMMessage
+
         for nudge in pending:
             text = nudge.text
             if self.prefix:
                 text = f"{self.prefix} {text}"
-            messages.append({"role": nudge.role, "content": text})
+            messages.append(LLMMessage(role=nudge.role, content=text))
 
 
 __all__ = [

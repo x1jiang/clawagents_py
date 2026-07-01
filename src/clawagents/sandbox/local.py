@@ -104,8 +104,14 @@ class LocalBackend:
     })
 
     def _sanitized_env(self) -> dict[str, str]:
+        # The explicit denylist above is a floor; the broad name-based matcher
+        # (``*_TOKEN``/``*_API_KEY``/``*_SECRET``/``*PASSWORD*`` …) catches the
+        # long tail (GITHUB_TOKEN, AWS_ACCESS_KEY_ID, DB_PASSWORD, …) that the
+        # static set would otherwise leak into LLM-generated shell commands.
+        from clawagents.redact import is_secret_name
+
         return {k: v for k, v in os.environ.items()
-                if k not in self._SENSITIVE_ENV_KEYS}
+                if k not in self._SENSITIVE_ENV_KEYS and not is_secret_name(k)}
 
     # ── Command execution ───────────────────────────────────────────
 

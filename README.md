@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.9.1-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.9.2-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -26,9 +26,19 @@ pip install clawagents[anthropic]   # + Anthropic Claude support
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 6.9.1** — Patch release (June 2026): CI-green test suite (factory tests no longer require real API keys), plus all v6.9.0 features below. See [Changelog](#changelog).
+> **Version 6.9.2** — Security and provider hardening (July 2026): bash-validator wrapper peeling, gateway CORS safe defaults, plan-mode escape fix, provider parity fixes. See [Changelog](#changelog).
 
-### New In v6.9.0
+### New In v6.9.2
+
+- **Bash validator hardening** — peels launcher wrappers (`env`, `sudo`, `timeout`, `eval`, …) so inner destructive commands can't bypass BLOCK rules; normalizes root-like paths; handles alias bypass (`\rm`).
+- **Gateway CORS safe defaults** — loopback-only origins by default instead of `*`; disables credentials when wildcard is explicitly configured.
+- **Plan-mode escape fix** — agent-as-tool subagents now inherit the parent's permission mode.
+- **Provider parity** — strips `__CACHE_BOUNDARY__` from OpenAI/Gemini prompts; Anthropic honours `temperature=0`; Gemini skips malformed image URLs; OpenAI handles empty `choices` arrays.
+- **Steer hook fix** — nudge messages use `LLMMessage` objects instead of raw dicts.
+- **Skill workshop** — blocks apply on any scanner finding (including malicious-pattern detections).
+- **Sandbox env redaction** — broad secret-name matcher catches `*_TOKEN`, `*_API_KEY`, `*PASSWORD*`, etc.
+
+### Previously In v6.9.0
 
 ```bash
 clawagents --task "summarize prior debugging runs" --output-format json
@@ -556,7 +566,7 @@ Traditional Stack (DeepAgents):           ClawAgents:
 
 ## Feature Matrix
 
-> Compares **ClawAgents v6.9.1** against four peer agent frameworks: **Hermes Agent**
+> Compares **ClawAgents v6.9.2** against four peer agent frameworks: **Hermes Agent**
 > ([metaspartan/hermes-agent](https://github.com/metaspartan/hermes-agent)), **DeepAgents**
 > ([langchain-ai/deepagents](https://github.com/langchain-ai/deepagents)), and **OpenClaw**, plus **OpenHarness** ([HKUDS/OpenHarness](https://github.com/HKUDS/OpenHarness)).
 > The v6.8.1 prompt/packaging polish, v6.8.0 OpenHarness-inspired operational
@@ -565,7 +575,7 @@ Traditional Stack (DeepAgents):           ClawAgents:
 > every row in the ClawAgents column is ✅. `◐` means partial or comparable
 > coverage rather than exact feature parity.
 
-| Feature | ClawAgents v6.9.1 | Hermes Agent | DeepAgents | OpenClaw | OpenHarness |
+| Feature | ClawAgents v6.9.2 | Hermes Agent | DeepAgents | OpenClaw | OpenHarness |
 |:---|:---:|:---:|:---:|:---:|:---:|
 | **Core** |  |  |  |  |  |
 | ReAct loop | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -1507,6 +1517,24 @@ parity sweep.
 ---
 
 ## Changelog
+
+### v6.9.2 — Security and provider hardening (July 2026)
+
+Patch release closing security review findings and provider parity gaps.
+
+- **Bash validator** — wrapper peeling for `env`/`sudo`/`timeout`/`eval`/…,
+  alias bypass handling, root-path normalization.
+- **Gateway CORS** — localhost-only default origins; no credentials with `*`.
+- **Plan-mode escape** — agent-as-tool forwards parent `run_context`.
+- **Providers** — cache-boundary stripping, Anthropic `temperature=0`, Gemini
+  image URL safety, OpenAI empty-choices guard.
+- **Steer hook** — nudges append `LLMMessage` not dicts.
+- **Skill workshop** — block apply on any scan finding.
+- **Sandbox** — `is_secret_name()` env redaction beyond static denylist.
+- **Coordinator** — normalize malformed task shapes from LLM output.
+- **Registry** — write-snapshot path confined to workspace root.
+
+Release verification: **Python 97 security-regression tests passed**.
 
 ### v6.9.1 — CI/test hardening (June 2026)
 

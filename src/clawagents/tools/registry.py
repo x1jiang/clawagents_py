@@ -148,10 +148,22 @@ def _snapshot_before_write(tool_name: str, args: Dict[str, Any]) -> None:
     if not file_path.exists() or not file_path.is_file():
         return
 
+    # Confine to the workspace root: this snapshot runs *before* the write
+    # tool's own ``safe_path`` check, so without this guard an LLM-supplied
+    # absolute/``..`` path (``/etc/passwd``) would be copied into the readable
+    # in-workspace snapshot dir — an arbitrary host-file exfiltration channel.
     try:
-        snap_dir = Path.cwd() / ".clawagents" / "snapshots" / str(int(time.time()))
+        root = Path.cwd().resolve()
+        resolved = file_path.resolve()
+    except OSError:
+        return
+    if resolved != root and root not in resolved.parents:
+        return
+
+    try:
+        snap_dir = root / ".clawagents" / "snapshots" / str(int(time.time()))
         snap_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(str(file_path), str(snap_dir / file_path.name))
+        shutil.copy2(str(resolved), str(snap_dir / file_path.name))
     except Exception:
         pass  # Snapshot failure should never block tool execution
 

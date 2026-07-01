@@ -47,11 +47,21 @@ def create_app() -> tuple:
 
     app = FastAPI(title="ClawAgents Gateway")
 
-    cors_origins = os.getenv("GATEWAY_CORS_ORIGINS", "*").split(",")
+    cors_env = os.getenv("GATEWAY_CORS_ORIGINS")
+    if cors_env is None:
+        # Safe default: only same-origin localhost dev UIs. Defaulting to "*"
+        # let any website the operator happened to visit drive agent runs on an
+        # unauthenticated loopback gateway (a CSRF/drive-by hole).
+        cors_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
+    else:
+        cors_origins = [o.strip() for o in cors_env.split(",") if o.strip()]
+    allow_all = cors_origins == ["*"]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[o.strip() for o in cors_origins],
-        allow_credentials=True,
+        allow_origins=cors_origins,
+        # "*" + credentials is an invalid and dangerous CORS combination; never
+        # send Allow-Credentials when a wildcard origin is configured.
+        allow_credentials=not allow_all,
         allow_methods=["*"],
         allow_headers=["*"],
     )

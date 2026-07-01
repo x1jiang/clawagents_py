@@ -16,6 +16,7 @@ Public API: :func:`validate_bash` returning :class:`BashDecision`.
 
 from __future__ import annotations
 
+import posixpath
 import re
 import shlex
 from dataclasses import dataclass
@@ -143,7 +144,88 @@ def _split_first_token(command: str) -> tuple[str, List[str]]:
         tokens = head.split()
     if not tokens:
         return "", []
-    return tokens[0], tokens
+    # Strip a leading backslash used to bypass a shell alias (``\rm`` runs the
+    # real ``rm``): the program name for classification is still ``rm``.
+    program = tokens[0]
+    if program.startswith("\\") and len(program) > 1:
+        program = program[1:]
+    return program, tokens
+
+
+# ─── Launcher / wrapper commands ─────────────────────────────────────────
+# These programs run *another* command given later in their argv. Classifying
+# only the first token would let ``env rm -rf /`` or ``timeout 5 rm -rf /``
+# sail past every destructive-command BLOCK, so we peel the wrapper and
+# re-classify the inner command instead.
+_WRAPPER_PROGRAMS: frozenset[str] = frozenset({
+    "env", "command", "nice", "nohup", "timeout", "xargs", "setsid",
+    "stdbuf", "time", "ionice", "chrt", "busybox", "sudo", "doas", "eval",
+})
+
+# Wrapper options that consume the *following* token as their argument (so we
+# don't mistake that argument for the inner command). Attached forms like
+# ``-o0`` / ``-I{}`` are handled by the generic "skip one option token" rule.
+_WRAPPER_OPT_TAKES_ARG: dict[str, frozenset[str]] = {
+    "env": frozenset({"-u", "-C", "-S", "--unset", "--chdir"}),
+    "timeout": frozenset({"-s", "-k", "--signal", "--kill-after"}),
+    "nice": frozenset({"-n", "--adjustment"}),
+    "ionice": frozenset({"-c", "-n", "-p"}),
+    "stdbuf": frozenset({"-i", "-o", "-e", "--input", "--output", "--error"}),
+    "xargs": frozenset({
+        "-I", "-i", "-L", "-n", "-P", "-s", "-d", "-E", "-a",
+        "--replace", "--max-args", "--max-procs", "--max-lines", "--delimiter",
+    }),
+    "sudo": frozenset({"-u", "-g", "-C", "-p", "-r", "-t", "-U", "--user", "--group"}),
+    "doas": frozenset({"-u", "-C"}),
+}
+
+
+def _peel_wrapper(program: str, tokens: List[str]) -> str | None:
+    """Return the inner command *string* wrapped by ``program``, or ``None``.
+
+    ``tokens`` is the full argv of one clause whose first token is a known
+    wrapper. We skip the wrapper's own options / assignments (and, for
+    ``timeout``, its mandatory DURATION argument) and return everything from
+    the inner program onward so the caller can re-validate it.
+    """
+    # ``eval``/``command`` take a command *string*: re-join the remainder and
+    # let the caller re-parse it (it may contain its own separators/quotes).
+    if program in ("eval", "command"):
+        inner = tokens[1:]
+        if program == "command":
+            # ``command -v foo`` / ``-V`` are lookups (don't run foo); leave the
+            # classification to ``command`` itself rather than the target.
+            if any(t in ("-v", "-V", "-p") for t in inner):
+                return None
+        return " ".join(inner).strip() or None
+
+    takes_arg = _WRAPPER_OPT_TAKES_ARG.get(program, frozenset())
+    i = 1
+    n = len(tokens)
+    while i < n:
+        t = tokens[i]
+        if program == "env" and re.match(r"[A-Za-z_][A-Za-z0-9_]*=", t):
+            i += 1
+            continue
+        if t == "--":
+            i += 1
+            break
+        if t.startswith("-") and t != "-":
+            # Space-separated option argument (``-n 10``, ``-s KILL``). Attached
+            # forms (``-n10``, ``-oL``) carry their arg in the same token.
+            if t in takes_arg:
+                i += 2
+            else:
+                i += 1
+            continue
+        break
+    # ``timeout [opts] DURATION COMMAND`` — the first non-option token is the
+    # duration, not the command.
+    if program == "timeout" and i < n:
+        i += 1
+    if i < n:
+        return " ".join(tokens[i:]).strip() or None
+    return None
 
 
 _ROOT_LIKE_LITERALS: frozenset[str] = frozenset({
@@ -169,8 +251,12 @@ def _is_root_like_path(raw_path: str) -> bool:
         return True
     if p.startswith("~") or p.startswith("$HOME") or p.startswith("${HOME}"):
         return True
+    # Normalize redundant slashes and ``.``/``..`` segments so that ``//etc``,
+    # ``/./etc`` and ``/etc/../etc`` all resolve to the system root they hit at
+    # execution time instead of sliding past the check to a mere WARN.
+    norm = posixpath.normpath(re.sub(r"/{2,}", "/", p)) if p.startswith("/") else p
     for d in _SYSTEM_ROOTS:
-        if p == d or p.startswith(d + "/"):
+        if p == d or p.startswith(d + "/") or norm == d or norm.startswith(d + "/"):
             return True
     return False
 
@@ -441,7 +527,7 @@ def _severity(d: BashDecision) -> int:
     return {Decision.ALLOW: 0, Decision.WARN: 1, Decision.BLOCK: 2}[d.decision]
 
 
-def _validate_single_clause(raw: str) -> BashDecision:
+def _validate_single_clause(raw: str, _depth: int = 0) -> BashDecision:
     """Validate one shell clause (no compound separators inside).
 
     Whole-clause shape checks run first, then per-program dispatch.
@@ -477,6 +563,29 @@ def _validate_single_clause(raw: str) -> BashDecision:
             CommandCategory.UNKNOWN, Decision.ALLOW,
             "no program name found", "",
         )
+
+    # Launcher/wrapper prefixes (``env``, ``timeout``, ``eval``, ``sudo``, …)
+    # run a *different* command; classify that inner command, not the wrapper,
+    # so ``env rm -rf /`` can't launder a destructive call past the BLOCK list.
+    if program in _WRAPPER_PROGRAMS and _depth < 6:
+        inner = _peel_wrapper(program, tokens)
+        if inner and inner != raw.strip():
+            # Re-collect clauses: the inner payload (esp. for ``eval``/``xargs``)
+            # may itself contain separators, substitutions, or ``bash -c``.
+            inner_decision: BashDecision | None = None
+            for clause in _collect_clauses(inner) or [inner]:
+                d = _validate_single_clause(clause, _depth + 1)
+                if d.decision == Decision.BLOCK:
+                    return d
+                if inner_decision is None or _severity(d) > _severity(inner_decision):
+                    inner_decision = d
+            if inner_decision is not None:
+                # The wrapper contributes its own risk floor (``sudo`` is
+                # SYSTEM_ADMIN, ``env`` is read-only); the inner command can
+                # only escalate it. Strictest wins; on a tie keep the wrapper's
+                # own classification so ``sudo apt-get update`` stays SYSTEM_ADMIN.
+                own = _dispatch_program(program, tokens)
+                return inner_decision if _severity(inner_decision) > _severity(own) else own
 
     return _dispatch_program(program, tokens)
 

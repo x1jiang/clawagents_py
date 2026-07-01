@@ -74,10 +74,18 @@ async def test_background_task_tools_run_and_return_output(tmp_path):
     assert created.success
     job_id = json.loads(str(created.output))["job_id"]
 
-    await asyncio.sleep(0.2)
-    status = await tools["task_status"].execute({"job_id": job_id})
-    assert status.success
-    assert json.loads(str(status.output))["running"] is False
+    # Poll instead of a fixed sleep: under parallel test load (pytest-xdist) a
+    # freshly-spawned subprocess can take well over 200ms to exit, which made a
+    # ``sleep(0.2)`` + assert flaky.
+    status_payload = None
+    for _ in range(100):
+        status = await tools["task_status"].execute({"job_id": job_id})
+        assert status.success
+        status_payload = json.loads(str(status.output))
+        if status_payload["running"] is False:
+            break
+        await asyncio.sleep(0.05)
+    assert status_payload is not None and status_payload["running"] is False
 
     output = await tools["task_output"].execute({"job_id": job_id})
     assert output.success

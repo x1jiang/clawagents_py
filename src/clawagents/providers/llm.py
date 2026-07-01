@@ -507,7 +507,13 @@ class OpenAIProvider(LLMProvider):
                     ],
                 })
             else:
-                formatted.append({"role": m.role, "content": m.content})
+                content = m.content
+                # The ``__CACHE_BOUNDARY__`` marker is an Anthropic-only prompt
+                # cache hint; strip it here so OpenAI never receives the stray
+                # internal token at the tail of its system prompt.
+                if isinstance(content, str) and "__CACHE_BOUNDARY__" in content:
+                    content = content.replace("__CACHE_BOUNDARY__", "").strip()
+                formatted.append({"role": m.role, "content": content})
         oai_tools = _to_openai_tools(tools) if tools else None
 
         if not on_chunk:
@@ -531,6 +537,12 @@ class OpenAIProvider(LLMProvider):
         if oai_tools:
             kwargs["tools"] = oai_tools
         resp = await self.client.chat.completions.create(**kwargs)
+        if not resp.choices:
+            # Azure content filters and some OpenAI-compatible proxies return
+            # 200 with an empty ``choices`` array; don't IndexError on it.
+            return LLMResponse(content="", model=self.model,
+                               tokens_used=resp.usage.total_tokens if resp.usage else 0,
+                               partial=True)
         msg = resp.choices[0].message
         native_calls = _parse_openai_tool_calls(getattr(msg, "tool_calls", None))
         return LLMResponse(
@@ -747,14 +759,25 @@ class GeminiProvider(LLMProvider):
                             parts2.append({"text": part.get("text", "")})
                         elif part.get("type") == "image_url":
                             import base64
-                            url = part["image_url"]["url"]
-                            if url.startswith("data:"):
-                                mime_b64 = url[5:]
-                                mime, b64_str = mime_b64.split(";base64,")
-                                parts2.append({"inline_data": {"mime_type": mime, "data": base64.b64decode(b64_str)}})
+                            import binascii
+
+                            url = ((part.get("image_url") or {}).get("url")) or ""
+                            # Only base64 data URLs are inlineable here. A bare
+                            # ``data:image/svg+xml,<svg>`` (no ``;base64,``) or a
+                            # remote ``http(s)`` URL would otherwise blow up the
+                            # unpack below and kill the whole request — skip it.
+                            if url.startswith("data:") and ";base64," in url:
+                                mime, b64_str = url[5:].split(";base64,", 1)
+                                try:
+                                    decoded = base64.b64decode(b64_str)
+                                except (binascii.Error, ValueError):
+                                    continue
+                                parts2.append({"inline_data": {"mime_type": mime, "data": decoded}})
                     user_contents.append({"role": role_name, "parts": parts2})
 
-        system_instruction = "\n".join(system_parts)
+        # ``__CACHE_BOUNDARY__`` is an Anthropic-only prompt-cache hint; strip
+        # it so Gemini never receives the stray internal marker.
+        system_instruction = "\n".join(system_parts).replace("__CACHE_BOUNDARY__", "").strip()
 
         config_opts: dict[str, Any] = {
             "max_output_tokens": self._max_tokens,
@@ -1035,7 +1058,11 @@ class AnthropicProvider(LLMProvider):
                 kwargs["system"] = system_blocks
             else:
                 kwargs["system"] = joined
-        if self._temperature > 0:
+        # Send temperature whenever it's set (including 0). Gating on ``> 0``
+        # dropped ``temperature=0`` — the config default — so Anthropic silently
+        # sampled at the API default of 1.0 while OpenAI/Gemini honoured 0,
+        # making "temperature: 0" runs non-deterministic only on Claude.
+        if self._temperature is not None and self._temperature >= 0:
             kwargs["temperature"] = self._temperature
         if tools:
             kwargs["tools"] = [

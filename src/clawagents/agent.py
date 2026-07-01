@@ -422,7 +422,11 @@ class _AgentAsTool:
                 )
 
         try:
-            child_state = await self._agent.invoke(task)
+            # Forward the parent's run context so the child inherits its
+            # permission_mode (and approvals). Without this the child ran with a
+            # fresh DEFAULT context, letting an agent-as-tool execute write/exec
+            # tools while the parent was in plan mode — a plan-mode escape.
+            child_state = await self._agent.invoke(task, run_context=run_context)
         except Exception as e:
             return ToolResult(
                 success=False, output="", error=f"{self.name} raised: {e}"
