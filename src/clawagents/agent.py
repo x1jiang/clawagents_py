@@ -244,10 +244,16 @@ class ClawAgent:
         from clawagents.providers.llm import LLMMessage
         existing = self.before_llm
 
+        marker = f"[Context] {text}"
+
         def hook(messages):
             if existing:
                 messages = existing(messages)
-            return [*messages, LLMMessage(role="user", content=f"[Context] {text}")]
+            # Idempotent: before_llm runs every loop round; without this
+            # check the context message accumulated one copy per round.
+            if any(getattr(m, "content", None) == marker for m in messages):
+                return messages
+            return [*messages, LLMMessage(role="user", content=marker)]
 
         self.before_llm = hook
 

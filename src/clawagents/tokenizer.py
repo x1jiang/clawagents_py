@@ -111,10 +111,13 @@ def count_tokens_content(
     if isinstance(content, str):
         base = count_tokens(content, model)
     else:
-        # Multimodal: text parts + ~500 tokens per image part
-        text_chars = sum(len(p.get("text", "")) for p in content)
+        # Multimodal: tokenize the REAL text + ~500 tokens per image part.
+        # Encoding "x" * n BPE-compresses a run of identical chars to a
+        # handful of tokens, so estimates were wildly low whenever tiktoken
+        # was active — leading to overflow on requests we thought fit.
+        text = "\n".join(p.get("text", "") for p in content)
         image_count = sum(1 for p in content if p.get("type") == "image_url")
-        base = count_tokens("x" * text_chars, model) + image_count * 500
+        base = count_tokens(text, model) + image_count * 500
     return math.ceil(base * multiplier)
 
 

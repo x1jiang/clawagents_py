@@ -72,6 +72,10 @@ class AgentSession:
 
     _tool_ids_by_name: Dict[str, Deque[str]] = field(default_factory=dict)
     _tool_args_by_id: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    # Explicit caller call-id → ACP tool_call_id. When the agent loop supplies
+    # its own call id we match on it directly; name/FIFO matching alone
+    # mis-pairs out-of-order completions of same-named parallel calls.
+    _tool_id_by_call_id: Dict[str, str] = field(default_factory=dict)
     _emitted: List[Dict[str, Any]] = field(default_factory=list)
     _stop_reason: Optional[StopReason] = None
 
@@ -171,6 +175,9 @@ class AgentSession:
             args_raw = payload.get("arguments") or payload.get("args") or {}
             args = _coerce_args(args_raw)
             tc = ToolCallStart.new(name, arguments=args)
+            explicit = payload.get("call_id") or payload.get("callId") or payload.get("id")
+            if explicit:
+                self._tool_id_by_call_id[str(explicit)] = tc.tool_call_id
             queue = self._tool_ids_by_name.setdefault(name, deque())
             queue.append(tc.tool_call_id)
             self._tool_args_by_id[tc.tool_call_id] = args
@@ -179,8 +186,16 @@ class AgentSession:
 
         if k in {"tool_completed", "tool_complete", "tool_finished", "tool_end"}:
             name = str(payload.get("name") or payload.get("tool") or "tool")
+            # Prefer exact call-id matching; FIFO-by-name mis-pairs
+            # out-of-order completions of same-named parallel calls.
+            explicit = payload.get("call_id") or payload.get("callId") or payload.get("id")
+            tc_id = self._tool_id_by_call_id.pop(str(explicit), None) if explicit else None
             existing = self._tool_ids_by_name.get(name)
-            tc_id = existing.popleft() if existing else _make_tool_call_id()
+            if tc_id is not None:
+                if existing and tc_id in existing:
+                    existing.remove(tc_id)
+            else:
+                tc_id = existing.popleft() if existing else _make_tool_call_id()
             args = self._tool_args_by_id.pop(tc_id, {})
             error = payload.get("error")
             output = payload.get("output") or payload.get("result")

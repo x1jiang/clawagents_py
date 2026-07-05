@@ -368,3 +368,109 @@ class TestDockerEnvRegex:
     ])
     def test_benign_env_names_pass_through(self, name: str):
         assert _is_sensitive_env(name) is False, name
+
+
+class TestHistoryOffloadRedaction:
+    """P1: ``_offload_history`` wrote full compacted message content to
+    ``.clawagents/history/compacted_*.json`` with no redaction, so a bearer
+    token or ``.env`` contents the agent saw were persisted verbatim,
+    bypassing the redaction layer used by every other persistence surface."""
+
+    def test_offloaded_history_is_redacted(self, tmp_path, monkeypatch):
+        import json as _json
+        from pathlib import Path
+
+        from clawagents.graph.agent_loop import _offload_history
+        from clawagents.providers.llm import LLMMessage
+
+        monkeypatch.chdir(tmp_path)
+        secret = "Authorization: Bearer sk-live-abcdef1234567890abcdef1234567890"
+        path = _offload_history([
+            LLMMessage(role="user", content="read my .env"),
+            LLMMessage(role="tool", content=f"OPENAI_API_KEY=sk-live-XYZ987\n{secret}"),
+        ])
+
+        assert path is not None
+        raw = Path(path).read_text("utf-8")
+        assert "sk-live-abcdef1234567890abcdef1234567890" not in raw
+        assert "sk-live-XYZ987" not in raw
+        # Structure preserved: still a JSON list of role/content records.
+        data = _json.loads(raw)
+        assert [d["role"] for d in data] == ["user", "tool"]
+
+
+class TestParallelExternalHookBypass:
+    """P1: the >=2-call parallel tool branch skipped
+    ``ext_hook_runner.pre_tool_use``, so an external policy gate (e.g.
+    blocking a tool) could be bypassed by batching the forbidden call with
+    any second call. The parallel branch must run the same gate as the
+    single-call path."""
+
+    def test_parallel_batch_cannot_bypass_external_policy_hook(self, monkeypatch):
+        from clawagents.config import features as features_mod
+        from clawagents.graph.agent_loop import run_agent_graph
+        from clawagents.providers.llm import LLMResponse, NativeToolCall
+        from clawagents.tools.registry import ToolRegistry, ToolResult
+
+        hook_cmd = (
+            "python3 -c \""
+            "import sys, json; d = json.load(sys.stdin); "
+            "print(json.dumps({'allowed': d['tool'] != 'danger'}))\""
+        )
+        monkeypatch.setenv("CLAW_HOOK_PRE_TOOL_USE", hook_cmd)
+
+        executed: list[str] = []
+
+        class _Tool:
+            def __init__(self, name: str):
+                self.name = name
+                self.description = f"test tool {name}"
+                self.parameters: dict = {}
+
+            async def execute(self, args):
+                executed.append(self.name)
+                return ToolResult(success=True, output=f"{self.name} ran")
+
+        registry = ToolRegistry()
+        registry.register(_Tool("danger"))
+        registry.register(_Tool("echo"))
+
+        class _BatchingLLM:
+            name = "mock"
+
+            def __init__(self):
+                self.calls = 0
+
+            async def chat(self, messages, on_chunk=None, cancel_event=None, tools=None):
+                self.calls += 1
+                if self.calls == 1:
+                    # Batch the forbidden call with an allowed one so the
+                    # loop takes the parallel (>=2 calls) branch.
+                    return LLMResponse(
+                        content="", model="mock", tokens_used=5,
+                        tool_calls=[
+                            NativeToolCall("danger", {}, "tc-1"),
+                            NativeToolCall("echo", {}, "tc-2"),
+                        ],
+                    )
+                return LLMResponse(content="done", model="mock", tokens_used=5)
+
+        try:
+            state = asyncio.run(run_agent_graph(
+                "run the tools",
+                _BatchingLLM(),
+                tools=registry,
+                max_iterations=4,
+                streaming=False,
+                use_native_tools=True,
+                features={"external_hooks": True},
+            ))
+        finally:
+            features_mod.reset()
+
+        assert state.status == "done"
+        assert "danger" not in executed, (
+            "external pre_tool_use policy hook was bypassed by batching the "
+            "forbidden call with a second call"
+        )
+        assert "echo" in executed, "allowed call in the batch should still run"

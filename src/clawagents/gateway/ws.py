@@ -25,6 +25,11 @@ from clawagents.gateway.protocol import is_valid_request, make_response, make_ev
 
 VALID_LANES = {"main", "cron", "subagent", "nested"}
 
+# Bounded LRU: every sessionId-less message used to mint a fresh entry that
+# was retained forever — a memory leak plus indefinite transcript retention.
+_MAX_SESSIONS = 500
+_MAX_MESSAGES_PER_SESSION = 200
+
 _sessions: dict[str, dict] = {}
 
 
@@ -40,9 +45,22 @@ def _resolve_session(raw: str | None) -> str:
 
 
 def _get_or_create_session(session_id: str) -> dict:
-    if session_id not in _sessions:
-        _sessions[session_id] = {"messages": []}
-    return _sessions[session_id]
+    # Refresh recency (dicts preserve insertion order → oldest first).
+    session = _sessions.pop(session_id, None)
+    if session is None:
+        session = {"messages": []}
+    _sessions[session_id] = session
+    while len(_sessions) > _MAX_SESSIONS:
+        oldest = next(iter(_sessions))
+        del _sessions[oldest]
+    return session
+
+
+def _push_messages(session: dict, *msgs: dict) -> None:
+    session["messages"].extend(msgs)
+    overflow = len(session["messages"]) - _MAX_MESSAGES_PER_SESSION
+    if overflow > 0:
+        del session["messages"][:overflow]
 
 
 def attach_websocket(app: FastAPI, llm: Any, gateway_api_key: str):
@@ -126,8 +144,11 @@ async def _handle_chat_send(ws: WebSocket, msg: dict, llm: Any):
         result = await enqueue_command_in_lane(lane, _execute)
 
         now_ms = int(time.time() * 1000)
-        session["messages"].append({"role": "user", "content": task, "timestamp": now_ms})
-        session["messages"].append({"role": "assistant", "content": result.result or "", "timestamp": now_ms})
+        _push_messages(
+            session,
+            {"role": "user", "content": task, "timestamp": now_ms},
+            {"role": "assistant", "content": result.result or "", "timestamp": now_ms},
+        )
 
         await ws.send_json(make_response(msg["id"], True, {
             "sessionId": session_id,
@@ -160,5 +181,5 @@ def _handle_chat_inject(msg: dict) -> dict:
     if not content:
         return make_response(msg["id"], False, "Missing 'content' parameter")
     session = _get_or_create_session(session_id)
-    session["messages"].append({"role": "assistant", "content": content, "timestamp": int(time.time() * 1000)})
+    _push_messages(session, {"role": "assistant", "content": content, "timestamp": int(time.time() * 1000)})
     return make_response(msg["id"], True, {"sessionId": session_id, "injected": True})

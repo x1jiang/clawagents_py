@@ -924,6 +924,10 @@ _COMPACTABLE_TOOLS: frozenset[str] = frozenset({
 })
 
 _MICRO_COMPACT_KEEP_RECENT = 3  # keep last N compactable tool results intact
+# Only micro-compact once the transcript actually uses a meaningful share of
+# the context window. Running it unconditionally blanked all but the last 3
+# read/grep/exec results every round, degrading multi-file tasks at low usage.
+_MICRO_COMPACT_MIN_USAGE_RATIO = 0.4
 
 
 def _micro_compact_tool_results(
@@ -1116,7 +1120,10 @@ def _find_safe_split_index(non_system: list[LLMMessage], desired_recent: int) ->
     that doesn't land between an assistant tool_call and its tool result.
     """
     split = max(0, len(non_system) - desired_recent)
-    while split < len(non_system) - 1:
+    # Bound is < len(non_system), NOT len - 1: with the tighter bound a tail
+    # run of ≥N tool messages left the last orphan tool result in `recent`
+    # while its paired assistant tool_call got summarized away → provider 400.
+    while split < len(non_system):
         msg = non_system[split]
         if msg.role == "tool" and msg.tool_call_id:
             split += 1
@@ -1360,12 +1367,20 @@ def _archive_pre_compact_transcript(older_messages: list[LLMMessage], task_conte
 
 
 def _offload_history(messages: list[LLMMessage]) -> str | None:
-    """Save older messages to a JSON file before compaction."""
+    """Save older messages to a JSON file before compaction.
+
+    Content is passed through :func:`redact_obj` first — the offload file
+    is a plain-text artifact on disk, so secrets the agent saw mid-run
+    (bearer tokens, ``.env`` contents, …) must not be persisted verbatim,
+    matching the redaction applied by every other persistence surface.
+    """
     try:
+        from clawagents.redact import redact_obj
+
         _get_history_dir().mkdir(parents=True, exist_ok=True)
         ts = int(time.time())
         path = _get_history_dir() / f"compacted_{ts}_{len(messages)}msgs.json"
-        data = [{"role": m.role, "content": m.content} for m in messages]
+        data = redact_obj([{"role": m.role, "content": m.content} for m in messages])
         path.write_text(json.dumps(data, indent=2), "utf-8")
         return str(path)
     except Exception:
@@ -1724,9 +1739,27 @@ async def run_agent_graph(
                 _session_preloaded_count = len(prior)
         except Exception as err:
             emit("warn", {"message": f"session load failed: {err}"})
-    # Snapshot of messages we brought in before the loop runs; anything
-    # appended after this cursor is what we'll persist back.
-    _session_start_cursor = len(messages)
+    # Identity-based tracking of preloaded vs. run-appended messages.
+    # A numeric cursor breaks when compaction rebuilds ``messages`` or
+    # dangling-tool-call patching inserts items mid-list, silently losing
+    # (or duplicating) turns at persist time. Instead we track message
+    # *objects*: anything unseen at the top of a round was appended by the
+    # run and gets persisted; anything synthesized by the pre-LLM transform
+    # pipeline (compaction summaries, patch inserts, prompt injections) is
+    # marked seen without being persisted. The dict keeps strong refs so
+    # CPython can't recycle an id() for a new message.
+    _session_initial_ids = frozenset(id(m) for m in messages)
+    _session_seen: dict[int, LLMMessage] = {id(m): m for m in messages}
+    _session_new_msgs: list[LLMMessage] = []
+
+    def _session_note_messages(track: bool) -> None:
+        for _m in messages:
+            _mid = id(_m)
+            if _mid in _session_seen:
+                continue
+            _session_seen[_mid] = _m
+            if track:
+                _session_new_msgs.append(_m)
 
     # RunHooks: on_run_start
     if active_hooks:
@@ -1768,6 +1801,9 @@ async def run_agent_graph(
             })
 
     overflow_retries = 0
+    # Set when a handoff installs the combined parent+child transcript on
+    # ``state.messages`` — the post-loop assignment must not overwrite it.
+    _handoff_transcript_set = False
     cancel_event = asyncio.Event()
     loop = asyncio.get_running_loop()
 
@@ -1816,6 +1852,11 @@ async def run_agent_graph(
                 state.result = state.result or "[iteration budget exhausted]"
                 break
 
+            # One increment per loop round, unconditionally — previously only
+            # a handful of exit paths bumped this, so normal multi-round runs
+            # reported "1 iteration" in events and the session writer.
+            state.iterations += 1
+
             # Session: mark turn start
             if session_writer:
                 session_writer.write_turn_started(round_idx)
@@ -1835,9 +1876,19 @@ async def run_agent_graph(
             # Write-ahead log: persist last message before API call (Claude Code pattern)
             _wal_write(messages)
 
+            # Capture messages appended by the previous round *before* the
+            # transform pipeline below can compact/rebuild the list.
+            _session_note_messages(track=True)
+
             # Patch dangling tool calls before sending to LLM
             messages = _patch_dangling_tool_calls(messages)
-            messages = _micro_compact_tool_results(messages)  # Claude Code pattern: clear old tool results
+            # Claude Code pattern: clear old tool results — but only when the
+            # transcript is actually filling up (see _MICRO_COMPACT_MIN_USAGE_RATIO).
+            if (
+                _estimate_messages_tokens(messages, token_multiplier)
+                > context_window * _MICRO_COMPACT_MIN_USAGE_RATIO
+            ):
+                messages = _micro_compact_tool_results(messages)
             messages = _soft_trim_messages(messages, context_window, token_multiplier, emit, resolved_model_name)
             messages = await _compact_if_needed(
                 messages, context_window, llm, emit, token_multiplier, resolved_model_name, run_context,
@@ -1880,6 +1931,11 @@ async def run_agent_graph(
                         emit("warn", {"message": "before_llm returned invalid value — ignored"})
                 except Exception as hook_err:
                     emit("warn", {"message": f"before_llm hook error: {hook_err}"})
+
+            # Framework-synthesized messages (compaction summaries, dangling
+            # tool-call patches, hook/prompt injections) are regenerated per
+            # run — mark them seen so they are never persisted to the session.
+            _session_note_messages(track=False)
 
             buf, on_chunk = _make_buffer()
             if active_hooks:
@@ -1956,13 +2012,25 @@ async def run_agent_graph(
                         _estimate_messages_tokens(messages, 1.0), 1,
                     )
                     token_multiplier = min(observed_ratio * 1.1, 3.0)
+                    # Also shrink the effective window: the multiplier is
+                    # capped at 3.0, so with a wildly overstated
+                    # CONTEXT_WINDOW (e.g. 1M configured on a 128K model)
+                    # compaction below would never fire and every retry
+                    # would overflow again.
+                    context_window = max(int(context_window * 0.5), 16_000)
                     emit("context", {
-                        "message": f"token overflow — calibrated multiplier to {token_multiplier:.2f} (retry {overflow_retries}/{_MAX_OVERFLOW_RETRIES})",
+                        "message": (
+                            f"token overflow — calibrated multiplier to {token_multiplier:.2f}, "
+                            f"shrunk effective window to {context_window} "
+                            f"(retry {overflow_retries}/{_MAX_OVERFLOW_RETRIES})"
+                        ),
                     })
                     messages = _soft_trim_messages(messages, context_window, token_multiplier, emit, resolved_model_name)
                     messages = await _compact_if_needed(
                         messages, context_window, llm, emit, token_multiplier, resolved_model_name, run_context,
                     )
+                    # Don't persist recovery-compaction artifacts to the session.
+                    _session_note_messages(track=False)
                     continue
 
                 logger.exception("LLM call failed at round %d: [%s] %s", round_idx, descriptor.error_class.value, err)
@@ -2015,8 +2083,13 @@ async def run_agent_graph(
                     continue
 
                 # ── Advisor: final check before declaring done ──
+                # Track whether the final-check path already appended the
+                # assistant message: when the advisor errored or returned
+                # nothing, the fall-through below appended it a second time.
+                _final_assistant_appended = False
                 if advisor_llm and _advisor_call_count > 0 and _advisor_call_count < advisor_max_calls and state.tool_calls > 0:
                     messages.append(LLMMessage(role="assistant", content=response.content, thinking=_thinking_content))
+                    _final_assistant_appended = True
                     await _consult_advisor(messages, "final-check")
                     # If advisor injected guidance, let the LLM process it
                     last_msg = messages[-1] if messages else None
@@ -2032,9 +2105,9 @@ async def run_agent_graph(
                     )
                 state.result = _sanitize_assistant_text(response.content)
                 state.status = "done"
-                state.iterations += 1
                 emit("final_content", {"content": state.result})
-                messages.append(LLMMessage(role="assistant", content=response.content, thinking=_thinking_content))
+                if not _final_assistant_appended:
+                    messages.append(LLMMessage(role="assistant", content=response.content, thinking=_thinking_content))
                 break
 
             # ── Handoff dispatch (v6.4) ──────────────────────────────
@@ -2065,7 +2138,6 @@ async def run_agent_graph(
                             role="user",
                             content=f"[Handoff Error] Could not resolve target agent: {resolve_err}",
                         ))
-                        state.iterations += 1
                         continue
 
                     target_name = getattr(target_agent, "name", None) or _handoff_call.tool_name
@@ -2109,8 +2181,12 @@ async def run_agent_graph(
                     # user task as new_items.
                     handoff_payload = HandoffInputData(
                         input_history=list(messages),
-                        pre_handoff_items=list(messages[:_session_start_cursor]),
-                        new_items=list(messages[_session_start_cursor:]),
+                        pre_handoff_items=[
+                            m for m in messages if id(m) in _session_initial_ids
+                        ],
+                        new_items=[
+                            m for m in messages if id(m) not in _session_initial_ids
+                        ],
                         run_context=run_context,
                     )
                     if h_obj.input_filter is not None:
@@ -2197,7 +2273,6 @@ async def run_agent_graph(
                                 role="user",
                                 content=f"[Handoff Error] Target agent failed: {run_err}",
                             ))
-                            state.iterations += 1
                             continue
 
                     state.result = child_state.result
@@ -2208,15 +2283,14 @@ async def run_agent_graph(
                         else child_state.result
                     )
                     state.tool_calls += child_state.tool_calls
-                    state.iterations += 1
                     state.messages = messages + child_state.messages
+                    _handoff_transcript_set = True
                     break
 
             if loop_tracker.is_circuit_broken():
                 emit("warn", {"message": f"circuit breaker tripped ({loop_tracker._no_progress_count} no-progress calls) — breaking"})
                 state.status = "done"
                 state.result = "Circuit breaker: too many tool calls with no progress. Stopping."
-                state.iterations += 1
                 break
 
             poll_hit = None
@@ -2228,7 +2302,6 @@ async def run_agent_graph(
                 emit("warn", {"message": poll_hit.message})
                 state.status = "done"
                 state.result = poll_hit.message
-                state.iterations += 1
                 break
 
             if loop_tracker.is_hard_looping_batch(tool_calls):
@@ -2236,7 +2309,6 @@ async def run_agent_graph(
                 emit("warn", {"message": f"tool loop detected ({names}) — breaking"})
                 state.status = "done"
                 state.result = f"Tool loop detected ({names}). Stopping."
-                state.iterations += 1
                 break
 
             if loop_tracker.is_ping_ponging():
@@ -2244,7 +2316,6 @@ async def run_agent_graph(
                 emit("warn", {"message": f"ping-pong oscillation detected ({' ↔ '.join(recent_unique)}) — breaking"})
                 state.status = "done"
                 state.result = "Ping-pong loop detected between tools. Stopping."
-                state.iterations += 1
                 break
 
             if loop_tracker.is_soft_looping_batch(tool_calls):
@@ -2277,7 +2348,6 @@ async def run_agent_graph(
                     role="user",
                     content=hint,
                 ))
-                state.iterations += 1
                 continue
 
             # Session: write assistant message with tool calls
@@ -2549,6 +2619,27 @@ async def run_agent_graph(
                         ))
 
             else:
+                # ── External pre_tool_use hook (parallel) ──
+                # Mirror the single-call path: an external policy gate must not
+                # be bypassable by batching a forbidden call with another one.
+                _candidate_pairs: list[tuple[int, ParsedToolCall]] = list(enumerate(tool_calls))
+                if ext_hook_runner:
+                    _ext_pairs: list[tuple[int, ParsedToolCall]] = []
+                    for _orig_i, _c in _candidate_pairs:
+                        try:
+                            ext_allowed, ext_args = await ext_hook_runner.pre_tool_use(_c.tool_name, _c.args)
+                            if not ext_allowed:
+                                emit("tool_skipped", {"name": _c.tool_name, "reason": "blocked by external hook"})
+                                messages.append(LLMMessage(role="user", content=f"[Tool Skipped] {_c.tool_name} was blocked by external hook."))
+                                continue
+                            _c = ParsedToolCall(tool_name=_c.tool_name, args=ext_args)
+                        except Exception as hook_err:
+                            emit("warn", {"message": f"external pre_tool_use hook error: {hook_err}"})
+                        _ext_pairs.append((_orig_i, _c))
+                    _candidate_pairs = _ext_pairs
+                    if not _candidate_pairs:
+                        continue
+
                 # ── before_tool hook (parallel) — filter out rejected calls ──
                 # Track original tool_calls index alongside each approved call so
                 # native_tool_call_objects[orig_idx] stays correct even when the hook
@@ -2577,7 +2668,7 @@ async def run_agent_graph(
                             emit("warn", {"message": f"before_tool hook error: {hook_err}"})
                             return None, "hook error"
 
-                    for _orig_i, c in enumerate(tool_calls):
+                    for _orig_i, c in _candidate_pairs:
                         result_call, reason = _apply_hook(c)
                         if result_call is None:
                             emit("tool_skipped", {"name": c.tool_name, "reason": reason})
@@ -2588,8 +2679,8 @@ async def run_agent_graph(
                         messages.append(LLMMessage(role="user", content="[Tool Skipped] All tool calls were not approved."))
                         continue
                 else:
-                    approved_calls = list(tool_calls)
-                    _approved_orig_indices = list(range(len(tool_calls)))
+                    approved_calls = [c for _, c in _candidate_pairs]
+                    _approved_orig_indices = [i for i, _ in _candidate_pairs]
 
                 # Resolve a stable call_id per approved call (prefer native tc id).
                 # Index native_tool_call_objects by ORIGINAL tool_calls index, not
@@ -2676,6 +2767,27 @@ async def run_agent_graph(
                             _r.error if not _r.success else None,
                         )
 
+                # External post_tool_use hook (parallel) — parity with the
+                # single-call path so result-rewriting policy hooks apply.
+                if ext_hook_runner:
+                    _ext_results: list[ToolResult] = []
+                    for _c, _r in zip(approved_calls, results):
+                        try:
+                            ext_result = await ext_hook_runner.post_tool_use(
+                                _c.tool_name, _c.args,
+                                {"success": _r.success, "output": str(_r.output)[:1000]},
+                            )
+                            if "success" in ext_result and "output" in ext_result:
+                                _r = ToolResult(
+                                    success=ext_result["success"],
+                                    output=ext_result["output"],
+                                    error=ext_result.get("error"),
+                                )
+                        except Exception as hook_err:
+                            emit("warn", {"message": f"external post_tool_use hook error: {hook_err}"})
+                        _ext_results.append(_r)
+                    results = _ext_results
+
                 if after_tool:
                     safe_results: list[ToolResult] = []
                     for c, r in zip(approved_calls, results):
@@ -2706,18 +2818,30 @@ async def run_agent_graph(
                 for _idx2, (call, result) in enumerate(zip(approved_calls, results)):
                     raw_out: str | list[dict[str, Any]] = _tool_observation(result)
                     output: str | list[dict[str, Any]]
-                    if isinstance(raw_out, list):
-                        output = raw_out
-                        preview = "[Multimodal Array Content]"
-                    else:
-                        output = _evict_large_tool_result(call.tool_name, raw_out)
-                        preview = output[:preview_chars]
-
                     _call_id = (
                         _approved_call_ids[_idx2]
                         if _idx2 < len(_approved_call_ids)
                         else call.tool_name
                     )
+                    if isinstance(raw_out, list):
+                        output = raw_out
+                        preview = "[Multimodal Array Content]"
+                    else:
+                        output = _evict_large_tool_result(call.tool_name, raw_out)
+                        # Offload oversized outputs to artifact files (parity
+                        # with the single-call path's 12K inline threshold).
+                        from clawagents.tool_output_artifacts import offload_tool_output_if_needed
+
+                        inline, artifact_path = offload_tool_output_if_needed(
+                            tool_name=call.tool_name,
+                            tool_use_id=_call_id,
+                            output=output,
+                        )
+                        output = inline
+                        if artifact_path is not None:
+                            emit("context", {"message": f"tool output offloaded to {artifact_path}"})
+                        preview = output[:preview_chars]
+
                     emit("tool_result", {
                         "name": call.tool_name,
                         "success": result.success,
@@ -2730,6 +2854,14 @@ async def run_agent_graph(
                         "output": preview if isinstance(preview, str) else "[multimodal]",
                         "error": result.error if not result.success else None,
                     })
+
+                    # Session: write tool result (parity with single-call path)
+                    if session_writer:
+                        session_writer.write_tool_result(
+                            _call_id, call.tool_name, result.success,
+                            str(result.output)[:2000],
+                            error=result.error if not result.success else None,
+                        )
                     
                     if isinstance(output, str):
                         call_summaries.append(f"{call.tool_name}({json.dumps(call.args)}) => {output}")
@@ -2867,7 +2999,6 @@ async def run_agent_graph(
             emit("warn", {"message": f"reached max {effective_max_rounds} tool rounds"})
             state.status = "done"
             state.result = state.result or f"Reached maximum of {effective_max_rounds} tool rounds."
-            state.iterations += 1
 
     except KeyboardInterrupt:
         emit("warn", {"message": "interrupted"})
@@ -2884,7 +3015,9 @@ async def run_agent_graph(
             pass
 
     elapsed = time.monotonic() - t0
-    state.messages = messages
+    # Don't clobber the combined parent+child transcript a handoff installed.
+    if not _handoff_transcript_set:
+        state.messages = messages
 
     # Session: write final turn_completed
     if session_writer:
@@ -3002,9 +3135,9 @@ async def run_agent_graph(
     # Persist only the messages newly added in this run to the Session backend.
     if session is not None:
         try:
-            new_msgs = messages[_session_start_cursor:]
-            if new_msgs:
-                await _session_add_items(session, new_msgs)
+            _session_note_messages(track=True)
+            if _session_new_msgs:
+                await _session_add_items(session, _session_new_msgs)
         except Exception as err:
             emit("warn", {"message": f"session save failed: {err}"})
 

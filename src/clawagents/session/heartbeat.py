@@ -131,6 +131,16 @@ async def run_with_heartbeat(
     try:
         return await work_task
     finally:
+        # If we're exiting because the *caller* was cancelled (not because
+        # the work finished), propagate the cancellation to the work task —
+        # otherwise it kept running (and mutating the filesystem) after the
+        # agent was cancelled.
+        if not work_task.done():
+            work_task.cancel()
+            try:
+                await work_task
+            except (asyncio.CancelledError, Exception):
+                pass
         beat_task.cancel()
         try:
             await beat_task

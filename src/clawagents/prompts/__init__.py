@@ -38,6 +38,11 @@ def append_prompt_injection(
         role = message.get("role") if isinstance(message, dict) else getattr(message, "role", None)
         if role == "system":
             content = message.get("content", "") if isinstance(message, dict) else getattr(message, "content", "")
+            # Idempotent: before_llm hooks run every loop round, so without
+            # this check the injection accumulated one copy per round —
+            # wasting tokens and churning the prompt-prefix cache.
+            if isinstance(content, str) and injection in content:
+                return messages
             result[index] = LLMMessage(
                 role="system",
                 content=f"{content}\n\n{injection}",

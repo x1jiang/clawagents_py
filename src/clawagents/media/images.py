@@ -34,6 +34,12 @@ try:  # pragma: no cover - import guard
 
     Image: Any = _PILImage
     _PILLOW_AVAILABLE = True
+    # Decompression-bomb hardening: pin the pixel ceiling explicitly so a
+    # crafted image can't exhaust memory even if another import in the
+    # process disabled Pillow's default guard (a common footgun:
+    # ``Image.MAX_IMAGE_PIXELS = None``).
+    if getattr(_PILImage, "MAX_IMAGE_PIXELS", None) is None:
+        _PILImage.MAX_IMAGE_PIXELS = 178_956_970  # Pillow's stock default
 except Exception:  # pragma: no cover - exercised by mocked tests
     Image = None
     _PILLOW_AVAILABLE = False

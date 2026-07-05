@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.9.2-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.10.0-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -26,9 +26,18 @@ pip install clawagents[anthropic]   # + Anthropic Claude support
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 6.9.2** — Security and provider hardening (July 2026): bash-validator wrapper peeling, gateway CORS safe defaults, plan-mode escape fix, provider parity fixes. See [Changelog](#changelog).
+> **Version 6.10.0** — Reliability and parity release (July 2026): session persistence, parallel hook enforcement, provider token accounting, context-window recovery, and agent-loop telemetry fixes across Python and TypeScript. See [Changelog](#changelog).
 
-### New In v6.9.2
+### New In v6.10.0
+
+- **Session persistence** — identity-based message tracking survives compaction and dangling-tool-call patching without losing or duplicating persisted turns.
+- **Parallel tool policy hooks** — external pre/post hooks and session writes apply in parallel batches; policy gates cannot be bypassed by batching a forbidden call with a safe one.
+- **History offload redaction** — compacted history files run through the same secret redaction as every other persistence surface.
+- **Provider reliability** — normalized `prompt_tokens` / `tokens_used` across OpenAI, Gemini, and Anthropic; mid-stream retry preserves accumulated tool calls; truncated JSON string recovery; Anthropic parallel `tool_result` coalescing and array `items` in tool schemas.
+- **Context & loop fixes** — accurate multimodal token counts; safe compaction split boundaries; deduped prompt injection; micro-compact gated on context usage; overflow recovery shrinks effective window; advisor duplicate-message and handoff transcript fixes; one iteration increment per loop round.
+- **Infrastructure** — command-queue barrier exclusivity and strong task refs; heartbeat cancels in-flight work on agent cancel; bounded gateway WebSocket session store; ACP tool-id matching for out-of-order completions; explicit PIL decompression-bomb guard.
+
+### Previously In v6.9.2
 
 - **Bash validator hardening** — peels launcher wrappers (`env`, `sudo`, `timeout`, `eval`, …) so inner destructive commands can't bypass BLOCK rules; normalizes root-like paths; handles alias bypass (`\rm`).
 - **Gateway CORS safe defaults** — loopback-only origins by default instead of `*`; disables credentials when wildcard is explicitly configured.
@@ -566,7 +575,7 @@ Traditional Stack (DeepAgents):           ClawAgents:
 
 ## Feature Matrix
 
-> Compares **ClawAgents v6.9.2** against four peer agent frameworks: **Hermes Agent**
+> Compares **ClawAgents v6.10.0** against four peer agent frameworks: **Hermes Agent**
 > ([metaspartan/hermes-agent](https://github.com/metaspartan/hermes-agent)), **DeepAgents**
 > ([langchain-ai/deepagents](https://github.com/langchain-ai/deepagents)), and **OpenClaw**, plus **OpenHarness** ([HKUDS/OpenHarness](https://github.com/HKUDS/OpenHarness)).
 > The v6.8.1 prompt/packaging polish, v6.8.0 OpenHarness-inspired operational
@@ -575,7 +584,7 @@ Traditional Stack (DeepAgents):           ClawAgents:
 > every row in the ClawAgents column is ✅. `◐` means partial or comparable
 > coverage rather than exact feature parity.
 
-| Feature | ClawAgents v6.9.2 | Hermes Agent | DeepAgents | OpenClaw | OpenHarness |
+| Feature | ClawAgents v6.10.0 | Hermes Agent | DeepAgents | OpenClaw | OpenHarness |
 |:---|:---:|:---:|:---:|:---:|:---:|
 | **Core** |  |  |  |  |  |
 | ReAct loop | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -1517,6 +1526,28 @@ parity sweep.
 ---
 
 ## Changelog
+
+### v6.10.0 — Reliability and parity release (July 2026)
+
+Cross-cutting hardening from the code-review backlog: session persistence,
+parallel hook enforcement, provider correctness, context recovery, and
+agent-loop telemetry — mirrored in the TypeScript port where applicable.
+
+- **Session persistence** — identity-based tracking replaces index cursors that
+  broke on compaction or mid-list inserts.
+- **Parallel tools** — external policy hooks and session writes on every branch.
+- **History offload** — redacted before writing to `.clawagents/history/`.
+- **Providers** — consistent token accounting; stream partials keep tool calls;
+  `repair_json` closes truncated strings; error taxonomy word-boundary matching.
+- **Tokenizer** — multimodal counts use real text, not BPE-compressed filler.
+- **Compaction** — safe split index keeps tool_call/tool_result pairs intact.
+- **Agent loop** — per-round iteration counter; idempotent prompt injection;
+  micro-compact gated on usage; overflow shrinks effective window; advisor/handoff
+  transcript fixes.
+- **Process** — command-queue barrier exclusivity; heartbeat work-task cancel;
+  bounded gateway WS sessions; ACP call-id matching; PIL pixel ceiling.
+
+Release verification: **Python 916 passed, 8 skipped** (`scripts/run_tests.sh`).
 
 ### v6.9.2 — Security and provider hardening (July 2026)
 

@@ -194,6 +194,13 @@ async def _stall_guarded_stream(
             yield chunk
         except StopAsyncIteration:
             return
+        except asyncio.TimeoutError:
+            # Re-raise with a message: a bare TimeoutError stringifies to ""
+            # so callers logged blank errors and the taxonomy had nothing to
+            # classify.
+            raise TimeoutError(
+                f"LLM stream stalled: no chunk received for {timeout_s:.0f}s"
+            ) from None
 
 
 async def _invoke_callback(
@@ -318,7 +325,10 @@ def _repair_json(text: str) -> Any:
             if stack and stack[-1] == ch:
                 stack.pop()
 
-    repaired = text + "".join(reversed(stack))
+    # If truncation happened mid-string ({"path": "/tmp/fi…), terminate the
+    # dangling string literal before appending the structural closers —
+    # otherwise the recoverable prefix was thrown away entirely.
+    repaired = text + ('"' if in_string else "") + "".join(reversed(stack))
     try:
         return json.loads(repaired)
     except json.JSONDecodeError:
@@ -537,11 +547,13 @@ class OpenAIProvider(LLMProvider):
         if oai_tools:
             kwargs["tools"] = oai_tools
         resp = await self.client.chat.completions.create(**kwargs)
+        _prompt_tokens = (resp.usage.prompt_tokens or 0) if resp.usage else 0
         if not resp.choices:
             # Azure content filters and some OpenAI-compatible proxies return
             # 200 with an empty ``choices`` array; don't IndexError on it.
             return LLMResponse(content="", model=self.model,
                                tokens_used=resp.usage.total_tokens if resp.usage else 0,
+                               prompt_tokens=_prompt_tokens,
                                partial=True)
         msg = resp.choices[0].message
         native_calls = _parse_openai_tool_calls(getattr(msg, "tool_calls", None))
@@ -549,6 +561,7 @@ class OpenAIProvider(LLMProvider):
             content=msg.content or "",
             model=self.model,
             tokens_used=resp.usage.total_tokens if resp.usage else 0,
+            prompt_tokens=_prompt_tokens,
             tool_calls=native_calls,
         )
 
@@ -572,7 +585,21 @@ class OpenAIProvider(LLMProvider):
 
             chunks: list[str] = []
             final_tokens = 0
+            final_prompt_tokens = 0
             tools_accumulation: dict[int, dict[str, Any]] = {}
+
+            def _accumulated_calls() -> list[NativeToolCall] | None:
+                if not tools_accumulation:
+                    return None
+                calls: list[NativeToolCall] = []
+                for _idx in sorted(tools_accumulation.keys()):
+                    _fn = tools_accumulation[_idx]
+                    calls.append(NativeToolCall(
+                        tool_name=_fn["name"],
+                        args=_repair_json(_fn["arguments"] or "{}"),
+                        tool_call_id=_fn.get("id", ""),
+                    ))
+                return calls
 
             try:
                 kwargs: dict[str, Any] = {
@@ -594,7 +621,9 @@ class OpenAIProvider(LLMProvider):
                             content="".join(chunks),
                             model=self.model,
                             tokens_used=final_tokens,
+                            prompt_tokens=final_prompt_tokens,
                             partial=True,
+                            tool_calls=_accumulated_calls(),
                         )
 
                     try:
@@ -620,30 +649,31 @@ class OpenAIProvider(LLMProvider):
 
                         if chunk.usage:
                             final_tokens = chunk.usage.total_tokens
+                            final_prompt_tokens = chunk.usage.prompt_tokens or 0
                     except Exception:
                         pass  # malformed chunk — skip
-
-                native_calls = None
-                if tools_accumulation:
-                    native_calls = []
-                    for idx in sorted(tools_accumulation.keys()):
-                        fn = tools_accumulation[idx]
-                        native_calls.append(NativeToolCall(
-                            tool_name=fn["name"],
-                            args=_repair_json(fn["arguments"] or "{}"),
-                            tool_call_id=fn.get("id", ""),
-                        ))
 
                 return LLMResponse(
                     content="".join(chunks),
                     model=self.model,
                     tokens_used=final_tokens,
-                    tool_calls=native_calls,
+                    prompt_tokens=final_prompt_tokens,
+                    tool_calls=_accumulated_calls(),
                 )
 
             except Exception as exc:
                 last_error = exc
-                if chunks:
+                # A mid-stream exception used to return the truncated text as a
+                # non-retried "final" answer. Retry retryable errors first; only
+                # surface a partial (now including any accumulated tool calls)
+                # when retries are exhausted or the error is not retryable.
+                if _is_retryable(exc) and attempt < _MAX_RETRIES:
+                    logger.warning(
+                        "  [openai] Stream interrupted after %d chars — retrying",
+                        len("".join(chunks)),
+                    )
+                    continue
+                if chunks or tools_accumulation:
                     partial = "".join(chunks)
                     logger.warning(
                         "  [openai] Stream interrupted after %d chars — returning partial",
@@ -653,10 +683,11 @@ class OpenAIProvider(LLMProvider):
                         content=partial,
                         model=self.model,
                         tokens_used=final_tokens,
+                        prompt_tokens=final_prompt_tokens,
                         partial=True,
+                        tool_calls=_accumulated_calls(),
                     )
-                if not _is_retryable(exc):
-                    break
+                break
 
         raise last_error  # type: ignore[misc]
 
@@ -851,14 +882,16 @@ class GeminiProvider(LLMProvider):
             retry_config = types.GenerateContentConfig(**retry_opts)
             return await self._request_once(user_contents, retry_config, _malformed_retry=True)
 
+        _um = resp.usage_metadata
+        _prompt_tokens = (getattr(_um, "prompt_token_count", 0) or 0) if _um else 0
+        _output_tokens = (getattr(_um, "candidates_token_count", 0) or 0) if _um else 0
         return LLMResponse(
             content=extracted_text,
             model=self.model,
-            tokens_used=(
-                resp.usage_metadata.candidates_token_count or 0
-                if resp.usage_metadata
-                else 0
-            ),
+            # ``tokens_used`` is input+output everywhere else; Gemini used to
+            # record output-only (and no prompt), garbling usage accounting.
+            tokens_used=_prompt_tokens + _output_tokens,
+            prompt_tokens=_prompt_tokens,
             tool_calls=fn_calls,
             gemini_parts=raw_parts,
         )
@@ -883,6 +916,7 @@ class GeminiProvider(LLMProvider):
 
             chunks: list[str] = []
             final_tokens = 0
+            final_prompt_tokens = 0
             fn_calls: list[NativeToolCall] = []
             all_stream_parts: list[Any] = []
             last_finish_reason: Any = None
@@ -900,6 +934,7 @@ class GeminiProvider(LLMProvider):
                             content="".join(chunks),
                             model=self.model,
                             tokens_used=final_tokens,
+                            prompt_tokens=final_prompt_tokens,
                             partial=True,
                             tool_calls=fn_calls if fn_calls else None,
                             gemini_parts=_serialize_gemini_parts(all_stream_parts),
@@ -937,7 +972,11 @@ class GeminiProvider(LLMProvider):
                                                 tool_call_id=f"gemini_{uuid.uuid4().hex[:8]}",
                                             ))
                         if hasattr(chunk, "usage_metadata") and chunk.usage_metadata:
-                            final_tokens = chunk.usage_metadata.candidates_token_count or 0
+                            _um = chunk.usage_metadata
+                            final_prompt_tokens = getattr(_um, "prompt_token_count", 0) or 0
+                            final_tokens = final_prompt_tokens + (
+                                getattr(_um, "candidates_token_count", 0) or 0
+                            )
                     except Exception:
                         pass  # malformed chunk — skip
 
@@ -957,13 +996,22 @@ class GeminiProvider(LLMProvider):
                     content="".join(chunks),
                     model=self.model,
                     tokens_used=final_tokens,
+                    prompt_tokens=final_prompt_tokens,
                     tool_calls=fn_calls if fn_calls else None,
                     gemini_parts=_serialize_gemini_parts(all_stream_parts),
                 )
 
             except Exception as exc:
                 last_error = exc
-                if chunks:
+                # Retry retryable mid-stream failures before surfacing a
+                # truncated partial; include accumulated tool calls when we do.
+                if _is_retryable(exc) and attempt < _MAX_RETRIES:
+                    logger.warning(
+                        "  [gemini] Stream interrupted after %d chars — retrying",
+                        len("".join(chunks)),
+                    )
+                    continue
+                if chunks or fn_calls:
                     partial = "".join(chunks)
                     logger.warning(
                         "  [gemini] Stream interrupted after %d chars — returning partial",
@@ -973,11 +1021,12 @@ class GeminiProvider(LLMProvider):
                         content=partial,
                         model=self.model,
                         tokens_used=final_tokens,
+                        prompt_tokens=final_prompt_tokens,
                         partial=True,
+                        tool_calls=fn_calls if fn_calls else None,
                         gemini_parts=_serialize_gemini_parts(all_stream_parts),
                     )
-                if not _is_retryable(exc):
-                    break
+                break
 
         raise last_error  # type: ignore[misc]
 
@@ -1019,10 +1068,23 @@ class AnthropicProvider(LLMProvider):
             if m.role == "system":
                 system_parts.append(m.content if isinstance(m.content, str) else str(m.content))
             elif m.role == "tool" and m.tool_call_id:
-                api_messages.append({
-                    "role": "user",
-                    "content": [{"type": "tool_result", "tool_use_id": m.tool_call_id, "content": m.content}],
-                })
+                block = {"type": "tool_result", "tool_use_id": m.tool_call_id, "content": m.content}
+                # Coalesce consecutive tool results into ONE user message —
+                # Anthropic requires every tool_result block answering a single
+                # assistant turn (parallel tool calls) to be in the same user
+                # message, otherwise the API rejects the transcript.
+                prev = api_messages[-1] if api_messages else None
+                if (
+                    prev is not None
+                    and prev.get("role") == "user"
+                    and isinstance(prev.get("content"), list)
+                    and prev["content"]
+                    and isinstance(prev["content"][0], dict)
+                    and prev["content"][0].get("type") == "tool_result"
+                ):
+                    prev["content"].append(block)
+                else:
+                    api_messages.append({"role": "user", "content": [block]})
             elif m.role == "assistant" and m.tool_calls_meta:
                 content_blocks = []
                 if m.content:
@@ -1065,6 +1127,17 @@ class AnthropicProvider(LLMProvider):
         if self._temperature is not None and self._temperature >= 0:
             kwargs["temperature"] = self._temperature
         if tools:
+            def _anthropic_prop(v: dict[str, Any]) -> dict[str, Any]:
+                prop: dict[str, Any] = {
+                    "type": v.get("type", "string"),
+                    "description": v.get("description", ""),
+                }
+                # Array parameters must carry their ``items`` schema — dropping
+                # it made Claude guess element types (or the API reject the tool).
+                if prop["type"] == "array":
+                    prop["items"] = v.get("items") or {"type": "string"}
+                return prop
+
             kwargs["tools"] = [
                 {
                     "name": s.name,
@@ -1072,8 +1145,7 @@ class AnthropicProvider(LLMProvider):
                     "input_schema": {
                         "type": "object",
                         "properties": {
-                            k: {"type": v.get("type", "string"), "description": v.get("description", "")}
-                            for k, v in s.parameters.items()
+                            k: _anthropic_prop(v) for k, v in s.parameters.items()
                         },
                         "required": [k for k, v in s.parameters.items() if v.get("required")],
                     },
@@ -1131,7 +1203,7 @@ class AnthropicProvider(LLMProvider):
             chunks: list[str] = []
             tool_calls: list[NativeToolCall] = []
             current_tool: dict[str, Any] | None = None
-            final_tokens = 0
+            output_tokens = 0
             cache_creation = 0
             cache_read = 0
             prompt_tokens = 0
@@ -1142,7 +1214,12 @@ class AnthropicProvider(LLMProvider):
                         if cancel_event and cancel_event.is_set():
                             return LLMResponse(
                                 content="".join(chunks), model=self.model,
-                                tokens_used=final_tokens, partial=True,
+                                tokens_used=prompt_tokens + output_tokens,
+                                prompt_tokens=prompt_tokens,
+                                partial=True,
+                                tool_calls=tool_calls if tool_calls else None,
+                                cache_creation_tokens=cache_creation,
+                                cache_read_tokens=cache_read,
                             )
 
                         if event.type == "message_start" and hasattr(event, "message"):
@@ -1175,12 +1252,14 @@ class AnthropicProvider(LLMProvider):
                                 current_tool = None
                         elif event.type == "message_delta":
                             if hasattr(event.usage, "output_tokens"):
-                                final_tokens = event.usage.output_tokens
+                                output_tokens = event.usage.output_tokens
 
                 return LLMResponse(
                     content="".join(chunks),
                     model=self.model,
-                    tokens_used=final_tokens,
+                    # input+output, matching the non-streaming path (it used to
+                    # report output-only, understating usage by the prompt size).
+                    tokens_used=prompt_tokens + output_tokens,
                     tool_calls=tool_calls if tool_calls else None,
                     cache_creation_tokens=cache_creation,
                     cache_read_tokens=cache_read,
@@ -1189,13 +1268,25 @@ class AnthropicProvider(LLMProvider):
 
             except Exception as exc:
                 last_error = exc
-                if chunks:
+                # Retry retryable mid-stream failures before surfacing a
+                # truncated partial; include accumulated tool calls when we do.
+                if _is_retryable(exc) and attempt < _MAX_RETRIES:
+                    logger.warning(
+                        "  [anthropic] Stream interrupted after %d chars — retrying",
+                        len("".join(chunks)),
+                    )
+                    continue
+                if chunks or tool_calls:
                     return LLMResponse(
                         content="".join(chunks), model=self.model,
-                        tokens_used=final_tokens, partial=True,
+                        tokens_used=prompt_tokens + output_tokens,
+                        prompt_tokens=prompt_tokens,
+                        partial=True,
+                        tool_calls=tool_calls if tool_calls else None,
+                        cache_creation_tokens=cache_creation,
+                        cache_read_tokens=cache_read,
                     )
-                if not _is_retryable(exc):
-                    break
+                break
 
         raise last_error  # type: ignore[misc]
 

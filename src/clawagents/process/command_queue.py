@@ -29,10 +29,18 @@ class LaneState:
     max_concurrent: int = 1
     draining: bool = False
     generation: int = 0
+    # True while a barrier task is executing: nothing else may be dispatched
+    # in the lane until it finishes, even when max_concurrent > 1.
+    barrier_active: bool = False
 
 
 lanes: Dict[str, LaneState] = {}
 next_task_id = 1
+
+# Strong references to fire-and-forget lane tasks. asyncio only keeps weak
+# refs to running tasks, so without this a dispatched command could be
+# garbage-collected mid-flight and silently never complete.
+_background_tasks: Set[asyncio.Task] = set()
 
 
 def get_lane_state(lane: str) -> LaneState:
@@ -57,6 +65,12 @@ def drain_lane(lane: str):
     def pump():
         global next_task_id
         while len(state.active_task_ids) < state.max_concurrent and state.queue:
+            # A running barrier is exclusive: with max_concurrent > 1 the
+            # active-count check alone would happily dispatch new tasks
+            # alongside it.
+            if state.barrier_active:
+                break
+
             entry = state.queue[0]
 
             # Barrier: wait until all active tasks finish before dispatching.
@@ -80,11 +94,16 @@ def drain_lane(lane: str):
 
             is_barrier_entry = entry.is_barrier
 
+            if is_barrier_entry:
+                state.barrier_active = True
+
             async def _run_task(entry=entry, task_id=task_id, task_generation=task_generation, is_barrier_entry=is_barrier_entry):
                 start_time = time.time()
                 try:
                     result = await entry.task()
                     completed_current = complete_task(state, task_id, task_generation)
+                    if is_barrier_entry and task_generation == state.generation:
+                        state.barrier_active = False
                     if completed_current:
                         diag.debug(f"lane task done: lane={lane} durationMs={int((time.time() - start_time)*1000)} active={len(state.active_task_ids)} queued={len(state.queue)}")
                         pump()
@@ -92,6 +111,8 @@ def drain_lane(lane: str):
                         entry.future.set_result(result)
                 except Exception as err:
                     completed_current = complete_task(state, task_id, task_generation)
+                    if is_barrier_entry and task_generation == state.generation:
+                        state.barrier_active = False
                     is_probe_lane = lane.startswith("auth-probe:") or lane.startswith("session:probe-")
                     if not is_probe_lane:
                         diag.error(f"lane task error: lane={lane} durationMs={int((time.time() - start_time)*1000)} error=\"{str(err)}\"")
@@ -100,8 +121,11 @@ def drain_lane(lane: str):
                     if not entry.future.done():
                         entry.future.set_exception(err)
 
-            # Fire and forget the background execution
-            asyncio.create_task(_run_task())
+            # Background execution — keep a strong reference so the task
+            # can't be garbage-collected mid-flight.
+            _bg = asyncio.create_task(_run_task())
+            _background_tasks.add(_bg)
+            _bg.add_done_callback(_background_tasks.discard)
 
             # After dispatching a barrier, don't dispatch anything else until it finishes.
             if is_barrier_entry:
@@ -189,6 +213,7 @@ def reset_all_lanes():
         state.generation += 1
         state.active_task_ids.clear()
         state.draining = False
+        state.barrier_active = False
         if state.queue:
             lanes_to_drain.append(state.lane)
             

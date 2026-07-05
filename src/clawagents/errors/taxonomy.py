@@ -10,6 +10,7 @@ Inspired by claw-code-main's error.rs taxonomy.
 from __future__ import annotations
 
 import enum
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -122,11 +123,14 @@ def classify_error(err: BaseException, provider: str = "") -> ErrorDescriptor:
     err_type = type(err).__name__.lower()
 
     # 1. Context window / token overflow
+    # Note: no bare "max_tokens" here — it appears in unrelated validation
+    # errors ("max_tokens must be at least 1"), which would trigger a useless
+    # compact-and-retry loop instead of surfacing the real problem.
     if any(tok in msg for tok in (
         "context_length_exceeded", "context window", "token limit",
         "maximum context length", "too many tokens",
         "prompt is too long", "request too large",
-        "max_tokens", "context_window_exceeded",
+        "context_window_exceeded", "exceeds the maximum number of tokens",
     )):
         recipe = RECOVERY_RECIPES[ErrorClass.CONTEXT_WINDOW]
         return ErrorDescriptor(
@@ -242,9 +246,10 @@ def _extract_status(err: BaseException) -> int | None:
     # Generic HTTP
     if hasattr(err, "response") and hasattr(err.response, "status_code"):
         return err.response.status_code
-    # String-based fallback
+    # String-based fallback. Word-boundary match so "429" doesn't fire on
+    # "1429 tokens", "file_429.txt", or a request id containing the digits.
     msg = str(err)
     for code in (401, 403, 429, 500, 502, 503, 504):
-        if str(code) in msg:
+        if re.search(rf"(?<!\d){code}(?!\d)", msg):
             return code
     return None
