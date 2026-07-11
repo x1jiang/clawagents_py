@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.10.7-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.10.8-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -26,9 +26,15 @@ pip install clawagents[anthropic]   # + Anthropic Claude support
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 6.10.7** — Peer-inspired harness pack (July 2026): repo map, context ledger, shadow checkpoints, apply_patch, core memory, git/worktree tools.
+> **Version 6.10.8** — Compaction correctness (July 2026): escalate when still over budget; preserve message identity through compression.
 
-### New In v6.10.7
+### New In v6.10.8
+
+- **Compaction budget** — `compress_messages_safe` re-measures after the safe tier and escalates to summarization when still over context (no more false “under budget”).
+- **Message identity** — reuse original message objects when role+content survive compression so session tracking and `tool_calls_meta` / `tool_call_id` stay intact.
+- **Judge usage** — LLM-as-Judge token spend flows into the run’s `Usage`.
+
+### Previously In v6.10.7
 
 - **Repo map** — ranked symbol map tool (+ optional prompt inject).
 - **Context ledger** — commit-boundary restorable memory with `rehydrate_ledger`.
@@ -1573,6 +1579,12 @@ parity sweep.
 ---
 
 ## Changelog
+
+### v6.10.8 — Compaction correctness (July 2026)
+
+- Do not declare compaction success while still over the context budget; escalate to summarization.
+- Reuse original message objects through compression (session tracker + tool linkage).
+- Include judge-call tokens in run `Usage`.
 
 ### v6.10.7 — Peer-inspired harness pack (July 2026)
 
