@@ -147,6 +147,8 @@ def classify_error(err: BaseException, provider: str = "") -> ErrorDescriptor:
         "unauthorized", "forbidden", "invalid api key", "invalid_api_key",
         "authentication", "invalid x-api-key", "permission denied",
         "incorrect api key", "invalid auth",
+        # google-genai: 400 INVALID_ARGUMENT / API_KEY_INVALID
+        "api key not valid", "api_key_invalid",
     )):
         recipe = RECOVERY_RECIPES[ErrorClass.PROVIDER_AUTH]
         return ErrorDescriptor(
@@ -235,17 +237,39 @@ def get_recovery_recipe(error_class: ErrorClass) -> RecoveryRecipe:
     return RECOVERY_RECIPES.get(error_class, RECOVERY_RECIPES[ErrorClass.UNKNOWN])
 
 
+def _coerce_status(value: object) -> int | None:
+    """Normalize a status attribute to an int HTTP code, if it is one.
+
+    google-genai's ClientError exposes ``status`` as a string enum name
+    ("INVALID_ARGUMENT"); other SDKs use ints or numeric strings.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
+
+
 def _extract_status(err: BaseException) -> int | None:
     """Extract HTTP status code from exception (provider-agnostic)."""
     # OpenAI SDK
-    if hasattr(err, "status_code"):
-        return getattr(err, "status_code", None)
-    # Anthropic SDK
-    if hasattr(err, "status"):
-        return getattr(err, "status", None)
+    status = _coerce_status(getattr(err, "status_code", None))
+    if status is not None:
+        return status
+    # google-genai (code) / Anthropic SDK (status)
+    status = _coerce_status(getattr(err, "code", None))
+    if status is not None:
+        return status
+    status = _coerce_status(getattr(err, "status", None))
+    if status is not None:
+        return status
     # Generic HTTP
     if hasattr(err, "response") and hasattr(err.response, "status_code"):
-        return err.response.status_code
+        status = _coerce_status(err.response.status_code)
+        if status is not None:
+            return status
     # String-based fallback. Word-boundary match so "429" doesn't fire on
     # "1429 tokens", "file_429.txt", or a request id containing the digits.
     msg = str(err)

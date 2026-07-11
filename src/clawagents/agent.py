@@ -461,6 +461,7 @@ def create_claw_agent(
     instruction: Optional[str] = None,
     tools: Optional[List] = None,
     skills: Union[str, List[Union[str, os.PathLike]], None] = None,
+    skills_exclude: Optional[List[str]] = None,
     fallback_models: Optional[List[str]] = None,
     memory: Union[str, List[Union[str, os.PathLike]], None] = None,
     sandbox: Any = None,
@@ -745,6 +746,11 @@ def create_claw_agent(
                 pool.submit(asyncio.run, skill_store.load_all()).result()
         except RuntimeError:
             asyncio.run(skill_store.load_all())
+
+        if skills_exclude:
+            for _name in skills_exclude:
+                if _name:
+                    skill_store.skills.pop(str(_name), None)
 
         loaded_skills = skill_store.list()
         if loaded_skills:

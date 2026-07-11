@@ -358,14 +358,19 @@ def _to_openai_tools(schemas: list[NativeToolSchema]) -> list[dict[str, Any]]:
     """Convert NativeToolSchema list → OpenAI Chat Completions `tools` param."""
     result = []
     for s in schemas:
-        properties: dict[str, dict[str, str]] = {}
+        properties: dict[str, Any] = {}
         required: list[str] = []
         for k, v in s.parameters.items():
-            properties[k] = {"type": v.get("type", "string"), "description": v.get("description", "")}
-            if "items" in v:
-                properties[k]["items"] = v["items"]
+            ptype = v.get("type", "string")
+            prop: dict[str, Any] = {"type": ptype, "description": v.get("description", "")}
+            if ptype == "array":
+                items = v.get("items") if isinstance(v.get("items"), dict) else {"type": "string"}
+                prop["items"] = {"type": items.get("type", "string")}
+            elif "items" in v:
+                prop["items"] = v["items"]
             if v.get("required"):
                 required.append(k)
+            properties[k] = prop
         fn_def: dict[str, Any] = {
             "name": s.name,
             "description": s.description,
@@ -385,11 +390,21 @@ def _to_gemini_tools(schemas: list[NativeToolSchema]) -> list[dict[str, Any]]:
         properties: dict[str, dict[str, Any]] = {}
         required: list[str] = []
         for k, v in s.parameters.items():
-            properties[k] = {"type": v.get("type", "string").upper(), "description": v.get("description", "")}
-            if "items" in v:
-                properties[k]["items"] = {"type": v["items"].get("type", "string").upper()}
+            ptype = str(v.get("type", "string")).upper()
+            prop: dict[str, Any] = {
+                "type": ptype,
+                "description": v.get("description", ""),
+            }
+            # Gemini requires ARRAY properties to declare items.type.
+            if ptype == "ARRAY":
+                items = v.get("items") if isinstance(v.get("items"), dict) else {}
+                item_type = str(items.get("type", "string")).upper()
+                prop["items"] = {"type": item_type}
+            elif "items" in v and isinstance(v["items"], dict):
+                prop["items"] = {"type": str(v["items"].get("type", "string")).upper()}
             if v.get("required"):
                 required.append(k)
+            properties[k] = prop
         decl: dict[str, Any] = {
             "name": s.name,
             "description": s.description,
@@ -399,6 +414,19 @@ def _to_gemini_tools(schemas: list[NativeToolSchema]) -> list[dict[str, Any]]:
             decl["parameters"]["required"] = required
         declarations.append(decl)
     return [{"function_declarations": declarations}]
+
+
+def _openai_cached_tokens(usage: Any) -> int:
+    """Read prompt-cache hits from an OpenAI usage object, defaulting to 0.
+
+    ``usage.prompt_tokens_details.cached_tokens`` reports the portion of the
+    prompt served from OpenAI's automatic prompt cache (billed at a discount).
+    """
+    details = getattr(usage, "prompt_tokens_details", None) if usage else None
+    try:
+        return int(getattr(details, "cached_tokens", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _parse_openai_tool_calls(
@@ -459,6 +487,83 @@ def _resolve_temperature(model: str, requested: float) -> float:
     if model == "gpt-5" or model.startswith("gpt-5-2") or model.startswith("gpt-5."):
         return 1.0
     return requested
+
+
+def _chat_completions_needs_reasoning_none(model: str) -> bool:
+    """True when Chat Completions rejects tools + default reasoning_effort.
+
+    GPT-5.5 / GPT-5.6 default to a non-``none`` reasoning effort. On
+    ``/v1/chat/completions``, that combination with function tools returns
+    HTTP 400 ("use /v1/responses or set reasoning_effort to 'none'"). Until
+    we speak Responses API, force ``none`` whenever tools are attached.
+    """
+    m = (model or "").strip().lower()
+    return m.startswith("gpt-5.5") or m.startswith("gpt-5.6")
+
+
+def _apply_tool_reasoning_compat(
+    kwargs: dict[str, Any],
+    *,
+    model: str,
+    has_tools: bool,
+) -> None:
+    if has_tools and _chat_completions_needs_reasoning_none(model):
+        kwargs["reasoning_effort"] = "none"
+
+
+def _sanitize_openai_tool_pairs(formatted: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop orphan tool messages; ensure every tool_calls id has a result.
+
+    OpenAI rejects transcripts where role=tool appears without a preceding
+    assistant message that declared that tool_call_id.
+    """
+    declared: set[str] = set()
+    for m in formatted:
+        if m.get("role") == "assistant":
+            for tc in m.get("tool_calls") or []:
+                tc_id = tc.get("id")
+                if tc_id:
+                    declared.add(str(tc_id))
+
+    out: list[dict[str, Any]] = []
+    for m in formatted:
+        if m.get("role") == "tool":
+            tc_id = str(m.get("tool_call_id") or "")
+            if not tc_id or tc_id not in declared:
+                continue
+            out.append(m)
+            continue
+        out.append(m)
+
+    responded = {
+        str(m.get("tool_call_id"))
+        for m in out
+        if m.get("role") == "tool" and m.get("tool_call_id")
+    }
+    final: list[dict[str, Any]] = []
+    for m in out:
+        final.append(m)
+        if m.get("role") != "assistant":
+            continue
+        for tc in m.get("tool_calls") or []:
+            tc_id = tc.get("id")
+            if not tc_id:
+                continue
+            tc_id = str(tc_id)
+            if tc_id in responded:
+                continue
+            final.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tc_id,
+                    "content": (
+                        "Tool call was cancelled — the agent was interrupted "
+                        "before it could complete."
+                    ),
+                }
+            )
+            responded.add(tc_id)
+    return final
 
 
 class OpenAIProvider(LLMProvider):
@@ -524,6 +629,7 @@ class OpenAIProvider(LLMProvider):
                 if isinstance(content, str) and "__CACHE_BOUNDARY__" in content:
                     content = content.replace("__CACHE_BOUNDARY__", "").strip()
                 formatted.append({"role": m.role, "content": content})
+        formatted = _sanitize_openai_tool_pairs(formatted)
         oai_tools = _to_openai_tools(tools) if tools else None
 
         if not on_chunk:
@@ -546,14 +652,19 @@ class OpenAIProvider(LLMProvider):
         }
         if oai_tools:
             kwargs["tools"] = oai_tools
+        _apply_tool_reasoning_compat(
+            kwargs, model=self.model, has_tools=bool(oai_tools),
+        )
         resp = await self.client.chat.completions.create(**kwargs)
         _prompt_tokens = (resp.usage.prompt_tokens or 0) if resp.usage else 0
+        _cached_tokens = _openai_cached_tokens(resp.usage)
         if not resp.choices:
             # Azure content filters and some OpenAI-compatible proxies return
             # 200 with an empty ``choices`` array; don't IndexError on it.
             return LLMResponse(content="", model=self.model,
                                tokens_used=resp.usage.total_tokens if resp.usage else 0,
                                prompt_tokens=_prompt_tokens,
+                               cache_read_tokens=_cached_tokens,
                                partial=True)
         msg = resp.choices[0].message
         native_calls = _parse_openai_tool_calls(getattr(msg, "tool_calls", None))
@@ -562,6 +673,7 @@ class OpenAIProvider(LLMProvider):
             model=self.model,
             tokens_used=resp.usage.total_tokens if resp.usage else 0,
             prompt_tokens=_prompt_tokens,
+            cache_read_tokens=_cached_tokens,
             tool_calls=native_calls,
         )
 
@@ -586,6 +698,7 @@ class OpenAIProvider(LLMProvider):
             chunks: list[str] = []
             final_tokens = 0
             final_prompt_tokens = 0
+            final_cached_tokens = 0
             tools_accumulation: dict[int, dict[str, Any]] = {}
 
             def _accumulated_calls() -> list[NativeToolCall] | None:
@@ -612,6 +725,9 @@ class OpenAIProvider(LLMProvider):
                 }
                 if oai_tools:
                     kwargs["tools"] = oai_tools
+                _apply_tool_reasoning_compat(
+                    kwargs, model=self.model, has_tools=bool(oai_tools),
+                )
                 stream = await self.client.chat.completions.create(**kwargs)
 
                 async for chunk in _stall_guarded_stream(stream, _CHUNK_STALL_S):
@@ -650,6 +766,7 @@ class OpenAIProvider(LLMProvider):
                         if chunk.usage:
                             final_tokens = chunk.usage.total_tokens
                             final_prompt_tokens = chunk.usage.prompt_tokens or 0
+                            final_cached_tokens = _openai_cached_tokens(chunk.usage)
                     except Exception:
                         pass  # malformed chunk — skip
 
@@ -658,6 +775,7 @@ class OpenAIProvider(LLMProvider):
                     model=self.model,
                     tokens_used=final_tokens,
                     prompt_tokens=final_prompt_tokens,
+                    cache_read_tokens=final_cached_tokens,
                     tool_calls=_accumulated_calls(),
                 )
 
@@ -684,6 +802,7 @@ class OpenAIProvider(LLMProvider):
                         model=self.model,
                         tokens_used=final_tokens,
                         prompt_tokens=final_prompt_tokens,
+                        cache_read_tokens=final_cached_tokens,
                         partial=True,
                         tool_calls=_accumulated_calls(),
                     )

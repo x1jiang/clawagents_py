@@ -74,24 +74,46 @@ def _sanitize_assistant_text(text: str) -> str:
 # When native function calling is used and the agent loop is interrupted mid-execution,
 # the next LLM call sees tool_calls without matching tool results — most APIs reject this.
 # This pass inserts synthetic "cancelled" responses for any dangling tool calls.
+# It also drops orphan role="tool" messages whose tool_call_id was never declared
+# by a preceding assistant tool_calls_meta (common after session preload limit
+# cuts mid-pair → OpenAI 400: "messages with role 'tool' must be a response to
+# a preceding message with 'tool_calls'").
 
 def _patch_dangling_tool_calls(messages: list[LLMMessage]) -> list[LLMMessage]:
     if not messages:
         return messages
 
+    # Ids declared by assistant messages in this transcript.
+    declared_ids: set[str] = set()
+    for msg in messages:
+        if msg.role == "assistant" and msg.tool_calls_meta:
+            for tc in msg.tool_calls_meta:
+                tc_id = tc.get("id") if isinstance(tc, dict) else None
+                if tc_id:
+                    declared_ids.add(str(tc_id))
+
+    # Drop orphan tool results first (no matching assistant tool_calls).
+    filtered: list[LLMMessage] = []
+    for msg in messages:
+        if msg.role == "tool":
+            tc_id = str(msg.tool_call_id) if msg.tool_call_id else ""
+            if not tc_id or tc_id not in declared_ids:
+                continue
+        filtered.append(msg)
+
     # Build set of all tool_call_ids that have a matching role="tool" response
     responded_ids: set[str] = set()
-    for msg in messages:
+    for msg in filtered:
         if msg.role == "tool" and msg.tool_call_id:
-            responded_ids.add(msg.tool_call_id)
+            responded_ids.add(str(msg.tool_call_id))
 
     patched: list[LLMMessage] = []
-    for i, msg in enumerate(messages):
+    for i, msg in enumerate(filtered):
         patched.append(msg)
 
         # Text-mode: look for assistant messages with JSON tool calls without a following [Tool Result]
         if msg.role == "assistant" and isinstance(msg.content, str) and msg.content.startswith('{"tool":'):
-            _next_msg = messages[i + 1] if i + 1 < len(messages) else None
+            _next_msg = filtered[i + 1] if i + 1 < len(filtered) else None
             _next_content = _next_msg.content if _next_msg is not None else None
             has_result = (
                 _next_msg is not None
@@ -108,16 +130,26 @@ def _patch_dangling_tool_calls(messages: list[LLMMessage]) -> list[LLMMessage]:
         # Native tool calls: inject synthetic role="tool" for any missing responses
         elif msg.role == "assistant" and msg.tool_calls_meta:
             for tc in msg.tool_calls_meta:
-                tc_id = tc.get("id")
-                if tc_id and tc_id not in responded_ids:
+                tc_id = tc.get("id") if isinstance(tc, dict) else None
+                if tc_id and str(tc_id) not in responded_ids:
                     patched.append(LLMMessage(
                         role="tool",
                         content="Tool call was cancelled — the agent was interrupted before it could complete.",
-                        tool_call_id=tc_id,
+                        tool_call_id=str(tc_id),
                     ))
-                    responded_ids.add(tc_id)
+                    responded_ids.add(str(tc_id))
 
     return patched
+
+
+def _drop_leading_orphan_tools(messages: list[LLMMessage]) -> list[LLMMessage]:
+    """If a limited session preload starts mid tool-pair, drop leading orphans."""
+    if not messages:
+        return messages
+    i = 0
+    while i < len(messages) and messages[i].role == "tool":
+        i += 1
+    return messages[i:] if i else messages
 
 
 # ─── Tool Result Eviction (learned from deepagents) ───────────────────────
@@ -1729,12 +1761,25 @@ async def run_agent_graph(
 
     # Session protocol — hydrate history before first LLM call (non-destructive).
     _session_preloaded_count = 0
+    # The current task message is part of the durable conversation and must
+    # be persisted alongside run-appended messages (assistant/tool turns).
+    _session_task_msg = next((m for m in messages if m.role == "user"), None)
     if session is not None:
         try:
             prior = await _session_get_items(session, limit=session_preload_limit)
             if prior:
-                # Keep original system + user (task), append replayed history after.
-                messages = messages + prior
+                # Limited preload can start mid tool-pair (tool result without
+                # its assistant tool_calls) → provider 400. Drop leading orphans
+                # here; full pair sanitization still runs before each LLM call.
+                prior = _drop_leading_orphan_tools(prior)
+                prior = _patch_dangling_tool_calls(prior)
+                # Replay history between the system prompt and the current
+                # task so the transcript reads in true conversational order.
+                insert_at = next(
+                    (i for i, m in enumerate(messages) if m.role == "user"),
+                    len(messages),
+                )
+                messages = [*messages[:insert_at], *prior, *messages[insert_at:]]
                 state.messages = messages
                 _session_preloaded_count = len(prior)
         except Exception as err:
@@ -1751,6 +1796,10 @@ async def run_agent_graph(
     _session_initial_ids = frozenset(id(m) for m in messages)
     _session_seen: dict[int, LLMMessage] = {id(m): m for m in messages}
     _session_new_msgs: list[LLMMessage] = []
+    # Persist the task itself: without it, replayed history contains answers
+    # with no questions and multi-turn recall silently degrades.
+    if session is not None and _session_task_msg is not None:
+        _session_new_msgs.append(_session_task_msg)
 
     def _session_note_messages(track: bool) -> None:
         for _m in messages:
@@ -1813,7 +1862,10 @@ async def run_agent_graph(
 
     try:
         loop.add_signal_handler(signal.SIGINT, _on_sigint)
-    except (NotImplementedError, OSError, RuntimeError):
+    except (NotImplementedError, OSError, RuntimeError, ValueError):
+        # ValueError: uvloop (and RuntimeError: vanilla asyncio) refuse signal
+        # handlers off the main thread — e.g. when embedded in a server that
+        # runs agent turns in worker threads. Ctrl-C handling is best-effort.
         pass
 
     effective_max_rounds = min(
@@ -1893,6 +1945,8 @@ async def run_agent_graph(
             messages = await _compact_if_needed(
                 messages, context_window, llm, emit, token_multiplier, resolved_model_name, run_context,
             )
+            # Compaction / trim can still leave pairs inconsistent — sanitize again.
+            messages = _patch_dangling_tool_calls(messages)
 
             # External pre_llm hook (runs before programmatic hook)
             if ext_hook_runner:
@@ -1937,7 +1991,12 @@ async def run_agent_graph(
             # run — mark them seen so they are never persisted to the session.
             _session_note_messages(track=False)
 
-            buf, on_chunk = _make_buffer()
+            buf, _buffer_chunk = _make_buffer()
+
+            def on_chunk(chunk: str) -> None:
+                _buffer_chunk(chunk)
+                _emit_typed("assistant_delta", {"delta": chunk})
+
             if active_hooks:
                 await _fire_hook("on_llm_start", resolved_model_name or "", messages)
             try:
@@ -2106,6 +2165,7 @@ async def run_agent_graph(
                 state.result = _sanitize_assistant_text(response.content)
                 state.status = "done"
                 emit("final_content", {"content": state.result})
+                _emit_typed("assistant_message", {"content": state.result})
                 if not _final_assistant_appended:
                     messages.append(LLMMessage(role="assistant", content=response.content, thinking=_thinking_content))
                 break
@@ -2349,6 +2409,12 @@ async def run_agent_graph(
                     content=hint,
                 ))
                 continue
+
+            # Surface intermediate assistant commentary (text alongside tool
+            # calls) on the typed stream. Skipped in text-tool mode where
+            # ``response.content`` is the raw JSON tool call itself.
+            if use_native_tools and response.content and response.content.strip():
+                _emit_typed("assistant_message", {"content": response.content})
 
             # Session: write assistant message with tool calls
             if session_writer:
@@ -3011,7 +3077,9 @@ async def run_agent_graph(
     finally:
         try:
             loop.remove_signal_handler(signal.SIGINT)
-        except (NotImplementedError, OSError):
+        except (NotImplementedError, OSError, RuntimeError, ValueError):
+            # Mirrors add_signal_handler: uvloop raises ValueError and vanilla
+            # asyncio RuntimeError when running off the main thread.
             pass
 
     elapsed = time.monotonic() - t0

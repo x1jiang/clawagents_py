@@ -29,7 +29,12 @@ class _TaskCreateTool:
     description = "Start a background command and return its job id."
     keywords = ["background", "job", "task", "process", "long-running"]
     parameters = {
-        "command": {"type": "array", "description": "Command argv list.", "required": True},
+        "command": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Command argv list.",
+            "required": True,
+        },
         "cwd": {"type": "string", "description": "Working directory."},
     }
 

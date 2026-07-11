@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.10.0-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.10.1-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -26,9 +26,20 @@ pip install clawagents[anthropic]   # + Anthropic Claude support
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 6.10.0** — Reliability and parity release (July 2026): session persistence, parallel hook enforcement, provider token accounting, context-window recovery, and agent-loop telemetry fixes across Python and TypeScript. See [Changelog](#changelog).
+> **Version 6.10.1** — Provider / MCP / session patch (July 2026): Gemini tool-schema `items`, GPT-5.5/5.6 Chat Completions + tools compat, MCP event-loop reconnect, orphan tool-message sanitization, `skills_exclude`, and streaming telemetry. See [Changelog](#changelog).
 
-### New In v6.10.0
+### New In v6.10.1
+
+- **Gemini / OpenAI tool schemas** — array parameters always declare `items.type` (fixes Gemini `400 INVALID_ARGUMENT` on tools).
+- **GPT-5.5 / GPT-5.6 + tools** — Chat Completions sets `reasoning_effort=none` when tools are attached (avoids HTTP 400 until Responses API).
+- **Orphan tool messages** — session preload and OpenAI formatting drop tool results without a matching `tool_calls` id (fixes provider 400 after limited history).
+- **MCP loop affinity** — stdio/SSE sessions reconnect when invoked from a different event loop than registration (VS Code / threaded hosts).
+- **`skills_exclude`** — `create_claw_agent(..., skills_exclude=[...])` drops named skills after load.
+- **Streaming telemetry** — `assistant_delta` / intermediate `assistant_message` on the typed event stream; OpenAI prompt-cache `cached_tokens` surfaced.
+- **Error taxonomy** — safer HTTP status coercion for google-genai string status enums; clearer API-key invalid classification.
+- **Worker-thread signals** — agent loop tolerates uvloop/asyncio refusing signal handlers off the main thread.
+
+### Previously In v6.10.0
 
 - **Session persistence** — identity-based message tracking survives compaction and dangling-tool-call patching without losing or duplicating persisted turns.
 - **Parallel tool policy hooks** — external pre/post hooks and session writes apply in parallel batches; policy gates cannot be bypassed by batching a forbidden call with a safe one.
@@ -1526,6 +1537,22 @@ parity sweep.
 ---
 
 ## Changelog
+
+### v6.10.1 — Provider, MCP, and session patch (July 2026)
+
+Python-focused reliability patch for hosts that embed the agent (VS Code sidecar,
+threaded servers) and for GPT-5.5/5.6 + Gemini tool calling.
+
+- **Tool schemas** — OpenAI/Gemini converters always attach `items` for arrays.
+- **GPT-5.5/5.6** — force `reasoning_effort=none` on Chat Completions when tools
+  are present; sanitize orphan `role=tool` messages before the request.
+- **Sessions** — drop leading orphan tools on limited preload; persist the user
+  task message; re-sanitize after compaction; insert replayed history in order.
+- **MCP** — reconnect when the owning event loop changes; regression coverage
+  with a real stdio echo server.
+- **API** — `skills_exclude` on `create_claw_agent`; richer typed stream events;
+  OpenAI `cached_tokens`; google-genai status/auth classification fixes.
+- **Signals** — tolerate missing signal handlers off the main thread.
 
 ### v6.10.0 — Reliability and parity release (July 2026)
 

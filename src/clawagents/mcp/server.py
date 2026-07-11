@@ -267,6 +267,12 @@ class MCPServer(abc.ABC):
         self._exit_stack: Optional[AsyncExitStack] = None
         self._tools_cache: Optional[list[MCPToolDescriptor]] = None
         self._last_error: Optional[str] = None
+        # Event loop that owns the current session. MCP transports (anyio
+        # streams + cancel scopes) are only usable from the loop that opened
+        # them; ``_ensure_session`` reconnects when called from a different
+        # (or fresh) loop — e.g. tools registered at agent-construction time
+        # in a temporary loop, then invoked from the agent's run loop.
+        self._loop: Any = None
 
     # ── Sub-class hooks ──
 
@@ -333,6 +339,9 @@ class MCPServer(abc.ABC):
             self._transition(MCPLifecyclePhase.INITIALIZING)
             await session.initialize()
             self._session = session
+            import asyncio as _asyncio
+
+            self._loop = _asyncio.get_running_loop()
             self._transition(MCPLifecyclePhase.READY)
         except BaseException as exc:
             self._transition(MCPLifecyclePhase.ERRORED, error=str(exc))
@@ -345,12 +354,42 @@ class MCPServer(abc.ABC):
             self._session = None
             raise
 
-    async def list_tools(self, *, force_refresh: bool = False) -> list[MCPToolDescriptor]:
-        """Return the tools advertised by the server (filtered + optionally cached)."""
+    def _session_usable(self) -> bool:
+        """True when a session exists and belongs to the running loop."""
+        if self._session is None:
+            return False
+        import asyncio as _asyncio
+
+        try:
+            current = _asyncio.get_running_loop()
+        except RuntimeError:
+            return False
+        return self._loop is current and not getattr(self._loop, "is_closed", lambda: False)()
+
+    async def _ensure_session(self) -> None:
+        """(Re)connect when the session is missing or owned by another loop.
+
+        Transports opened in a loop that has since gone away cannot be closed
+        from here (anyio cancel scopes are task-affine), so stale references
+        are dropped and a fresh transport is opened in the current loop. A
+        well-behaved stdio server exits on stdin EOF when its old loop dies.
+        """
+        if self._session_usable():
+            return
+        if self._session is not None:
+            self._exit_stack = None
+            self._session = None
+            self._loop = None
+            self._transition(MCPLifecyclePhase.IDLE, error=None)
+        await self.connect()
         if self._session is None:
             raise RuntimeError(
                 f"MCP server '{self.name}' is not connected. Call connect() first."
             )
+
+    async def list_tools(self, *, force_refresh: bool = False) -> list[MCPToolDescriptor]:
+        """Return the tools advertised by the server (filtered + optionally cached)."""
+        await self._ensure_session()
         if self.cache_tools_list and not force_refresh and self._tools_cache is not None:
             return self._tools_cache
 
@@ -382,10 +421,7 @@ class MCPServer(abc.ABC):
         self, tool_name: str, arguments: Optional[dict[str, Any]] = None
     ) -> Any:
         """Call ``tool_name`` on the server. Returns the raw ``CallToolResult``."""
-        if self._session is None:
-            raise RuntimeError(
-                f"MCP server '{self.name}' is not connected. Call connect() first."
-            )
+        await self._ensure_session()
         with tool_span(f"mcp.{self.name}.{tool_name}", server=self.name, tool=tool_name):
             self._transition(MCPLifecyclePhase.INVOKING)
             try:
@@ -407,6 +443,7 @@ class MCPServer(abc.ABC):
         finally:
             self._exit_stack = None
             self._session = None
+            self._loop = None
             self._tools_cache = None
             self._transition(MCPLifecyclePhase.SHUTDOWN)
 

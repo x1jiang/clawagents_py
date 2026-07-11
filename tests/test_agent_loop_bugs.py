@@ -181,3 +181,71 @@ class TestExternalPreLlmRoleCoercion:
         assert appended[1].role == "user"
         warn_msgs = [p.get("message", "") for n, p in events if n == "warn"]
         assert any("developer" in m and "coercing" in m for m in warn_msgs)
+
+
+class TestOrphanToolMessageSanitize:
+    """OpenAI 400: role=tool without a preceding assistant tool_calls."""
+
+    def test_drops_orphan_tool_and_fills_dangling(self):
+        from clawagents.graph.agent_loop import _patch_dangling_tool_calls
+
+        msgs = [
+            LLMMessage(role="system", content="sys"),
+            # Orphan: tool result whose assistant was cut by session preload limit
+            LLMMessage(role="tool", content="orphan output", tool_call_id="missing-1"),
+            LLMMessage(role="user", content="continue"),
+            LLMMessage(
+                role="assistant",
+                content="",
+                tool_calls_meta=[{"id": "tc-1", "name": "echo", "args": {"x": "1"}}],
+            ),
+            # Dangling: assistant declared tc-1 but no tool result yet
+        ]
+        out = _patch_dangling_tool_calls(msgs)
+        assert out[0].role == "system"
+        assert out[1].role == "user"
+        assert out[1].content == "continue"
+        assert out[2].role == "assistant"
+        assert out[3].role == "tool"
+        assert out[3].tool_call_id == "tc-1"
+        assert "cancelled" in (out[3].content or "").lower()
+        assert not any(m.tool_call_id == "missing-1" for m in out if m.role == "tool")
+
+    def test_drop_leading_orphan_tools(self):
+        from clawagents.graph.agent_loop import _drop_leading_orphan_tools
+
+        msgs = [
+            LLMMessage(role="tool", content="a", tool_call_id="x"),
+            LLMMessage(role="tool", content="b", tool_call_id="y"),
+            LLMMessage(role="user", content="hi"),
+        ]
+        out = _drop_leading_orphan_tools(msgs)
+        assert len(out) == 1
+        assert out[0].role == "user"
+
+    def test_openai_formatter_drops_orphans(self):
+        from clawagents.providers.llm import _sanitize_openai_tool_pairs
+
+        formatted = [
+            {"role": "system", "content": "sys"},
+            {"role": "tool", "tool_call_id": "orphan", "content": "nope"},
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "tc-1",
+                        "type": "function",
+                        "function": {"name": "echo", "arguments": "{}"},
+                    }
+                ],
+            },
+        ]
+        out = _sanitize_openai_tool_pairs(formatted)
+        assert out[0]["role"] == "system"
+        assert out[1]["role"] == "user"
+        assert out[2]["role"] == "assistant"
+        assert out[3]["role"] == "tool"
+        assert out[3]["tool_call_id"] == "tc-1"
+        assert not any(m.get("tool_call_id") == "orphan" for m in out)

@@ -41,11 +41,33 @@ def _normalize_input_schema(input_schema: Dict[str, Any]) -> Dict[str, Dict[str,
             ptype = next((t for t in ptype if t != "null"), "string")
         if ptype not in _PRIMITIVE_TYPES:
             ptype = "string"
+        description = raw.get("description", "") or ""
+        # Surface enum constraints in the description — the flat parameter
+        # shape has no enum field, and without the allowed values the model
+        # guesses (e.g. "bash" for a language enum that wants "shell").
+        enum_vals = raw.get("enum")
+        if isinstance(enum_vals, list) and enum_vals:
+            allowed = ", ".join(str(v) for v in enum_vals[:24])
+            suffix = f" Allowed values: {allowed}."
+            if suffix.strip() not in description:
+                description = (description.rstrip(". ") + "." if description else "") + suffix
         out[pname] = {
             "type": ptype,
-            "description": raw.get("description", "") or "",
+            "description": description,
             "required": pname in required,
         }
+        # Preserve array item schemas — Gemini rejects ARRAY props without items.
+        if ptype == "array":
+            items = raw.get("items")
+            if isinstance(items, dict):
+                item_type = items.get("type", "string")
+                if isinstance(item_type, list):
+                    item_type = next((t for t in item_type if t != "null"), "string")
+                if item_type not in _PRIMITIVE_TYPES:
+                    item_type = "string"
+                out[pname]["items"] = {"type": item_type}
+            else:
+                out[pname]["items"] = {"type": "string"}
     return out
 
 
@@ -105,10 +127,13 @@ class MCPBridgedTool:
         except ImportError as exc:
             return ToolResult(success=False, output="", error=str(exc))
         except Exception as exc:
+            # str(TimeoutError()) is empty — always include the type so the
+            # model (and logs) see an actionable reason.
+            detail = str(exc).strip() or type(exc).__name__
             return ToolResult(
                 success=False,
                 output="",
-                error=f"MCP tool '{self.original_tool_name}' on server '{self.server_name}' failed: {exc}",
+                error=f"MCP tool '{self.original_tool_name}' on server '{self.server_name}' failed: {detail}",
             )
         success, output, error = _stringify_call_result(raw)
         return ToolResult(success=success, output=output, error=error)

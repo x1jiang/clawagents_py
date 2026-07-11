@@ -175,7 +175,18 @@ class SkillStore:
             p = Path(d)
             if not p.exists() or not p.is_dir():
                 continue
-                
+
+            # Directory itself is a skill (…/caveman/SKILL.md)
+            self_skill = p / "SKILL.md"
+            if self_skill.exists():
+                try:
+                    content = self_skill.read_text("utf-8")
+                    skill = parse_skill_file(content, str(self_skill))
+                    if is_skill_eligible(skill):
+                        self.skills[skill.name] = skill
+                except (OSError, UnicodeDecodeError):
+                    pass
+
             try:
                 entries = list(p.iterdir())
             except OSError:
