@@ -25,14 +25,13 @@ import asyncio
 import inspect
 import json
 import logging
-import math
 import re
 import signal
 import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Literal, Optional
+from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
 
 from clawagents.providers.llm import LLMProvider, LLMMessage, LLMResponse, NativeToolSchema, NativeToolCall, strip_thinking_tokens
 from clawagents.tools.registry import ToolRegistry, ParsedToolCall, ToolResult
@@ -581,7 +580,7 @@ Keep working until the task is fully complete.
 # ─── Adaptive Token Estimation (learned from deepagents) ──────────────────
 # Now uses tiktoken for accurate BPE counting (with fallback to heuristic).
 
-from clawagents.tokenizer import count_tokens, count_tokens_content, count_messages_tokens as _count_messages_tokens
+from clawagents.tokenizer import count_tokens_content, count_messages_tokens as _count_messages_tokens
 
 # Keep _CHARS_PER_TOKEN for the Tier-3 preflight char-budget calculation only
 _CHARS_PER_TOKEN = 4
@@ -635,6 +634,10 @@ def _truncate_old_tool_args(
 # ─── Tool Loop Detection ──────────────────────────────────────────────────
 
 
+if TYPE_CHECKING:
+    from clawagents.loop_detection import LoopDetectionConfig
+
+
 class _ToolCallTracker:
     def __init__(
         self,
@@ -644,7 +647,7 @@ class _ToolCallTracker:
         circuit_breaker_limit: int = 30,
         loop_config: "LoopDetectionConfig | None" = None,
     ):
-        from clawagents.loop_detection import LoopDetectionConfig, resolve_loop_detection_config
+        from clawagents.loop_detection import resolve_loop_detection_config
 
         self._history: list[str] = []
         self._poll_history: list[tuple[str, str, str | None]] = []
@@ -1398,8 +1401,28 @@ async def _compact_if_needed(
             protect_last_n=_RECENT_MESSAGES_TO_KEEP,
         )
         if safe.get("effective"):
+            # Rebuilding from AgentMessage would mint new objects for every
+            # turn — breaking the identity-based session-persistence tracker
+            # (unpersisted turns silently vanish) and stripping tool-call
+            # metadata (tool_calls_meta / tool_call_id) that providers need
+            # for transcript linkage. Reuse the original LLMMessage object
+            # whenever (role, content) survived compression unchanged.
+            _originals_by_key: dict[tuple[str, str], list[LLMMessage]] = {}
+            for _om in (*system_msgs, *non_system):
+                _okey = (
+                    _om.role,
+                    _om.content if isinstance(_om.content, str) else str(_om.content),
+                )
+                _originals_by_key.setdefault(_okey, []).append(_om)
+
+            def _reuse_original(role: str, content: str) -> LLMMessage:
+                bucket = _originals_by_key.get((role, content))
+                if bucket:
+                    return bucket.pop()  # prefer the most recent original
+                return LLMMessage(role=role, content=content)
+
             compact_out = [
-                LLMMessage(role=m.role, content=m.content or "")
+                _reuse_original(m.role, m.content or "")
                 for m in safe["messages"]
             ]
             summary_text = str(safe.get("summary") or "")
@@ -1453,24 +1476,41 @@ async def _compact_if_needed(
                             ),
                         )
                         break
+            compacted_tokens = _estimate_messages_tokens(compact_out, token_multiplier)
+            if compacted_tokens <= budget:
+                emit("context", {
+                    "message": (
+                        f"compress_messages_safe saved "
+                        f"{safe.get('compression_savings_pct', 0):.1f}%"
+                    ),
+                })
+                emit("compact_progress", {
+                    "phase": "end",
+                    "message": "compaction completed via compress_messages_safe",
+                    "older_messages": len(safe.get("dropped_messages_list") or []),
+                    "recent_messages": _RECENT_MESSAGES_TO_KEEP,
+                })
+                if fire_hook is not None:
+                    try:
+                        await fire_hook("on_post_compact", len(compact_out), summary_text or None)
+                    except Exception:
+                        logger.debug("on_post_compact hook failed", exc_info=True)
+                return compact_out
+            # "Effective" savings alone are not enough: the transcript is
+            # still over budget, and returning here would hand the next LLM
+            # call an oversized context. Keep the lossless savings and
+            # escalate to the summarization tier below.
             emit("context", {
                 "message": (
                     f"compress_messages_safe saved "
-                    f"{safe.get('compression_savings_pct', 0):.1f}%"
+                    f"{safe.get('compression_savings_pct', 0):.1f}% but "
+                    f"~{compacted_tokens} tokens still exceeds budget {budget} "
+                    "— escalating to summarization"
                 ),
             })
-            emit("compact_progress", {
-                "phase": "end",
-                "message": "compaction completed via compress_messages_safe",
-                "older_messages": len(safe.get("dropped_messages_list") or []),
-                "recent_messages": _RECENT_MESSAGES_TO_KEEP,
-            })
-            if fire_hook is not None:
-                try:
-                    await fire_hook("on_post_compact", len(compact_out), summary_text or None)
-                except Exception:
-                    logger.debug("on_post_compact hook failed", exc_info=True)
-            return compact_out
+            messages = compact_out
+            system_msgs = [m for m in compact_out if m.role == "system"]
+            non_system = [m for m in compact_out if m.role != "system"]
     except Exception:
         logger.debug("compress_messages_safe path failed; falling back", exc_info=True)
 
@@ -3508,6 +3548,14 @@ async def run_agent_graph(
             judge_result = await judge_run(
                 llm, task, summary_dict, state.result, turn_dicts,
             )
+            # Count the judge's own LLM call into the run's usage totals so
+            # PTRL/trajectory spend is never invisible to callers.
+            judge_resp = judge_result.pop("_llm_response", None)
+            if judge_resp is not None:
+                try:
+                    _accumulate_usage(judge_resp)
+                except Exception:  # noqa: BLE001
+                    pass
             run_summary.judge_score = judge_result.get("judge_score")
             run_summary.judge_justification = judge_result.get("judge_justification", "")
             emit("context", {

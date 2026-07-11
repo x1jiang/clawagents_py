@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "clawagents"
-version = "6.10.7"
+version = "6.10.8"
 description = "Lean, full-stack agentic AI framework with PTRL (Prompt-Time Reinforcement Learning)"
 readme = "README.md"
 license = "MIT"
@@ -104,3 +104,10 @@ ignore_missing_imports = true
 warn_redundant_casts = true
 warn_unused_ignores = true
 # Per-module overrides go here when needed (e.g. relaxing for vendored code).
+
+[tool.ruff.lint]
+# Keep defaults (E4/E7/E9/F). The public API re-exports live in __init__.py
+# files by convention — don't flag them as unused imports.
+
+[tool.ruff.lint.per-file-ignores]
+"**/__init__.py" = ["F401"]

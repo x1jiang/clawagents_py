@@ -19,9 +19,7 @@ The best sample is selected by:
 
 from __future__ import annotations
 
-import asyncio
 import logging
-from dataclasses import asdict
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -132,7 +130,6 @@ def _score_samples(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
             score = -1.0
 
         iterations = s.get("iterations", 0)
-        tool_calls = s.get("tool_calls", 0)
         if iterations > 0 and s.get("status") == "done":
             efficiency = max(0, 1.0 - (iterations / 100))
             score += efficiency * 0.3

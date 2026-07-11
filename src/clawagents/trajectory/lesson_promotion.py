@@ -98,7 +98,7 @@ def maybe_promote_recurring_lessons(
         return created
 
     index = _load_index(ws)
-    lessons: dict[str, dict[str, Any]] = index.setdefault("lessons", {})
+    index.setdefault("lessons", {})  # ensure the key persists on save
 
     for key, entry in updated.items():
         count = int(entry.get("count", 0))

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
 from typing import Any
 
 from clawagents.tools.registry import Tool, ToolResult
@@ -41,7 +40,6 @@ def _apply_search_replace(content: str, search: str, replace: str) -> tuple[bool
 
 def _apply_unified_diff(content: str, patch: str) -> tuple[bool, str, str]:
     """Minimal single-file unified diff applier (context-aware)."""
-    lines = content.splitlines(keepends=True)
     # Strip file headers
     body_lines = []
     started = False
@@ -63,7 +61,6 @@ def _apply_unified_diff(content: str, patch: str) -> tuple[bool, str, str]:
         return False, content, "failed to parse hunks"
 
     # Simpler approach: sequential apply of each hunk body
-    pos = 0
     for m in _UNIFIED_HUNK.finditer(patch):
         old_start = int(m.group(1)) - 1
         # body until next @@ or end

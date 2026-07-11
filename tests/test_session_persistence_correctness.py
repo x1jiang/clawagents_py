@@ -59,9 +59,16 @@ class _CompactingMockLLM:
         self.summarize_calls = 0
 
     async def chat(self, messages, on_chunk=None, cancel_event=None, tools=None):
+        # Both summarizer engines must be recognized: the legacy chunk
+        # summarizer and the compress_messages_safe summarization engine
+        # (v6.10.6+). Otherwise their calls consume the scripted main-turn
+        # responses and the test exercises a different flow than intended.
         is_summarize = any(
             isinstance(m.content, str)
-            and m.content.startswith("You are summarizing a chunk")
+            and (
+                m.content.startswith("You are summarizing a chunk")
+                or m.content.startswith("You are a summarization engine")
+            )
             for m in messages
         )
         if is_summarize:

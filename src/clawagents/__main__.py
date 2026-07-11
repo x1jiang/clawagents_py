@@ -550,11 +550,11 @@ def cmd_sessions():
         print("No saved sessions found.")
         print("Enable session persistence: CLAW_FEATURE_SESSION_PERSISTENCE=1")
         return
-    print(f"{'Session ID':<35} {'Turns':>5}  {'Status':<10}  Task")
-    print("-" * 90)
+    print(f"{'Session ID':<35} {'Created':<17} {'Turns':>5}  {'Status':<10}  Task")
+    print("-" * 100)
     for s in sessions:
         ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(s.created_ts))
-        print(f"{s.session_id:<35} {s.turn_count:>5}  {s.status:<10}  {s.task[:40]}")
+        print(f"{s.session_id:<35} {ts:<17} {s.turn_count:>5}  {s.status:<10}  {s.task[:40]}")
 
 
 async def cmd_resume(session_id: str, timeout_s: int = 0):

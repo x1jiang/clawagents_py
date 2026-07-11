@@ -103,7 +103,11 @@ async def judge_run(
         ]
         response = await llm.chat(messages)
         text = (response.content or "").strip()
-        return _parse_judge_response(text)
+        result = _parse_judge_response(text)
+        # Surface the raw response so callers can count judge tokens into the
+        # run's Usage — this spend was previously invisible to usage reports.
+        result["_llm_response"] = response
+        return result
     except Exception:
         logger.debug("LLM-as-Judge evaluation failed", exc_info=True)
         return {"judge_score": None, "judge_justification": "judge call failed"}
@@ -117,7 +121,6 @@ def _format_key_events(turns: list[dict[str, Any]], max_events: int = 8) -> str:
     events: list[str] = []
     for t in turns[:max_events]:
         idx = t.get("turn_index", t.get("turnIndex", "?"))
-        score = t.get("score", 0)
         calls = t.get("tool_calls", t.get("toolCalls", []))
         for tc in calls:
             name = tc.get("tool_name", tc.get("toolName", "?"))

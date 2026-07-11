@@ -133,7 +133,7 @@ class PromptHook:
 
         from clawagents.config.config import load_config
         from clawagents.providers.llm import _resolve_model  # type: ignore[attr-defined]
-        config = load_config()
+        load_config()  # side effect: discover .env so _resolve_model sees provider keys
         return _resolve_model(
             self.model or "",
             streaming=False,
