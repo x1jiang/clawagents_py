@@ -815,9 +815,11 @@ class OpenAIProvider(LLMProvider):
 
 
 def _serialize_gemini_parts(parts: Any) -> list[dict[str, Any]] | None:
-    """Serialize Gemini Part objects to dicts, preserving thought/thought_signature."""
+    """Serialize Gemini Part objects to dicts, preserving thought/thought_signature/id."""
     if not parts:
         return None
+    import base64
+
     serialized = []
     for p in parts:
         d: dict[str, Any] = {}
@@ -825,25 +827,77 @@ def _serialize_gemini_parts(parts: Any) -> list[dict[str, Any]] | None:
             d["text"] = p.text
         if getattr(p, "thought", None):
             d["thought"] = True
-        if getattr(p, "thought_signature", None):
-            d["thought_signature"] = p.thought_signature
+        sig = getattr(p, "thought_signature", None)
+        if sig is not None:
+            # Session JSON can't store raw bytes — round-trip via base64.
+            if isinstance(sig, (bytes, bytearray)):
+                d["thought_signature"] = base64.b64encode(bytes(sig)).decode("ascii")
+                d["_thought_signature_b64"] = True
+            else:
+                d["thought_signature"] = sig
         fc = getattr(p, "function_call", None)
         if fc:
-            d["function_call"] = {"name": fc.name, "args": dict(fc.args) if fc.args else {}}
-            if getattr(p, "thought_signature", None):
-                d["thought_signature"] = p.thought_signature
+            fc_dict: dict[str, Any] = {
+                "name": fc.name,
+                "args": dict(fc.args) if fc.args else {},
+            }
+            fc_id = getattr(fc, "id", None)
+            if fc_id:
+                fc_dict["id"] = str(fc_id)
+            d["function_call"] = fc_dict
+            if sig is not None and "thought_signature" not in d:
+                if isinstance(sig, (bytes, bytearray)):
+                    d["thought_signature"] = base64.b64encode(bytes(sig)).decode("ascii")
+                    d["_thought_signature_b64"] = True
+                else:
+                    d["thought_signature"] = sig
         if d:
             serialized.append(d)
-            
+
     # Propagate thought_signature to all function_call parts (Gemini 3 requirement)
     if serialized:
         first_sig = next((d["thought_signature"] for d in serialized if "thought_signature" in d), None)
+        first_b64 = next((d.get("_thought_signature_b64") for d in serialized if "thought_signature" in d), None)
         if first_sig:
             for d in serialized:
                 if "function_call" in d and "thought_signature" not in d:
                     d["thought_signature"] = first_sig
+                    if first_b64:
+                        d["_thought_signature_b64"] = True
 
     return serialized if serialized else None
+
+
+def _restore_gemini_parts_for_api(parts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Decode base64 thought signatures before sending contents back to Gemini."""
+    import base64
+
+    out: list[dict[str, Any]] = []
+    for p in parts:
+        if not isinstance(p, dict):
+            continue
+        q = dict(p)
+        if q.pop("_thought_signature_b64", False) and isinstance(q.get("thought_signature"), str):
+            try:
+                q["thought_signature"] = base64.b64decode(q["thought_signature"])
+            except Exception:  # noqa: BLE001
+                pass
+        out.append(q)
+    return out
+
+
+def _stamp_function_call_ids(
+    raw_parts: list[dict[str, Any]] | None,
+    fn_calls: list[NativeToolCall] | None,
+) -> list[dict[str, Any]] | None:
+    """Ensure serialized FC parts carry the same ids as NativeToolCall."""
+    if not raw_parts or not fn_calls:
+        return raw_parts
+    fc_dicts = [d for d in raw_parts if isinstance(d, dict) and "function_call" in d]
+    for d, tc in zip(fc_dicts, fn_calls):
+        if tc.tool_call_id:
+            d["function_call"]["id"] = tc.tool_call_id
+    return raw_parts
 
 
 def _part_has_function_call(part: dict[str, Any]) -> bool:
@@ -864,187 +918,179 @@ def _parts_have_function_response(parts: list[Any]) -> bool:
     return any(_part_has_function_response(p) for p in parts)
 
 
-def _parts_are_fr_only(parts: list[Any]) -> bool:
-    """True when every part is a function_response (parallel tool results)."""
-    return bool(parts) and all(_part_has_function_response(p) for p in parts)
+def _model_parts_from_tool_meta(
+    content: Any,
+    tool_calls_meta: list[dict[str, Any]],
+    *,
+    gemini_parts: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Build model parts, preferring preserved gemini_parts (thought_signature)."""
+    if gemini_parts and _parts_have_function_call(list(gemini_parts)):
+        return _restore_gemini_parts_for_api(list(gemini_parts))
 
+    # Fall back: copy signatures from any prior gemini_parts onto rebuilt FCs.
+    sig = None
+    sig_b64 = False
+    if gemini_parts:
+        for p in gemini_parts:
+            if isinstance(p, dict) and p.get("thought_signature") is not None:
+                sig = p["thought_signature"]
+                sig_b64 = bool(p.get("_thought_signature_b64"))
+                break
 
-def _parts_are_plain_user(parts: list[Any]) -> bool:
-    """True when parts have no function_response / function_call."""
-    return bool(parts) and not _parts_have_function_response(parts) and not _parts_have_function_call(parts)
-
-
-def _model_parts_from_tool_meta(content: Any, tool_calls_meta: list[dict[str, Any]]) -> list[dict[str, Any]]:
     parts: list[dict[str, Any]] = []
-    if content:
-        parts.append({"text": str(content)})
+    # Gemini 3: do not put free-text ahead of function_call in history when we
+    # lack the original parts — FC-only is safer for FR pairing.
     for tc in tool_calls_meta:
-        parts.append(
-            {
-                "function_call": {
-                    "name": tc.get("name") or "unknown",
-                    "args": tc.get("args") or {},
-                }
-            }
-        )
-    return parts
+        fc: dict[str, Any] = {
+            "name": tc.get("name") or "unknown",
+            "args": tc.get("args") or {},
+        }
+        if tc.get("id"):
+            fc["id"] = str(tc["id"])
+        part: dict[str, Any] = {"function_call": fc}
+        if sig is not None:
+            part["thought_signature"] = sig
+            if sig_b64:
+                part["_thought_signature_b64"] = True
+        parts.append(part)
+    return _restore_gemini_parts_for_api(parts)
 
 
-def _ensure_gemini_function_pairs(
-    contents: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Insert synthetic function_response turns when a model function_call is bare."""
-    out: list[dict[str, Any]] = []
-    i = 0
-    while i < len(contents):
-        turn = contents[i]
-        out.append(turn)
-        parts = list(turn.get("parts") or [])
-        if turn.get("role") == "model" and _parts_have_function_call(parts):
-            fcs = [p for p in parts if _part_has_function_call(p)]
-            nxt = contents[i + 1] if i + 1 < len(contents) else None
-            has_fr = bool(
-                nxt
-                and nxt.get("role") == "user"
-                and _parts_have_function_response(list(nxt.get("parts") or []))
-            )
-            if fcs and not has_fr:
-                synth: list[dict[str, Any]] = []
-                for p in fcs:
-                    fc = p.get("function_call") or p.get("functionCall") or {}
-                    name = str(fc.get("name") or "unknown")
-                    synth.append(
-                        {
-                            "function_response": {
-                                "name": name,
-                                "response": {
-                                    "result": "[tool call cancelled or skipped before a result was recorded]",
-                                },
-                            }
-                        }
-                    )
-                out.append({"role": "user", "parts": synth})
-        i += 1
-    return out
+def _sanitize_gemini_contents(contents: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Rebuild a Gemini-legal transcript: strict alternation + FC→FR pairs.
 
-
-def _coalesce_gemini_contents(
-    contents: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Merge safe consecutive turns; never mix function_response with plain user text.
-
-    Gemini requires the turn immediately after a function_call to be a
-    function_response turn. Mixing ``function_response`` + plain ``text`` in the
-    same user turn (or leaving FR after a non-FC model turn) yields 400
-    INVALID_ARGUMENT.
+    Rules enforced:
+    - Start with user
+    - Alternate user / model
+    - Every model function_call turn is followed by exactly one user turn that
+      contains only function_response parts (count/ids aligned when possible)
+    - Plain user text never shares a turn with function_response
     """
-    merged: list[dict[str, Any]] = []
-
-    def _append(role: str, parts: list[dict[str, Any]]) -> None:
-        if not parts:
-            return
-        if merged and merged[-1].get("role") == role:
-            prev = list(merged[-1].get("parts") or [])
-            if role == "user":
-                prev_fr = _parts_are_fr_only(prev)
-                cur_fr = _parts_are_fr_only(parts)
-                prev_plain = _parts_are_plain_user(prev)
-                cur_plain = _parts_are_plain_user(parts)
-                if prev_fr and cur_fr:
-                    merged[-1]["parts"].extend(parts)
-                    return
-                if prev_plain and cur_plain:
-                    merged[-1]["parts"].extend(parts)
-                    return
-                # FR then plain text (or reverse): keep FR glued to the prior
-                # model(FC), then spacer model, then user text.
-                if prev_fr and cur_plain:
-                    merged.append({"role": "model", "parts": [{"text": "…"}]})
-                    merged.append({"role": "user", "parts": parts})
-                    return
-                if prev_plain and cur_fr:
-                    # Plain user before FR is invalid; drop the plain spacer
-                    # text into a synthetic model note and keep FR as its own turn.
-                    plain = prev
-                    merged[-1] = {"role": "model", "parts": [{"text": "…"}]}
-                    # Re-link: need user before this model — if not, just emit FR
-                    if len(merged) >= 2 and merged[-2].get("role") == "user":
-                        pass
-                    merged.append({"role": "user", "parts": parts})
-                    # Preserve plain text after a spacer following FR? Skip plain
-                    # to avoid further corruption; session text is less critical
-                    # than valid FR pairing.
-                    _ = plain
-                    return
-            else:
-                # model + model: keep function_call parts at the end
-                if _parts_have_function_call(parts) and not _parts_have_function_call(prev):
-                    merged[-1]["parts"].extend(parts)
-                elif _parts_have_function_call(prev) and not _parts_have_function_call(parts):
-                    # Do not append trailing text after FC in the same turn —
-                    # emit spacer user? Prefer dropping trailing model text into
-                    # a new turn only if we can alternate; otherwise append
-                    # before FC.
-                    fc_parts = [p for p in prev if _part_has_function_call(p)]
-                    other = [p for p in prev if not _part_has_function_call(p)]
-                    merged[-1]["parts"] = other + parts + fc_parts
-                else:
-                    merged[-1]["parts"].extend(parts)
-                return
-        merged.append({"role": role, "parts": list(parts)})
-
+    # First pass: normalize parts
+    normalized: list[dict[str, Any]] = []
     for turn in contents:
         role = turn.get("role")
         parts = [p for p in list(turn.get("parts") or []) if isinstance(p, dict)]
         if role not in ("user", "model") or not parts:
             continue
-        _append(role, parts)
+        if role == "model" and _parts_have_function_call(parts):
+            parts = _restore_gemini_parts_for_api(parts)
+        normalized.append({"role": role, "parts": parts})
 
-    while merged and merged[0].get("role") == "model":
-        merged.pop(0)
-    return _drop_orphan_gemini_function_responses(merged)
-
-
-def _drop_orphan_gemini_function_responses(
-    contents: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Remove function_response turns that do not follow a model function_call."""
     out: list[dict[str, Any]] = []
-    for turn in contents:
-        role = turn.get("role")
-        parts = list(turn.get("parts") or [])
-        if role == "user" and _parts_have_function_response(parts):
-            prev = out[-1] if out else None
-            if not (
-                prev
-                and prev.get("role") == "model"
-                and _parts_have_function_call(list(prev.get("parts") or []))
-            ):
-                # Keep any plain text; drop FR parts.
-                kept = [p for p in parts if not _part_has_function_response(p)]
-                if not kept:
+    i = 0
+    while i < len(normalized):
+        turn = normalized[i]
+        role = turn["role"]
+        parts = turn["parts"]
+
+        if role == "model" and _parts_have_function_call(parts):
+            # Emit FC model turn (keep original parts incl. thought_signature).
+            out.append({"role": "model", "parts": parts})
+            fcs = [p for p in parts if _part_has_function_call(p)]
+            # Collect following FR-only / tool-response user turns.
+            fr_parts: list[dict[str, Any]] = []
+            j = i + 1
+            while j < len(normalized):
+                nxt = normalized[j]
+                if nxt["role"] != "user":
+                    break
+                nparts = nxt["parts"]
+                if _parts_have_function_response(nparts):
+                    for p in nparts:
+                        if _part_has_function_response(p):
+                            fr_parts.append(p)
+                    j += 1
                     continue
-                parts = kept
-        out.append({"role": role, "parts": parts})
-    # Re-coalesce plain user gaps after drops (simple pass)
-    final: list[dict[str, Any]] = []
-    for turn in out:
-        if (
-            final
-            and final[-1].get("role") == turn.get("role") == "user"
-            and _parts_are_plain_user(list(final[-1].get("parts") or []))
-            and _parts_are_plain_user(list(turn.get("parts") or []))
-        ):
-            final[-1]["parts"].extend(turn["parts"])
-        else:
-            final.append(turn)
-    while final and final[0].get("role") == "model":
-        final.pop(0)
-    return final
+                break
+            # Align FR count to FC count
+            if len(fr_parts) < len(fcs):
+                have_names = {
+                    (p.get("function_response") or p.get("functionResponse") or {}).get("name")
+                    for p in fr_parts
+                }
+                for p in fcs:
+                    fc = p.get("function_call") or p.get("functionCall") or {}
+                    name = fc.get("name") or "unknown"
+                    if name in have_names and len(fr_parts) >= len(fcs):
+                        continue
+                    fr: dict[str, Any] = {
+                        "function_response": {
+                            "name": name,
+                            "response": {
+                                "result": "[tool call cancelled or skipped before a result was recorded]",
+                            },
+                        }
+                    }
+                    if fc.get("id"):
+                        fr["function_response"]["id"] = fc["id"]
+                    fr_parts.append(fr)
+                    have_names.add(name)
+            elif len(fr_parts) > len(fcs):
+                fr_parts = fr_parts[: len(fcs)]
+            # Ensure FR ids match FC ids by position when FC has id
+            for idx, fr in enumerate(fr_parts):
+                if idx >= len(fcs):
+                    break
+                fc = fcs[idx].get("function_call") or fcs[idx].get("functionCall") or {}
+                if fc.get("id"):
+                    body = fr.get("function_response") or fr.get("functionResponse") or {}
+                    body = dict(body)
+                    body["id"] = fc["id"]
+                    fr["function_response"] = body
+                    fr.pop("functionResponse", None)
+            if fr_parts:
+                out.append({"role": "user", "parts": fr_parts})
+            i = j
+            continue
 
+        if role == "user" and _parts_have_function_response(parts):
+            # Orphan FR (no preceding FC model turn) — drop.
+            i += 1
+            continue
 
-def _sanitize_gemini_contents(contents: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return _coalesce_gemini_contents(_ensure_gemini_function_pairs(contents))
+        if role == "model" and not _parts_have_function_call(parts):
+            # Plain model text — only if we don't create model,model
+            if out and out[-1]["role"] == "model":
+                # Merge text into previous only if previous has no FC
+                if not _parts_have_function_call(out[-1]["parts"]):
+                    out[-1]["parts"].extend(parts)
+                else:
+                    # Skip trailing text after FC (FR already handled above)
+                    pass
+            else:
+                out.append({"role": "model", "parts": parts})
+            i += 1
+            continue
+
+        # Plain user text
+        if role == "user":
+            plain = [p for p in parts if not _part_has_function_response(p)]
+            if not plain:
+                i += 1
+                continue
+            if out and out[-1]["role"] == "user":
+                if not _parts_have_function_response(out[-1]["parts"]):
+                    out[-1]["parts"].extend(plain)
+                else:
+                    # After FR: Gemini requires alternation — spacer model, then user.
+                    out.append({"role": "model", "parts": [{"text": "…"}]})
+                    out.append({"role": "user", "parts": plain})
+            elif out and out[-1]["role"] == "model" and _parts_have_function_call(out[-1]["parts"]):
+                # Should be unreachable (FC branch synthesizes FR); keep safe.
+                out.append({"role": "user", "parts": plain})
+            else:
+                out.append({"role": "user", "parts": plain})
+        i += 1
+
+    while out and out[0]["role"] == "model":
+        out.pop(0)
+    # Ensure ends with user (Gemini wants last content to be user/function)
+    if out and out[-1]["role"] == "model" and not _parts_have_function_call(out[-1]["parts"]):
+        # trailing model text without following user is ok for generateContent
+        pass
+    return out
 
 
 class GeminiProvider(LLMProvider):
@@ -1083,22 +1129,28 @@ class GeminiProvider(LLMProvider):
                     system_parts.extend([p.get("text", "") for p in m.content if p.get("type") == "text"])
             elif m.role == "tool" and m.tool_call_id:
                 tool_name = tc_id_to_name.get(m.tool_call_id, "unknown")
-                user_contents.append({"role": "user", "parts": [{"function_response": {
+                fr_body: dict[str, Any] = {
                     "name": tool_name,
                     "response": {"result": m.content},
-                }}]})
+                    # Gemini 3 pairs FR to FC by id — must echo the call id.
+                    "id": m.tool_call_id,
+                }
+                user_contents.append({"role": "user", "parts": [{"function_response": fr_body}]})
             elif m.role == "assistant" and m.tool_calls_meta:
-                # Only reuse gemini_parts when they still carry function_call;
-                # otherwise Gemini sees FR after a text-only model turn → 400.
-                if m.gemini_parts and _parts_have_function_call(list(m.gemini_parts)):
-                    user_contents.append({"role": "model", "parts": list(m.gemini_parts)})
-                else:
-                    user_contents.append({
-                        "role": "model",
-                        "parts": _model_parts_from_tool_meta(m.content, m.tool_calls_meta),
-                    })
+                # Prefer preserved gemini_parts (thought_signature + FC ids).
+                user_contents.append({
+                    "role": "model",
+                    "parts": _model_parts_from_tool_meta(
+                        m.content,
+                        m.tool_calls_meta,
+                        gemini_parts=m.gemini_parts,
+                    ),
+                })
             elif m.role == "assistant" and m.gemini_parts:
-                user_contents.append({"role": "model", "parts": m.gemini_parts})
+                user_contents.append({
+                    "role": "model",
+                    "parts": _restore_gemini_parts_for_api(list(m.gemini_parts)),
+                })
             else:
                 role_name = "model" if m.role == "assistant" else "user"
                 if isinstance(m.content, str):
@@ -1175,11 +1227,14 @@ class GeminiProvider(LLMProvider):
                     fc = getattr(p, "function_call", None)
                     if fc:
                         import uuid
+                        fc_id = getattr(fc, "id", None) or f"gemini_{uuid.uuid4().hex[:8]}"
                         fn_calls.append(NativeToolCall(
                             tool_name=fc.name,
                             args=dict(fc.args) if fc.args else {},
-                            tool_call_id=f"gemini_{uuid.uuid4().hex[:8]}",
+                            tool_call_id=str(fc_id),
                         ))
+                if raw_parts and fn_calls:
+                    _stamp_function_call_ids(raw_parts, fn_calls)
                 if not fn_calls:
                     fn_calls = None
         extracted_text = ""
@@ -1256,7 +1311,10 @@ class GeminiProvider(LLMProvider):
                             prompt_tokens=final_prompt_tokens,
                             partial=True,
                             tool_calls=fn_calls if fn_calls else None,
-                            gemini_parts=_serialize_gemini_parts(all_stream_parts),
+                            gemini_parts=_stamp_function_call_ids(
+                                _serialize_gemini_parts(all_stream_parts),
+                                fn_calls if fn_calls else None,
+                            ),
                         )
 
                     try:
@@ -1285,10 +1343,11 @@ class GeminiProvider(LLMProvider):
                                         fc = getattr(p, "function_call", None)
                                         if fc:
                                             import uuid
+                                            fc_id = getattr(fc, "id", None) or f"gemini_{uuid.uuid4().hex[:8]}"
                                             fn_calls.append(NativeToolCall(
                                                 tool_name=fc.name,
                                                 args=dict(fc.args) if fc.args else {},
-                                                tool_call_id=f"gemini_{uuid.uuid4().hex[:8]}",
+                                                tool_call_id=str(fc_id),
                                             ))
                         if hasattr(chunk, "usage_metadata") and chunk.usage_metadata:
                             _um = chunk.usage_metadata
@@ -1317,7 +1376,10 @@ class GeminiProvider(LLMProvider):
                     tokens_used=final_tokens,
                     prompt_tokens=final_prompt_tokens,
                     tool_calls=fn_calls if fn_calls else None,
-                    gemini_parts=_serialize_gemini_parts(all_stream_parts),
+                    gemini_parts=_stamp_function_call_ids(
+                        _serialize_gemini_parts(all_stream_parts),
+                        fn_calls if fn_calls else None,
+                    ),
                 )
 
             except Exception as exc:
@@ -1343,7 +1405,10 @@ class GeminiProvider(LLMProvider):
                         prompt_tokens=final_prompt_tokens,
                         partial=True,
                         tool_calls=fn_calls if fn_calls else None,
-                        gemini_parts=_serialize_gemini_parts(all_stream_parts),
+                        gemini_parts=_stamp_function_call_ids(
+                            _serialize_gemini_parts(all_stream_parts),
+                            fn_calls if fn_calls else None,
+                        ),
                     )
                 break
 

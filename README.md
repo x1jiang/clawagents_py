@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.10.3-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.10.4-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -26,9 +26,15 @@ pip install clawagents[anthropic]   # + Anthropic Claude support
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 6.10.3** — Gemini turn-hygiene fix (July 2026): never mix `function_response` with plain user text; drop orphan FRs; rebuild model turns when `gemini_parts` lost the function_call. Fixes the follow-on `400 … function response turn comes immediately after a function call turn`.
+> **Version 6.10.4** — Gemini 3 tool-call id + thought_signature fix (July 2026): echo `function_call.id` on `function_response`, preserve signatures across session replay, rebuild a strict FC→FR transcript. Fixes lingering `400 … function response turn comes immediately after a function call turn`.
 
-### New In v6.10.3
+### New In v6.10.4
+
+- **Gemini FC/FR ids** — use API `function_call.id` (or a stable generated id stamped into both FC and FR).
+- **thought_signature** — base64 round-trip for session JSON; always prefer preserved `gemini_parts` when replaying tool turns.
+- **Sanitize rewrite** — strict FC→FR pairing, orphan FR drop, spacer model only when plain user text follows FR.
+
+### Previously In v6.10.3
 
 - **Gemini FR purity** — keep `function_response` turns FR-only (do not coalesce with following user text); insert a spacer model turn when needed.
 - **Orphan FR drop** — remove `function_response` that does not follow a model `function_call`.
@@ -1548,6 +1554,12 @@ parity sweep.
 ---
 
 ## Changelog
+
+### v6.10.4 — Gemini 3 id + thought_signature (July 2026)
+
+- Echo `function_call.id` on matching `function_response`.
+- Preserve / base64-round-trip `thought_signature` in `gemini_parts`.
+- Rebuild Gemini contents with strict FC→FR pairing.
 
 ### v6.10.3 — Gemini FR/FC turn purity (July 2026)
 

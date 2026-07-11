@@ -10,10 +10,15 @@ def _part(
     thought_signature=None,
     function_name=None,
     function_args=None,
+    function_id=None,
 ):
     function_call = None
     if function_name:
-        function_call = SimpleNamespace(name=function_name, args=function_args or {})
+        function_call = SimpleNamespace(
+            name=function_name,
+            args=function_args or {},
+            id=function_id,
+        )
     return SimpleNamespace(
         text=text,
         thought=thought,
@@ -48,3 +53,19 @@ def test_does_not_invent_thought_signature_when_none_present():
     assert serialized is not None
     assert "thought_signature" not in serialized[0]
     assert "thought_signature" not in serialized[1]
+
+
+def test_serializes_function_call_id_and_bytes_signature():
+    parts = [
+        _part(
+            function_name="ls",
+            function_args={},
+            function_id="call-99",
+            thought_signature=b"\x00\x01sig",
+        ),
+    ]
+    serialized = _serialize_gemini_parts(parts)
+    assert serialized is not None
+    assert serialized[0]["function_call"]["id"] == "call-99"
+    assert serialized[0]["_thought_signature_b64"] is True
+    assert isinstance(serialized[0]["thought_signature"], str)

@@ -2,11 +2,7 @@
 
 from __future__ import annotations
 
-from clawagents.providers.llm import (
-    _coalesce_gemini_contents,
-    _ensure_gemini_function_pairs,
-    _sanitize_gemini_contents,
-)
+from clawagents.providers.llm import _sanitize_gemini_contents
 
 
 def test_coalesce_merges_parallel_tool_responses_only():
@@ -15,8 +11,8 @@ def test_coalesce_merges_parallel_tool_responses_only():
         {
             "role": "model",
             "parts": [
-                {"function_call": {"name": "a", "args": {}}},
-                {"function_call": {"name": "b", "args": {}}},
+                {"function_call": {"name": "a", "args": {}, "id": "c1"}},
+                {"function_call": {"name": "b", "args": {}, "id": "c2"}},
             ],
         },
         {"role": "user", "parts": [{"function_response": {"name": "a", "response": {"result": "1"}}}]},
@@ -26,6 +22,8 @@ def test_coalesce_merges_parallel_tool_responses_only():
     assert [t["role"] for t in out] == ["user", "model", "user"]
     assert len(out[2]["parts"]) == 2
     assert all("function_response" in p for p in out[2]["parts"])
+    assert out[2]["parts"][0]["function_response"]["id"] == "c1"
+    assert out[2]["parts"][1]["function_response"]["id"] == "c2"
 
 
 def test_fr_not_mixed_with_following_user_text():
@@ -41,12 +39,12 @@ def test_fr_not_mixed_with_following_user_text():
     assert out[4]["parts"] == [{"text": "hi again"}]
 
 
-def test_coalesce_drops_leading_model():
+def test_sanitize_drops_leading_model():
     raw = [
         {"role": "model", "parts": [{"text": "orphan"}]},
         {"role": "user", "parts": [{"text": "hi"}]},
     ]
-    out = _coalesce_gemini_contents(raw)
+    out = _sanitize_gemini_contents(raw)
     assert out == [{"role": "user", "parts": [{"text": "hi"}]}]
 
 
@@ -64,8 +62,9 @@ def test_orphan_fr_after_text_model_dropped():
 def test_ensure_pairs_inserts_synthetic_fr():
     raw = [
         {"role": "user", "parts": [{"text": "hi"}]},
-        {"role": "model", "parts": [{"function_call": {"name": "ask_user", "args": {}}}]},
+        {"role": "model", "parts": [{"function_call": {"name": "ask_user", "args": {}, "id": "x1"}}]},
     ]
-    paired = _ensure_gemini_function_pairs(raw)
-    assert paired[-1]["role"] == "user"
-    assert "function_response" in paired[-1]["parts"][0]
+    out = _sanitize_gemini_contents(raw)
+    assert out[-1]["role"] == "user"
+    assert "function_response" in out[-1]["parts"][0]
+    assert out[-1]["parts"][0]["function_response"]["id"] == "x1"
