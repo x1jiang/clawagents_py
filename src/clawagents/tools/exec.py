@@ -61,16 +61,6 @@ def _is_dangerous_command(command: str) -> bool:
     return False
 
 
-def _ensure_brv_command(command: str) -> str:
-    """Run ByteRover CLI via npx so it works without a global install."""
-    s = command.strip()
-    if s == "brv":
-        return "npx byterover-cli"
-    if s.startswith("brv "):
-        return "npx byterover-cli " + s[4:].strip()
-    return command
-
-
 def _truncate_exec_output(output: str) -> str:
     if len(output) <= MAX_OUTPUT_CHARS:
         return output
@@ -129,9 +119,6 @@ class ExecTool:
 
         if not command:
             return ToolResult(success=False, output="", error="No command provided")
-
-        # Ensure ByteRover CLI is available: run via npx if command is brv and not on PATH
-        command = _ensure_brv_command(command)
 
         warning_prefix = ""
         permission_mode = getattr(run_context, "permission_mode", PermissionMode.DEFAULT)

@@ -5,6 +5,7 @@ from clawagents.prompts import (
     build_prompt_injection,
     build_system_prompt,
 )
+from clawagents.prompts.cache_align import normalize_stable_prefix
 
 
 def test_build_system_prompt_places_tools_before_cache_boundary():
@@ -14,11 +15,17 @@ def test_build_system_prompt_places_tools_before_cache_boundary():
         lesson_preamble="\nlessons",
     )
 
-    assert system == (
-        "base instructions\nlessons\n\n"
-        "tool schemas\n"
-        f"{PROMPT_CACHE_BOUNDARY}"
-    )
+    assert PROMPT_CACHE_BOUNDARY in system
+    prefix, _, suffix = system.partition(PROMPT_CACHE_BOUNDARY)
+    assert "base instructions" in prefix
+    assert "tool schemas" in prefix
+    assert "lessons" in suffix
+    # Lessons must sit after the boundary so they don't bust the prefix cache.
+    assert "lessons" not in prefix
+
+
+def test_normalize_stable_prefix_collapses_whitespace():
+    assert normalize_stable_prefix("a\n\n\n\nb  \n") == "a\n\nb\n"
 
 
 def test_append_prompt_injection_updates_system_message_without_mutating_original():
@@ -40,6 +47,21 @@ def test_append_prompt_injection_updates_system_message_without_mutating_origina
         "## Available Skills\n- **review**: Review code"
     )
     assert updated[1] is messages[1]
+
+
+def test_append_prompt_injection_keeps_cache_boundary_stable():
+    messages = [
+        LLMMessage(
+            role="system",
+            content=f"static tools\n{PROMPT_CACHE_BOUNDARY}\nold dynamic\n",
+        )
+    ]
+    updated = append_prompt_injection(messages, "new injection")
+    content = updated[0].content
+    assert content.startswith(f"static tools\n{PROMPT_CACHE_BOUNDARY}")
+    assert "new injection" in content
+    # Static prefix before boundary unchanged.
+    assert content.split(PROMPT_CACHE_BOUNDARY, 1)[0] == "static tools\n"
 
 
 def test_append_prompt_injection_accepts_dict_messages_for_legacy_hooks():

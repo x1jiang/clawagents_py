@@ -266,7 +266,9 @@ class ToolRegistry:
         return self.tools.get(name)
 
     def list(self) -> List[Tool]:
-        return list(self.tools.values())
+        # Alphabetical order keeps native schemas / text descriptions stable
+        # for provider prompt-prefix caching across registration churn.
+        return sorted(self.tools.values(), key=lambda t: (t.name or "").lower())
 
     def inspect_tools(self) -> List[Dict[str, Any]]:
         return [

@@ -8,6 +8,7 @@ Default export uses LocalBackend (real filesystem). Call
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any, Dict, List
 
@@ -75,15 +76,53 @@ class LsTool:
             return ToolResult(success=False, output="", error=f"ls failed: {str(e)}")
 
 
+_OUTLINE_RE = re.compile(
+    r"(?m)^\s*(?:"
+    r"def |async def |class |fn |func |function |export (?:default )?(?:async )?function |"
+    r"pub (?:async )?fn |impl |struct |enum |type |interface |namespace |"
+    r"#+\s|"  # markdown headings
+    r"@\w+"  # decorators / attributes as anchors
+    r")"
+)
+
+
+def _file_outline(file_path: str, content: str, *, max_symbols: int = 200) -> str:
+    lines = content.splitlines()
+    symbols: list[str] = []
+    for i, line in enumerate(lines):
+        if _OUTLINE_RE.search(line):
+            symbols.append(f"{str(i + 1).rjust(4)}: {line.rstrip()}")
+            if len(symbols) >= max_symbols:
+                break
+    header = (
+        f"File: {file_path} ({len(lines)} lines total) — L0 outline "
+        f"({len(symbols)} symbols; use tier=L1/L2 for body)"
+    )
+    if not symbols:
+        preview = "\n".join(
+            f"{str(i + 1).rjust(4)}: {ln}" for i, ln in enumerate(lines[:40])
+        )
+        return header + "\n(no symbols detected; first 40 lines)\n" + preview
+    return header + "\n" + "\n".join(symbols)
+
+
 class ReadFileTool:
     name = "read_file"
     cacheable = True
     keywords = ["open file", "view file", "show file", "file contents", "cat"]
-    description = "Read file contents with line numbers. Supports offset/limit for pagination."
+    description = (
+        "Read file contents with line numbers. "
+        "Use tier=L0 for a cheap outline/symbols map, L1 for paginated body (default), "
+        "L2 for a large/full read. Supports offset/limit for pagination."
+    )
     parameters: Dict[str, Dict[str, Any]] = {
         "path": {"type": "string", "description": "Path to the file to read", "required": True},
         "offset": {"type": "number", "description": "Line number to start from (0-indexed). Default: 0"},
-        "limit": {"type": "number", "description": "Max lines to return. Default: 100"},
+        "limit": {"type": "number", "description": "Max lines to return. Default: 100 (L1) or 2000 (L2)"},
+        "tier": {
+            "type": "string",
+            "description": "L0=outline/symbols, L1=paginated body (default), L2=large/full read",
+        },
     }
 
     def __init__(self, sb: Any):
@@ -92,14 +131,23 @@ class ReadFileTool:
     async def execute(self, args: Dict[str, Any]) -> ToolResult:
         sb = self._sb
         file_path = sb.safe_path(str(args.get("path", "")))
+        tier = str(args.get("tier") or "L1").strip().upper()
+        if tier not in {"L0", "L1", "L2"}:
+            tier = "L1"
         try:
             offset = max(0, int(args.get("offset", 0)))
         except (TypeError, ValueError):
             offset = 0
+        default_limit = 2000 if tier == "L2" else 100
         try:
-            limit = max(1, int(args.get("limit", 100)))
+            if "limit" in args and args.get("limit") is not None:
+                limit = max(1, int(args.get("limit")))
+            else:
+                limit = default_limit
         except (TypeError, ValueError):
-            limit = 100
+            limit = default_limit
+        if tier == "L2":
+            limit = min(max(limit, 1), 10_000)
 
         try:
             ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else ""
@@ -119,10 +167,19 @@ class ReadFileTool:
                 )
 
             content = await sb.read_file(file_path)
+            if tier == "L0":
+                return ToolResult(success=True, output=_file_outline(file_path, content))
+
             lines = content.splitlines()
+            if tier == "L2" and "limit" not in args and offset == 0:
+                # Full file up to hard cap
+                limit = min(len(lines), 10_000)
             slice_lines = lines[offset:offset + limit]
             numbered = [f"{str(offset + i + 1).rjust(4)}: {line}" for i, line in enumerate(slice_lines)]
-            header = f"File: {file_path} ({len(lines)} lines total, showing {offset + 1}-{offset + len(slice_lines)})"
+            header = (
+                f"File: {file_path} ({len(lines)} lines total, "
+                f"showing {offset + 1}-{offset + len(slice_lines)}, tier={tier})"
+            )
             return ToolResult(success=True, output=header + "\n" + "\n".join(numbered))
         except Exception as e:
             return ToolResult(success=False, output="", error=f"read_file failed: {str(e)}")

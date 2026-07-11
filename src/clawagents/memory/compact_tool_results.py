@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from clawagents.memory.content_budgets import ContentBudgets, DEFAULT_CONTENT_BUDGETS
 from clawagents.providers.llm import LLMMessage
 
 
@@ -17,15 +18,21 @@ def compact_tool_results(
     max_input_tokens: int,
     token_multiplier: float = 1.0,
     headroom_ratio: float = 0.7,
+    budgets: ContentBudgets | None = None,
 ) -> tuple[list[LLMMessage], bool]:
     """Truncate individual tool messages when their collective size exceeds budget."""
     tool_indices = [i for i, m in enumerate(messages) if m.role == "tool"]
     if not tool_indices:
         return messages, False
 
+    b = budgets or DEFAULT_CONTENT_BUDGETS
     non_tool_chars = sum(_content_chars(m.content) for i, m in enumerate(messages) if i not in tool_indices)
     adjusted_max = max(int(max_input_tokens / max(token_multiplier, 0.1)), 1000)
-    budget_for_tools = max(int(adjusted_max * 4 * headroom_ratio) - non_tool_chars, 4000)
+    # Tools share of the window × harness headroom (char ≈ token*4).
+    budget_for_tools = max(
+        int(adjusted_max * 4 * b.tools * headroom_ratio) - non_tool_chars,
+        4000,
+    )
     per_tool_chars = max(budget_for_tools // len(tool_indices), 500)
 
     modified = False

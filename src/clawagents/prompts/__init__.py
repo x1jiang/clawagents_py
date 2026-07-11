@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from typing import Any, Optional, Sequence
 
+from clawagents.prompts.cache_align import normalize_stable_prefix
 from clawagents.providers.llm import LLMMessage
 
 PROMPT_CACHE_BOUNDARY = "__CACHE_BOUNDARY__"
+
 
 def build_system_prompt(
     base_prompt: str,
@@ -14,8 +16,23 @@ def build_system_prompt(
     lesson_preamble: Optional[str] = "",
     cache_boundary: str = PROMPT_CACHE_BOUNDARY,
 ) -> str:
-    """Build the static system prompt prefix used before dynamic messages."""
-    return f"{base_prompt}{lesson_preamble or ''}\n\n{tool_description or ''}\n{cache_boundary}"
+    """Build system prompt with a stable cacheable prefix.
+
+    Layout::
+
+        <normalized base + tools>   # static — provider KV-cache friendly
+        __CACHE_BOUNDARY__
+        <lesson preamble>           # dynamic — may change across runs
+
+    Lessons sit *after* the boundary so PTRL updates do not bust the prefix cache.
+    """
+    static = normalize_stable_prefix(
+        f"{base_prompt or ''}\n\n{tool_description or ''}".rstrip()
+    )
+    dynamic = (lesson_preamble or "").strip()
+    if dynamic:
+        return f"{static}\n{cache_boundary}\n{dynamic}\n"
+    return f"{static}\n{cache_boundary}"
 
 
 def build_prompt_injection(
@@ -43,9 +60,16 @@ def append_prompt_injection(
             # wasting tokens and churning the prompt-prefix cache.
             if isinstance(content, str) and injection in content:
                 return messages
+            # Prefer appending after the cache boundary when present so the
+            # static prefix (instructions + tools) stays byte-stable.
+            if isinstance(content, str) and PROMPT_CACHE_BOUNDARY in content:
+                prefix, _, suffix = content.partition(PROMPT_CACHE_BOUNDARY)
+                new_content = f"{prefix}{PROMPT_CACHE_BOUNDARY}\n{injection}\n{suffix}".rstrip() + "\n"
+            else:
+                new_content = f"{content}\n\n{injection}"
             result[index] = LLMMessage(
                 role="system",
-                content=f"{content}\n\n{injection}",
+                content=new_content,
             )
             return result
 

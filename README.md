@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.10.5-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.10.6-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -26,9 +26,18 @@ pip install clawagents[anthropic]   # + Anthropic Claude support
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 6.10.5** — Gemini history 400 recovery (July 2026): flatten poisoned FC/FR turns and retry; keep thought_signature only on the first parallel FC; close native tool pairs when external hooks block a call.
+> **Version 6.10.6** — Context headroom pack (July 2026): prompt-cache stable prefixes, tiered `read_file`, crushers, reversible micro-compact, failure→AGENTS.md.
 
-### New In v6.10.5
+### New In v6.10.6
+
+- **Prompt-cache align** — normalize static system prefix; lessons sit *after* `__CACHE_BOUNDARY__`; tools listed alphabetically.
+- **Tiered `read_file`** — `tier=L0` outline/symbols, `L1` paginated body, `L2` large/full read.
+- **Compaction** — wire `compress_messages_safe` + `on_pre_compact` / `on_post_compact`; output-side trim; content budgets for tool results.
+- **Crushers** — HTML / diff / pytest-junit crushers; multimodal `sanitize_tool_output` on ingest.
+- **Recoverability** — micro-compact stubs keep artifact ids; `retrieve_tool_result(query=…)` searches local artifacts.
+- **Failure learn** — append durable lesson bullets into workspace `AGENTS.md`.
+
+### Previously In v6.10.5
 
 - **Gemini 400 recovery** — on FR/FC / thought_signature `INVALID_ARGUMENT`, retry once with tool turns flattened to plain text.
 - **Signature fidelity** — do not copy `thought_signature` onto sibling parallel FCs.
@@ -1231,7 +1240,7 @@ All parameters are **optional** — zero-config usage (`create_claw_agent()`) wo
 | `name` | `str \| None` | `None` | No | Optional human-readable name for this agent. Used in handoff routing and tracing |
 | `instruction` | `str \| None` | `None` | No | System prompt — what the agent should do and how it should behave |
 | `tools` | `list \| None` | `None` | No | Additional tools to register. Built-in tools (filesystem, exec, grep, etc.) are always included |
-| `skills` | `str \| list \| None` | auto-discover | No | Skill directories to load. Default: checks `./skills`, `./.skills`, `./skill`, `./.skill`, `./Skills`. Bundled skills (ByteRover, OpenViking) are always included when eligible. |
+| `skills` | `str \| list \| None` | auto-discover | No | Skill directories to load. Default: checks `./skills`, `./.skills`, `./skill`, `./.skill`, `./Skills`. Bundled OpenViking is included when eligible. |
 | `memory` | `str \| list \| None` | auto-discover | No | Memory files to inject into system prompt. Default: checks `./AGENTS.md`, `./CLAWAGENTS.md` |
 | `sandbox` | `SandboxBackend` | `LocalBackend()` | No | Pluggable sandbox backend for file/shell operations. Use `InMemoryBackend` for testing |
 | `streaming` | `bool` | `True` | No | Enable streaming responses |
@@ -1315,25 +1324,19 @@ The agent factory automatically discovers project files:
 
 ### Bundled Skills
 
-ClawAgents ships with two complementary bundled skills that work together:
-
 | Skill | Purpose | Prerequisite | Auto-enabled? |
 |:---|:---|:---|:---:|
-| **[ByteRover](https://clawhub.ai/byteroverinc/byterover)** | **Write** decisions, patterns, and rules to local Markdown files | Node/npx (`brv` runs via `npx byterover-cli`) | Always |
-| **[OpenViking](https://github.com/volcengine/OpenViking)** | **Read** context from repos, docs, and large knowledge bases with tiered L0/L1/L2 loading | `pip install openviking` + running `openviking-server` | Only when `ov` CLI is on PATH |
+| **[OpenViking](https://github.com/volcengine/OpenViking)** | Tiered context retrieval (L0/L1/L2) over repos and docs | `pip install openviking` + running `openviking-server` | Only when `ov` CLI is on PATH |
 
-**How they complement each other:**
-
-- **ByteRover** is a fast, serverless notebook for the agent. Use `brv curate` to persist decisions ("We chose Postgres for ACID compliance") and `brv query` to recall them. No infrastructure needed — context is stored as Markdown in `.brv/context-tree/`.
-- **OpenViking** is a structured context database. Use `ov add-resource` to ingest entire repos or doc sites, then `ov find` for semantic search across all indexed content. Results are organized in a virtual filesystem (`viking://`) with three tiers: **L0** (abstract, ~100 tokens), **L1** (overview, ~2k tokens), **L2** (full content) — the agent loads only what it needs, saving tokens.
-
-**Typical workflow:** OpenViking **retrieves** context → agent works on the task → ByteRover **curates** the decisions made.
+**OpenViking** is a structured context database. Use `ov add-resource` to ingest repos or docs, then `ov find` for semantic search. Results use a virtual filesystem (`viking://`) with **L0** (abstract), **L1** (overview), **L2** (full content).
 
 **OpenViking prerequisites:**
 1. Install: `pip install openviking --upgrade`
 2. Configure: create `~/.openviking/ov.conf` with embedding model and VLM settings (see [OpenViking docs](https://github.com/volcengine/OpenViking))
 3. Start server: `openviking-server`
-4. The `ov` CLI must be on your PATH — the skill auto-enables when detected |
+4. Put `ov` on your PATH (often `~/Library/Python/3.11/bin` on macOS)
+
+> **Note:** ByteRover was removed — its default LLM provider is a cloud internet service.
 
 Override with explicit paths:
 ```python
@@ -1560,6 +1563,13 @@ parity sweep.
 ---
 
 ## Changelog
+
+### v6.10.6 — Context headroom pack (July 2026)
+
+- Prompt-cache stable prefixes; lessons after `__CACHE_BOUNDARY__`; alphabetical tool schemas.
+- Tiered `read_file` (L0/L1/L2); HTML/diff/test crushers; multimodal sanitize on ingest.
+- Wire `compress_messages_safe` + compact hooks; output trim; micro-compact artifact ids.
+- Failure lessons → `AGENTS.md`; local artifact search via `retrieve_tool_result(query=…)`.
 
 ### v6.10.5 — Gemini history 400 recovery (July 2026)
 

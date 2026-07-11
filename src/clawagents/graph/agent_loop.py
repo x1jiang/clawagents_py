@@ -960,6 +960,42 @@ _MICRO_COMPACT_KEEP_RECENT = 3  # keep last N compactable tool results intact
 # the context window. Running it unconditionally blanked all but the last 3
 # read/grep/exec results every round, degrading multi-file tasks at low usage.
 _MICRO_COMPACT_MIN_USAGE_RATIO = 0.4
+_ARTIFACT_ID_RE = re.compile(
+    r"(?:Artifact id:\s*|id=)([A-Za-z0-9._-]{4,80})",
+    re.IGNORECASE,
+)
+
+
+def _extract_artifact_id(content: str) -> str | None:
+    if not content:
+        return None
+    m = _ARTIFACT_ID_RE.search(content)
+    return m.group(1) if m else None
+
+
+def _micro_compact_stub(content: str, *, tool_call_id: str | None = None) -> str:
+    """Replace old tool bodies with a stub that still points at a recoverable artifact."""
+    aid = _extract_artifact_id(content)
+    if aid is None and isinstance(content, str) and len(content) > 500:
+        try:
+            from clawagents.tool_output_artifacts import store_tool_artifact
+
+            aid, _ = store_tool_artifact(
+                tool_name="micro_compact",
+                tool_use_id=tool_call_id or f"micro-{abs(hash(content[:200])) % 10_000_000}",
+                output=content,
+                kind="prose",
+                extra_meta={"source": "micro_compact"},
+            )
+        except Exception:
+            logger.debug("micro-compact artifact store failed", exc_info=True)
+            aid = None
+    if aid:
+        return (
+            f"[Old tool result cleared to save context — artifact id={aid}. "
+            f"Call retrieve_tool_result(id=\"{aid}\") to restore.]"
+        )
+    return "[Old tool result cleared to save context]"
 
 
 def _micro_compact_tool_results(
@@ -970,7 +1006,8 @@ def _micro_compact_tool_results(
 
     The model still sees the tool_use → tool_result pairs, just not the raw
     50KB grep/file output. This preserves the agent's sense of *what* it did
-    while freeing massive amounts of context.
+    while freeing massive amounts of context. Stubs retain artifact ids when
+    available so content remains recoverable via retrieve_tool_result.
     """
     from clawagents.config.features import is_enabled
     if not is_enabled("micro_compact"):
@@ -1012,9 +1049,10 @@ def _micro_compact_tool_results(
         # Native tool results
         if msg.role == "tool" and msg.tool_call_id:
             if msg.tool_call_id in compactable_ids and msg.tool_call_id not in keep_ids:
+                body = msg.content if isinstance(msg.content, str) else str(msg.content)
                 result.append(LLMMessage(
                     role="tool",
-                    content="[Old tool result cleared to save context]",
+                    content=_micro_compact_stub(body, tool_call_id=msg.tool_call_id),
                     tool_call_id=msg.tool_call_id,
                 ))
                 cleared += 1
@@ -1022,9 +1060,10 @@ def _micro_compact_tool_results(
         # Text-based tool results (user message following assistant tool call)
         elif msg.role == "user" and isinstance(msg.content, str) and msg.content.startswith("[Tool Result]"):
             if i > 0 and (i - 1) in compactable_text_indices and (i - 1) not in keep_text_indices:
+                stub = _micro_compact_stub(msg.content)
                 result.append(LLMMessage(
                     role="user",
-                    content="[Tool Result] [Old tool result cleared to save context]",
+                    content=f"[Tool Result] {stub}",
                 ))
                 cleared += 1
                 continue
@@ -1207,8 +1246,19 @@ async def _compact_if_needed(
     token_multiplier: float = 1.0,
     model_name: Optional[str] = None,
     run_context: Optional[RunContext] = None,
+    fire_hook: Optional[Callable[..., Any]] = None,
 ) -> list[LLMMessage]:
     messages = _truncate_old_tool_args(messages)
+
+    # Soft-cap verbose assistant/user turns before heavier compaction.
+    try:
+        from clawagents.memory.output_trim import trim_verbose_messages
+
+        messages, trimmed_n = trim_verbose_messages(messages)
+        if trimmed_n:
+            emit("context", {"message": f"trimmed {trimmed_n} verbose turn(s)"})
+    except Exception:
+        logger.debug("output trim failed", exc_info=True)
 
     effective_window, ratio = (
         _resolve_context_budget(model_name, context_window)
@@ -1217,11 +1267,20 @@ async def _compact_if_needed(
     )
     budget = int(effective_window * ratio)
     from clawagents.memory.compact_tool_results import compact_tool_results
+    from clawagents.harness_profiles import resolve_harness_profile
+
+    profile = resolve_harness_profile(model_name)
+    headroom = (
+        float(profile.compaction_headroom_ratio)
+        if profile and profile.compaction_headroom_ratio is not None
+        else 0.7
+    )
 
     messages, compacted = compact_tool_results(
         messages,
         max_input_tokens=budget,
         token_multiplier=token_multiplier,
+        headroom_ratio=headroom,
     )
     if compacted:
         emit("context", {"message": "compacted oversized tool results before summarization"})
@@ -1239,6 +1298,12 @@ async def _compact_if_needed(
         "message_count": len(messages),
     })
 
+    if fire_hook is not None:
+        try:
+            await fire_hook("on_pre_compact", len(messages), current_tokens)
+        except Exception:
+            logger.debug("on_pre_compact hook failed", exc_info=True)
+
     system_msgs: list[LLMMessage] = []
     non_system: list[LLMMessage] = []
     for m in messages:
@@ -1246,6 +1311,87 @@ async def _compact_if_needed(
 
     if len(non_system) <= _RECENT_MESSAGES_TO_KEEP:
         return messages
+
+    # Prefer hardened compress_messages_safe when it yields meaningful savings.
+    try:
+        from clawagents.memory.compaction import AgentMessage, compress_messages_safe
+
+        agent_msgs = [
+            AgentMessage(
+                role=m.role,
+                content=m.content if isinstance(m.content, str) else str(m.content),
+            )
+            for m in ([*system_msgs, *non_system])
+        ]
+        safe = await compress_messages_safe(
+            llm,
+            agent_msgs,
+            context_window=effective_window,
+            protect_first_n=max(1, len(system_msgs)),
+            protect_last_n=_RECENT_MESSAGES_TO_KEEP,
+        )
+        if safe.get("effective"):
+            compact_out = [
+                LLMMessage(role=m.role, content=m.content or "")
+                for m in safe["messages"]
+            ]
+            summary_text = str(safe.get("summary") or "")
+            # Preserve OpenHarness-style carryover on the summary turn.
+            try:
+                task_context = ""
+                for m in non_system:
+                    if m.role == "user" and not (
+                        isinstance(m.content, str) and m.content.startswith("[Tool Result]")
+                    ):
+                        task_context = m.content[:500] if isinstance(m.content, str) else ""
+                        break
+                carryover = get_compaction_carryover(run_context, task_context=task_context)
+                carryover_text = carryover.to_markdown()
+                if carryover_text and summary_text:
+                    # Replace the summary AgentMessage content with carryover + summary.
+                    for i, m in enumerate(compact_out):
+                        if m.role != "system" and (m.content or "") == summary_text:
+                            compact_out[i] = LLMMessage(
+                                role=m.role,
+                                content=(
+                                    f"[System — Compacted History]\n{carryover_text}\n\n"
+                                    f"## Conversation Summary\n{summary_text}"
+                                ),
+                            )
+                            break
+                    else:
+                        compact_out.insert(
+                            len([m for m in compact_out if m.role == "system"]),
+                            LLMMessage(
+                                role="user",
+                                content=(
+                                    f"[System — Compacted History]\n{carryover_text}\n\n"
+                                    f"## Conversation Summary\n{summary_text}"
+                                ),
+                            ),
+                        )
+            except Exception:
+                logger.debug("carryover enrich after compress_messages_safe failed", exc_info=True)
+            emit("context", {
+                "message": (
+                    f"compress_messages_safe saved "
+                    f"{safe.get('compression_savings_pct', 0):.1f}%"
+                ),
+            })
+            emit("compact_progress", {
+                "phase": "end",
+                "message": "compaction completed via compress_messages_safe",
+                "older_messages": len(safe.get("dropped_messages_list") or []),
+                "recent_messages": _RECENT_MESSAGES_TO_KEEP,
+            })
+            if fire_hook is not None:
+                try:
+                    await fire_hook("on_post_compact", len(compact_out), summary_text or None)
+                except Exception:
+                    logger.debug("on_post_compact hook failed", exc_info=True)
+            return compact_out
+    except Exception:
+        logger.debug("compress_messages_safe path failed; falling back", exc_info=True)
 
     split_idx = _find_safe_split_index(non_system, _RECENT_MESSAGES_TO_KEEP)
     if split_idx <= 0:
@@ -1333,7 +1479,13 @@ async def _compact_if_needed(
                 "recent_messages": len(recent),
                 "carryover": carryover.to_dict(),
             })
-            return [*system_msgs, *recent]
+            out = [*system_msgs, *recent]
+            if fire_hook is not None:
+                try:
+                    await fire_hook("on_post_compact", len(out), None)
+                except Exception:
+                    logger.debug("on_post_compact hook failed", exc_info=True)
+            return out
 
         carryover_text = carryover.to_markdown()
         content = f"[System — Compacted History]\n{summary_text}"
@@ -1351,7 +1503,13 @@ async def _compact_if_needed(
             "recent_messages": len(recent),
             "carryover": carryover.to_dict(),
         })
-        return [*system_msgs, summary, *recent]
+        out = [*system_msgs, summary, *recent]
+        if fire_hook is not None:
+            try:
+                await fire_hook("on_post_compact", len(out), summary_text)
+            except Exception:
+                logger.debug("on_post_compact hook failed", exc_info=True)
+        return out
     except Exception:
         logger.debug("Compaction LLM call failed", exc_info=True)
         emit("context", {"message": "compaction failed — dropping oldest messages"})
@@ -1362,7 +1520,13 @@ async def _compact_if_needed(
             "recent_messages": len(recent),
             "carryover": carryover.to_dict(),
         })
-        return [*system_msgs, *recent]
+        out = [*system_msgs, *recent]
+        if fire_hook is not None:
+            try:
+                await fire_hook("on_post_compact", len(out), None)
+            except Exception:
+                logger.debug("on_post_compact hook failed", exc_info=True)
+        return out
 
 
 # ─── History Offloading ───────────────────────────────────────────────────
@@ -1944,6 +2108,7 @@ async def run_agent_graph(
             messages = _soft_trim_messages(messages, context_window, token_multiplier, emit, resolved_model_name)
             messages = await _compact_if_needed(
                 messages, context_window, llm, emit, token_multiplier, resolved_model_name, run_context,
+                fire_hook=_fire_hook,
             )
             # Compaction / trim can still leave pairs inconsistent — sanitize again.
             messages = _patch_dangling_tool_calls(messages)
@@ -2087,6 +2252,7 @@ async def run_agent_graph(
                     messages = _soft_trim_messages(messages, context_window, token_multiplier, emit, resolved_model_name)
                     messages = await _compact_if_needed(
                         messages, context_window, llm, emit, token_multiplier, resolved_model_name, run_context,
+                        fire_hook=_fire_hook,
                     )
                     # Don't persist recovery-compaction artifacts to the session.
                     _session_note_messages(track=False)
@@ -2624,20 +2790,24 @@ async def run_agent_graph(
                 raw_output: str | list[dict[str, Any]] = _tool_observation(tool_result)
                 tool_output: str | list[dict[str, Any]]
                 if isinstance(raw_output, list):
-                    tool_output = raw_output
+                    try:
+                        from clawagents.media.images import sanitize_tool_output
+
+                        tool_output = sanitize_tool_output(raw_output)  # type: ignore[assignment]
+                    except Exception:
+                        logger.debug("sanitize_tool_output failed", exc_info=True)
+                        tool_output = raw_output
                     preview: str = "[Multimodal Array Content]"
                 else:
-                    tool_output = _evict_large_tool_result(call.tool_name, raw_output)
-                    from clawagents.tool_output_artifacts import offload_tool_output_if_needed
+                    from clawagents.tool_output_artifacts import prepare_tool_output_for_context
 
-                    inline, artifact_path = offload_tool_output_if_needed(
+                    tool_output, artifact_id = prepare_tool_output_for_context(
                         tool_name=call.tool_name,
                         tool_use_id=native_tc.tool_call_id if native_tc else call.tool_name,
-                        output=tool_output,
+                        output=raw_output,
                     )
-                    tool_output = inline
-                    if artifact_path is not None:
-                        emit("context", {"message": f"tool output offloaded to {artifact_path}"})
+                    if artifact_id is not None:
+                        emit("context", {"message": f"tool output crushed/stored id={artifact_id}"})
                     preview = tool_output[:preview_chars]
 
                 emit("tool_result", {
@@ -2953,22 +3123,24 @@ async def run_agent_graph(
                         else call.tool_name
                     )
                     if isinstance(raw_out, list):
-                        output = raw_out
+                        try:
+                            from clawagents.media.images import sanitize_tool_output
+
+                            output = sanitize_tool_output(raw_out)  # type: ignore[assignment]
+                        except Exception:
+                            logger.debug("sanitize_tool_output failed", exc_info=True)
+                            output = raw_out
                         preview = "[Multimodal Array Content]"
                     else:
-                        output = _evict_large_tool_result(call.tool_name, raw_out)
-                        # Offload oversized outputs to artifact files (parity
-                        # with the single-call path's 12K inline threshold).
-                        from clawagents.tool_output_artifacts import offload_tool_output_if_needed
+                        from clawagents.tool_output_artifacts import prepare_tool_output_for_context
 
-                        inline, artifact_path = offload_tool_output_if_needed(
+                        output, artifact_id = prepare_tool_output_for_context(
                             tool_name=call.tool_name,
                             tool_use_id=_call_id,
-                            output=output,
+                            output=raw_out,
                         )
-                        output = inline
-                        if artifact_path is not None:
-                            emit("context", {"message": f"tool output offloaded to {artifact_path}"})
+                        if artifact_id is not None:
+                            emit("context", {"message": f"tool output crushed/stored id={artifact_id}"})
                         preview = output[:preview_chars]
 
                     emit("tool_result", {
@@ -3207,6 +3379,18 @@ async def run_agent_graph(
                         model=run_summary.model,
                     )
                     emit("context", {"message": "PTRL: extracted and saved lessons from this run"})
+                    try:
+                        from clawagents.trajectory.failure_learn import (
+                            append_failure_lessons_to_agents_md,
+                        )
+
+                        promoted = append_failure_lessons_to_agents_md(lessons_text)
+                        if promoted:
+                            emit("context", {
+                                "message": f"PTRL: appended {len(promoted)} failure lesson(s) to AGENTS.md",
+                            })
+                    except Exception:
+                        logger.debug("PTRL: AGENTS.md failure-learn append failed", exc_info=True)
                     try:
                         from clawagents.trajectory.lesson_promotion import maybe_promote_recurring_lessons
 

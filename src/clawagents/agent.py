@@ -504,7 +504,7 @@ def create_claw_agent(
                         Default: from OPENAI_API_VERSION env / None.
         instruction:    What the agent should do / how it should behave.
         tools:          Additional tools. Built-in tools always included.
-        skills:         Skill directories (default: auto-discovers ./skills). The built-in ByteRover skill is always included when present.
+        skills:         Skill directories (default: auto-discovers ./skills). Bundled skills (e.g. OpenViking) are included when present.
         memory:         AGENTS.md paths (default: auto-discovers ./AGENTS.md, ./CLAWAGENTS.md).
         streaming:      Enable streaming output (default: True).
         context_window:  Max context window in tokens (default: from CONTEXT_WINDOW env / 1000000).
@@ -784,6 +784,10 @@ def create_claw_agent(
 
     registry.register(create_search_history_tool(workspace=os.getcwd()))
 
+    from clawagents.tools.retrieve_tool_result import create_retrieve_tool_result_tool
+
+    registry.register(create_retrieve_tool_result_tool(workspace=os.getcwd()))
+
     # ── Auto-discover memory from default locations ────────────────────
     memory_paths = _to_list(memory) if memory is not None else _auto_discover_memory()
     composed_before_llm = _compose_before_llm(
@@ -934,7 +938,7 @@ def _to_list(value) -> list:
 
 
 def _get_bundled_skills_dir() -> str:
-    """Path to all bundled skills (byterover, openviking, etc.)."""
+    """Path to bundled skills (e.g. openviking)."""
     return str(Path(__file__).resolve().parent / "skills")
 
 
