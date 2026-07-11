@@ -18,6 +18,10 @@ class HarnessProfile:
     compaction_headroom_ratio: float | None = None
     loop_detection_overrides: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Anthropic-style tool clearing knobs (micro-compact)
+    clear_tool_keep: int | None = None
+    clear_tool_trigger_ratio: float | None = None
+    clear_tool_exclude: tuple[str, ...] = ()
 
 
 BUILTIN_HARNESS_PROFILES: dict[str, HarnessProfile] = {
@@ -29,24 +33,31 @@ BUILTIN_HARNESS_PROFILES: dict[str, HarnessProfile] = {
             "Batch independent reads in parallel when the runtime allows."
         ),
         compaction_headroom_ratio=0.75,
+        clear_tool_keep=3,
+        clear_tool_trigger_ratio=0.4,
     ),
     "anthropic-opus": HarnessProfile(
         name="anthropic-opus",
         match_models=("claude-opus", "claude-opus-4"),
         system_prompt_suffix="Think step-by-step for multi-file refactors; verify with tests before claiming done.",
         compaction_headroom_ratio=0.8,
+        clear_tool_keep=4,
+        clear_tool_trigger_ratio=0.45,
     ),
     "openai-codex": HarnessProfile(
         name="openai-codex",
         match_models=("gpt-5.3-codex", "gpt-5.1-codex", "gpt-5-codex", "codex"),
         system_prompt_suffix="Minimize scope. Surgical diffs only. Run verification commands before completion.",
         loop_detection_overrides={"critical_threshold": 5},
+        clear_tool_keep=3,
     ),
     "local-ollama": HarnessProfile(
         name="local-ollama",
         match_models=("llama", "gemma", "mistral", "qwen", "deepseek"),
         system_prompt_suffix="Keep responses short. One tool at a time when uncertain.",
         compaction_headroom_ratio=0.65,
+        clear_tool_keep=2,
+        clear_tool_trigger_ratio=0.35,
     ),
 }
 
@@ -77,6 +88,9 @@ def load_harness_profiles() -> dict[str, HarnessProfile]:
                 compaction_headroom_ratio=spec.get("compaction_headroom_ratio"),
                 loop_detection_overrides=dict(spec.get("loop_detection_overrides", {})),
                 metadata=dict(spec.get("metadata", {})),
+                clear_tool_keep=spec.get("clear_tool_keep"),
+                clear_tool_trigger_ratio=spec.get("clear_tool_trigger_ratio"),
+                clear_tool_exclude=tuple(spec.get("clear_tool_exclude", [])),
             )
     return profiles
 

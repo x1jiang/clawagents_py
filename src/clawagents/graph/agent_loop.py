@@ -973,6 +973,59 @@ def _extract_artifact_id(content: str) -> str | None:
     return m.group(1) if m else None
 
 
+def _post_tool_side_effects(
+    tool_name: str,
+    args: dict[str, Any],
+    success: bool,
+    tool_output: str | list[dict[str, Any]],
+    *,
+    emit: OnEvent,
+) -> str | list[dict[str, Any]]:
+    """Ledger / shadow-checkpoint / auto-verify after a tool completes."""
+    from clawagents.config.features import is_enabled
+
+    out = tool_output
+    try:
+        if success and is_enabled("context_ledger"):
+            from clawagents.memory.context_ledger import maybe_record_from_tool_result
+
+            text = out if isinstance(out, str) else str(out)
+            entry = maybe_record_from_tool_result(tool_name, args, text)
+            if entry is not None:
+                emit("context", {"message": f"context ledger recorded {entry.sha[:12]}"})
+                emit("checkpoint", {"kind": "ledger", "sha": entry.sha})
+    except Exception:
+        logger.debug("ledger record failed", exc_info=True)
+
+    try:
+        if success and is_enabled("shadow_checkpoints"):
+            from clawagents.permissions.mode import is_write_class_tool
+            from clawagents.memory.shadow_checkpoint import create_checkpoint
+
+            if is_write_class_tool(tool_name) or tool_name in {
+                "write_file", "edit_file", "apply_patch", "execute", "git_commit",
+            }:
+                info = create_checkpoint(label=tool_name)
+                if info.get("ok") and info.get("sha"):
+                    emit("checkpoint", {"kind": "shadow", "sha": info["sha"], "tool": tool_name})
+                    if isinstance(out, str):
+                        out = out + f"\n[checkpoint {info['sha'][:12]}]"
+    except Exception:
+        logger.debug("shadow checkpoint failed", exc_info=True)
+
+    try:
+        if is_enabled("auto_verify") and isinstance(out, str):
+            from clawagents.tools.auto_verify import maybe_verify_after_edit
+
+            extra = maybe_verify_after_edit(tool_name, success)
+            if extra:
+                out = out + "\n\n" + extra
+    except Exception:
+        logger.debug("auto_verify failed", exc_info=True)
+
+    return out
+
+
 def _micro_compact_stub(content: str, *, tool_call_id: str | None = None) -> str:
     """Replace old tool bodies with a stub that still points at a recoverable artifact."""
     aid = _extract_artifact_id(content)
@@ -1247,6 +1300,7 @@ async def _compact_if_needed(
     model_name: Optional[str] = None,
     run_context: Optional[RunContext] = None,
     fire_hook: Optional[Callable[..., Any]] = None,
+    savings_history: list[float] | None = None,
 ) -> list[LLMMessage]:
     messages = _truncate_old_tool_args(messages)
 
@@ -1259,6 +1313,19 @@ async def _compact_if_needed(
             emit("context", {"message": f"trimmed {trimmed_n} verbose turn(s)"})
     except Exception:
         logger.debug("output trim failed", exc_info=True)
+
+    # If recent compressions are thrashing, prefer artifact eviction only.
+    if savings_history:
+        try:
+            from clawagents.memory.compaction import is_compression_thrashing
+
+            if is_compression_thrashing(savings_history):
+                emit("context", {
+                    "message": "compaction thrashing detected — skipping LLM summarize; soft-trim only",
+                })
+                return messages
+        except Exception:
+            logger.debug("thrash check failed", exc_info=True)
 
     effective_window, ratio = (
         _resolve_context_budget(model_name, context_window)
@@ -1336,7 +1403,9 @@ async def _compact_if_needed(
                 for m in safe["messages"]
             ]
             summary_text = str(safe.get("summary") or "")
-            # Preserve OpenHarness-style carryover on the summary turn.
+            if savings_history is not None:
+                savings_history.append(float(safe.get("compression_savings_pct") or 0.0))
+            # Preserve carryover, then normalize to user+assistant compaction pair.
             try:
                 task_context = ""
                 for m in non_system:
@@ -1347,31 +1416,43 @@ async def _compact_if_needed(
                         break
                 carryover = get_compaction_carryover(run_context, task_context=task_context)
                 carryover_text = carryover.to_markdown()
-                if carryover_text and summary_text:
-                    # Replace the summary AgentMessage content with carryover + summary.
-                    for i, m in enumerate(compact_out):
-                        if m.role != "system" and (m.content or "") == summary_text:
-                            compact_out[i] = LLMMessage(
-                                role=m.role,
-                                content=(
-                                    f"[System — Compacted History]\n{carryover_text}\n\n"
-                                    f"## Conversation Summary\n{summary_text}"
-                                ),
-                            )
-                            break
-                    else:
-                        compact_out.insert(
-                            len([m for m in compact_out if m.role == "system"]),
-                            LLMMessage(
-                                role="user",
-                                content=(
-                                    f"[System — Compacted History]\n{carryover_text}\n\n"
-                                    f"## Conversation Summary\n{summary_text}"
-                                ),
-                            ),
-                        )
             except Exception:
                 logger.debug("carryover enrich after compress_messages_safe failed", exc_info=True)
+                carryover_text = ""
+
+            handoff = f"[System — Compacted History]\n{summary_text}"
+            if carryover_text and summary_text:
+                handoff = (
+                    f"[System — Compacted History]\n{carryover_text}\n\n"
+                    f"## Conversation Summary\n{summary_text}"
+                )
+            replaced = False
+            for i, m in enumerate(compact_out):
+                if m.role != "system" and (m.content or "") == summary_text:
+                    compact_out[i] = LLMMessage(role="user", content=handoff)
+                    replaced = True
+                    break
+            if not replaced and summary_text:
+                insert_at = len([m for m in compact_out if m.role == "system"])
+                compact_out.insert(insert_at, LLMMessage(role="user", content=handoff))
+            # Assistant ack keeps providers that expect alternating roles happy.
+            if summary_text and not any(
+                m.role == "assistant"
+                and isinstance(m.content, str)
+                and "compacted handoff" in m.content.lower()
+                for m in compact_out
+            ):
+                # Insert immediately after the handoff user message.
+                for i, m in enumerate(compact_out):
+                    if m.role == "user" and isinstance(m.content, str) and "Compacted History" in m.content:
+                        compact_out.insert(
+                            i + 1,
+                            LLMMessage(
+                                role="assistant",
+                                content="Understood — continuing from the compacted handoff summary.",
+                            ),
+                        )
+                        break
             emit("context", {
                 "message": (
                     f"compress_messages_safe saved "
@@ -1824,6 +1905,7 @@ async def run_agent_graph(
     else:
         adaptive_threshold = _RETHINK_THRESHOLD
     failure_tracker = _FailureTracker(threshold=adaptive_threshold) if rethink else None
+    _compaction_savings: list[float] = []
 
     # Trajectory recorder (opt-in; learn implies trajectory)
     recorder = None
@@ -1876,14 +1958,59 @@ async def run_agent_graph(
 
     prompt_to_use = system_prompt or BASE_SYSTEM_PROMPT
     lesson_preamble = ""
+    dynamic_parts: list[str] = []
 
     # PTRL Layer 1: Pre-run lesson injection (skipped for isolated subagents).
     if learn and not getattr(run_context, "skip_memory", False):
         from clawagents.trajectory.lessons import build_lesson_preamble
         preamble = build_lesson_preamble()
         if preamble:
-            lesson_preamble = preamble
+            dynamic_parts.append(preamble)
             emit("context", {"message": "PTRL: injected lessons from past runs"})
+
+    # Dynamic context packs (after cache boundary) — local only.
+    if not getattr(run_context, "skip_memory", False):
+        from clawagents.config.features import is_enabled
+        try:
+            if is_enabled("core_memory"):
+                from clawagents.memory.core_memory import load_core_memory
+                cm = load_core_memory()
+                if cm:
+                    dynamic_parts.append(cm)
+            if is_enabled("context_ledger"):
+                from clawagents.memory.context_ledger import load_ledger_preamble
+                led = load_ledger_preamble()
+                if led:
+                    dynamic_parts.append(led)
+            if is_enabled("memory_bank"):
+                from clawagents.memory.core_memory import (
+                    ensure_memory_bank_stubs,
+                    load_memory_bank_preamble,
+                )
+                ensure_memory_bank_stubs()
+                mb = load_memory_bank_preamble()
+                if mb:
+                    dynamic_parts.append(mb)
+            if is_enabled("fact_store"):
+                from clawagents.memory.facts import live_facts_preamble
+                facts = live_facts_preamble()
+                if facts:
+                    dynamic_parts.append(facts)
+            from clawagents.tools.context_tools import load_plan_preamble
+            plan = load_plan_preamble()
+            if plan:
+                dynamic_parts.append(plan)
+            if is_enabled("repo_map_inject"):
+                from clawagents.memory.repo_map import build_repo_map
+                rm = build_repo_map(max_chars=3_500)
+                if rm:
+                    dynamic_parts.append(rm)
+                    emit("context", {"message": "injected ranked repo map"})
+        except Exception:
+            logger.debug("dynamic context pack failed", exc_info=True)
+
+    if dynamic_parts:
+        lesson_preamble = "\n\n".join(dynamic_parts)
 
     # Insert __CACHE_BOUNDARY__ between static (instructions + tools) and dynamic content.
     # The Anthropic provider splits on this marker to enable prompt caching.
@@ -2100,15 +2227,28 @@ async def run_agent_graph(
             messages = _patch_dangling_tool_calls(messages)
             # Claude Code pattern: clear old tool results — but only when the
             # transcript is actually filling up (see _MICRO_COMPACT_MIN_USAGE_RATIO).
+            from clawagents.harness_profiles import resolve_harness_profile as _rhp
+            _mc_profile = _rhp(resolved_model_name)
+            _mc_keep = (
+                int(_mc_profile.clear_tool_keep)
+                if _mc_profile and _mc_profile.clear_tool_keep is not None
+                else _MICRO_COMPACT_KEEP_RECENT
+            )
+            _mc_ratio = (
+                float(_mc_profile.clear_tool_trigger_ratio)
+                if _mc_profile and _mc_profile.clear_tool_trigger_ratio is not None
+                else _MICRO_COMPACT_MIN_USAGE_RATIO
+            )
             if (
                 _estimate_messages_tokens(messages, token_multiplier)
-                > context_window * _MICRO_COMPACT_MIN_USAGE_RATIO
+                > context_window * _mc_ratio
             ):
-                messages = _micro_compact_tool_results(messages)
+                messages = _micro_compact_tool_results(messages, keep_recent=_mc_keep)
             messages = _soft_trim_messages(messages, context_window, token_multiplier, emit, resolved_model_name)
             messages = await _compact_if_needed(
                 messages, context_window, llm, emit, token_multiplier, resolved_model_name, run_context,
                 fire_hook=_fire_hook,
+                savings_history=_compaction_savings,
             )
             # Compaction / trim can still leave pairs inconsistent — sanitize again.
             messages = _patch_dangling_tool_calls(messages)
@@ -2253,6 +2393,7 @@ async def run_agent_graph(
                     messages = await _compact_if_needed(
                         messages, context_window, llm, emit, token_multiplier, resolved_model_name, run_context,
                         fire_hook=_fire_hook,
+                        savings_history=_compaction_savings,
                     )
                     # Don't persist recovery-compaction artifacts to the session.
                     _session_note_messages(track=False)
@@ -2810,6 +2951,16 @@ async def run_agent_graph(
                         emit("context", {"message": f"tool output crushed/stored id={artifact_id}"})
                     preview = tool_output[:preview_chars]
 
+                tool_output = _post_tool_side_effects(
+                    call.tool_name,
+                    call.args if isinstance(call.args, dict) else {},
+                    tool_result.success,
+                    tool_output,
+                    emit=emit,
+                )
+                if isinstance(tool_output, str):
+                    preview = tool_output[:preview_chars]
+
                 emit("tool_result", {
                     "name": call.tool_name,
                     "success": tool_result.success,
@@ -3143,6 +3294,16 @@ async def run_agent_graph(
                             emit("context", {"message": f"tool output crushed/stored id={artifact_id}"})
                         preview = output[:preview_chars]
 
+                    output = _post_tool_side_effects(
+                        call.tool_name,
+                        call.args if isinstance(call.args, dict) else {},
+                        result.success,
+                        output,
+                        emit=emit,
+                    )
+                    if isinstance(output, str):
+                        preview = output[:preview_chars]
+
                     emit("tool_result", {
                         "name": call.tool_name,
                         "success": result.success,
@@ -3391,6 +3552,18 @@ async def run_agent_graph(
                             })
                     except Exception:
                         logger.debug("PTRL: AGENTS.md failure-learn append failed", exc_info=True)
+                    try:
+                        from clawagents.config.features import is_enabled
+                        if is_enabled("fact_store"):
+                            from clawagents.memory.facts import promote_lesson_bullets_to_facts
+
+                            facts = promote_lesson_bullets_to_facts(lessons_text)
+                            if facts:
+                                emit("context", {
+                                    "message": f"PTRL: promoted {len(facts)} live fact(s)",
+                                })
+                    except Exception:
+                        logger.debug("PTRL: fact promotion failed", exc_info=True)
                     try:
                         from clawagents.trajectory.lesson_promotion import maybe_promote_recurring_lessons
 

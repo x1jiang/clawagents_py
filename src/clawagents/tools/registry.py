@@ -122,8 +122,8 @@ def _path_scope_of(tool: "Tool", args: Dict[str, Any]) -> Optional[str]:
 # Before write tools modify a file, snapshot it for undo/rollback capability.
 
 _WRITE_TOOLS: frozenset[str] = frozenset({
-    "write_file", "edit_file", "create_file", "replace_in_file",
-    "insert_in_file", "patch_file",
+    "write_file", "edit_file", "apply_patch", "create_file", "replace_in_file",
+    "insert_in_file", "insert_lines", "patch_file",
 })
 
 

@@ -41,6 +41,8 @@ _EXIT_REMINDER = (
     "<system-reminder>\n"
     "You have exited plan mode. Permission mode is back to DEFAULT. "
     "Write-class tools are unblocked.\n"
+    "If you drafted a plan, call write_plan(content=...) so Act mode can load "
+    ".clawagents/plan.md on the next turns.\n"
     "</system-reminder>"
 )
 

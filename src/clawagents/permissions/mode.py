@@ -69,11 +69,17 @@ WRITE_CLASS_TOOLS: frozenset[str] = frozenset({
     # Filesystem writers
     "write_file",
     "edit_file",
+    "apply_patch",
     "create_file",
     "replace_in_file",
     "insert_in_file",
+    "insert_lines",
     "patch_file",
     "delete_file",
+    # Git mutators
+    "git_commit",
+    "git_undo_ai",
+    "checkpoint_restore",
     # Shell / process
     "execute",
     "exec",
@@ -83,6 +89,7 @@ WRITE_CLASS_TOOLS: frozenset[str] = frozenset({
     # gating at the parent dispatch site is defensive.)
     "subagent",
     "compose",
+    "task",
 })
 
 

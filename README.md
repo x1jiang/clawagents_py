@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.10.6-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.10.7-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -26,9 +26,19 @@ pip install clawagents[anthropic]   # + Anthropic Claude support
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 6.10.6** — Context headroom pack (July 2026): prompt-cache stable prefixes, tiered `read_file`, crushers, reversible micro-compact, failure→AGENTS.md.
+> **Version 6.10.7** — Peer-inspired harness pack (July 2026): repo map, context ledger, shadow checkpoints, apply_patch, core memory, git/worktree tools.
 
-### New In v6.10.6
+### New In v6.10.7
+
+- **Repo map** — ranked symbol map tool (+ optional prompt inject).
+- **Context ledger** — commit-boundary restorable memory with `rehydrate_ledger`.
+- **Shadow-git checkpoints** — Cline-style undo without touching project git.
+- **`apply_patch`** — SEARCH/REPLACE and unified-diff surgical edits.
+- **Core memory / memory bank / live facts** — editable blocks + superseding facts.
+- **Git + worktree tools** — status/diff/commit/undo; isolated worktrees for parallel agents.
+- **Plan handoff** — `write_plan` → `.clawagents/plan.md`; harness clear-tool knobs; compaction thrash guard.
+
+### Previously In v6.10.6
 
 - **Prompt-cache align** — normalize static system prefix; lessons sit *after* `__CACHE_BOUNDARY__`; tools listed alphabetically.
 - **Tiered `read_file`** — `tier=L0` outline/symbols, `L1` paginated body, `L2` large/full read.
@@ -1563,6 +1573,12 @@ parity sweep.
 ---
 
 ## Changelog
+
+### v6.10.7 — Peer-inspired harness pack (July 2026)
+
+- Repo map, commit-boundary context ledger, shadow-git checkpoints.
+- `apply_patch`, core memory blocks, git/worktree tools, plan.md handoff.
+- Harness clear-tool knobs; compaction thrash guard; local fact supersession.
 
 ### v6.10.6 — Context headroom pack (July 2026)
 

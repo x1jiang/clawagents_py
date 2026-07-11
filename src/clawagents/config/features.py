@@ -24,6 +24,13 @@ _FEATURE_DEFAULTS: dict[str, str] = {
     "micro_compact":        "1",   # Clear old tool result content aggressively
     "file_snapshots":       "1",   # Snapshot files before write tools modify them
     "cache_tracking":       "0",   # Log prompt cache hit rates from API responses
+    "context_ledger":       "1",   # Commit-boundary restorable ledger
+    "core_memory":          "1",   # Editable core memory blocks
+    "shadow_checkpoints":   "1",   # Shadow-git turn checkpoints after mutating tools
+    "auto_verify":          "0",   # Auto lint/test after edits (can be slow)
+    "repo_map_inject":      "0",   # Inject ranked repo map into dynamic prompt
+    "memory_bank":          "1",   # Optional .clawagents/memory-bank/* briefs
+    "fact_store":           "1",   # Local superseding facts from lessons
 
     # Medium effort — opt-in
     "typed_memory":         "0",   # Parse frontmatter in memory files for type-based recall

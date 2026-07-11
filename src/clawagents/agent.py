@@ -788,6 +788,27 @@ def create_claw_agent(
 
     registry.register(create_retrieve_tool_result_tool(workspace=os.getcwd()))
 
+    from clawagents.tools.context_tools import create_context_tools
+
+    for t in create_context_tools(workspace=os.getcwd()):
+        registry.register(t)
+
+    from clawagents.tools.git_tools import create_git_tools
+
+    for t in create_git_tools(workspace=os.getcwd()):
+        registry.register(t)
+
+    from clawagents.tools.plan_mode import create_plan_mode_tools
+
+    for t in create_plan_mode_tools():
+        if registry.get(t.name) is None:
+            registry.register(t)
+
+    from clawagents.tools.worktree_tools import create_worktree_tools
+
+    for t in create_worktree_tools(workspace=os.getcwd()):
+        registry.register(t)
+
     # ── Auto-discover memory from default locations ────────────────────
     memory_paths = _to_list(memory) if memory is not None else _auto_discover_memory()
     composed_before_llm = _compose_before_llm(

@@ -434,11 +434,14 @@ async def _walk_dir(sb: Any, directory: str, glob_filter: str, recursive: bool):
 
 def create_filesystem_tools(backend: Any) -> List[Tool]:
     """Create filesystem tools backed by a specific SandboxBackend."""
+    from clawagents.tools.apply_patch import ApplyPatchTool
+
     return [
         LsTool(backend),
         ReadFileTool(backend),
         WriteFileTool(backend),
         EditFileTool(backend),
+        ApplyPatchTool(backend),
         GrepTool(backend),
         GlobTool(backend),
     ]
