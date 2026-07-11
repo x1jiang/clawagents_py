@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.10.1-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.10.2-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -26,9 +26,14 @@ pip install clawagents[anthropic]   # + Anthropic Claude support
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 6.10.1** — Provider / MCP / session patch (July 2026): Gemini tool-schema `items`, GPT-5.5/5.6 Chat Completions + tools compat, MCP event-loop reconnect, orphan tool-message sanitization, `skills_exclude`, and streaming telemetry. See [Changelog](#changelog).
+> **Version 6.10.2** — Gemini turn-hygiene patch (July 2026): coalesce parallel tool responses and repair bare function_call turns so Gemini no longer returns `400 … function call turn comes immediately after a user turn`. Builds on 6.10.1 provider/MCP/session fixes. See [Changelog](#changelog).
 
-### New In v6.10.1
+### New In v6.10.2
+
+- **Gemini conversation hygiene** — merge consecutive `user`/`model` turns (parallel tool results); insert synthetic `function_response` when a call was skipped; drop leading orphan model turns. Fixes `INVALID_ARGUMENT` about function-call turn ordering.
+- **Skipped-tool transcript** — `before_tool` / RunContext rejects now close the native assistant+tool pair instead of appending a bare `[Tool Skipped]` user message.
+
+### Previously In v6.10.1
 
 - **Gemini / OpenAI tool schemas** — array parameters always declare `items.type` (fixes Gemini `400 INVALID_ARGUMENT` on tools).
 - **GPT-5.5 / GPT-5.6 + tools** — Chat Completions sets `reasoning_effort=none` when tools are attached (avoids HTTP 400 until Responses API).
@@ -1537,6 +1542,12 @@ parity sweep.
 ---
 
 ## Changelog
+
+### v6.10.2 — Gemini turn hygiene (July 2026)
+
+- Coalesce consecutive Gemini `user`/`model` turns (parallel tool results were each a separate `user` turn and broke alternation).
+- Synthesize missing `function_response` parts when a function_call was skipped or never answered.
+- Close native tool pairs on `before_tool` / approval rejection so session replay stays valid.
 
 ### v6.10.1 — Provider, MCP, and session patch (July 2026)
 

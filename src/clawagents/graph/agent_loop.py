@@ -2464,7 +2464,31 @@ async def run_agent_graph(
                         hook_approved = False
                     if not hook_approved:
                         emit("tool_skipped", {"name": call.tool_name, "reason": hook_reason})
-                        messages.append(LLMMessage(role="user", content=f"[Tool Skipped] {call.tool_name} was not approved: {hook_reason}"))
+                        # Close the native tool pair so Gemini sees
+                        # model(function_call) → user(function_response), not a bare
+                        # "[Tool Skipped]" user turn that breaks turn alternation.
+                        if use_native_tools and native_tc and native_tc.tool_call_id:
+                            messages.append(LLMMessage(
+                                role="assistant",
+                                content=response.content or "",
+                                tool_calls_meta=[{
+                                    "id": native_tc.tool_call_id,
+                                    "name": call.tool_name,
+                                    "args": call.args,
+                                }],
+                                gemini_parts=getattr(response, "gemini_parts", None),
+                                thinking=_thinking_content,
+                            ))
+                            messages.append(LLMMessage(
+                                role="tool",
+                                content=f"[Tool Skipped] {call.tool_name} was not approved: {hook_reason}",
+                                tool_call_id=native_tc.tool_call_id,
+                            ))
+                        else:
+                            messages.append(LLMMessage(
+                                role="user",
+                                content=f"[Tool Skipped] {call.tool_name} was not approved: {hook_reason}",
+                            ))
                         continue
 
                 loop_tracker.record(call.tool_name, call.args)
@@ -2479,10 +2503,28 @@ async def run_agent_graph(
                     rec = run_context.get_approval(native_tc_id, tool_name=call.tool_name)
                     reason = (rec.reason if rec else None) or "rejected via RunContext"
                     emit("tool_skipped", {"name": call.tool_name, "reason": reason})
-                    messages.append(LLMMessage(
-                        role="user",
-                        content=f"[Tool Skipped] {call.tool_name} was rejected: {reason}",
-                    ))
+                    if use_native_tools and native_tc and native_tc.tool_call_id:
+                        messages.append(LLMMessage(
+                            role="assistant",
+                            content=response.content or "",
+                            tool_calls_meta=[{
+                                "id": native_tc.tool_call_id,
+                                "name": call.tool_name,
+                                "args": call.args,
+                            }],
+                            gemini_parts=getattr(response, "gemini_parts", None),
+                            thinking=_thinking_content,
+                        ))
+                        messages.append(LLMMessage(
+                            role="tool",
+                            content=f"[Tool Skipped] {call.tool_name} was rejected: {reason}",
+                            tool_call_id=native_tc.tool_call_id,
+                        ))
+                    else:
+                        messages.append(LLMMessage(
+                            role="user",
+                            content=f"[Tool Skipped] {call.tool_name} was rejected: {reason}",
+                        ))
                     continue
                 if approval_state is None:
                     emit("approval_required", {"name": call.tool_name, "id": native_tc_id})

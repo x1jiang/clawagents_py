@@ -846,6 +846,81 @@ def _serialize_gemini_parts(parts: Any) -> list[dict[str, Any]] | None:
     return serialized if serialized else None
 
 
+def _part_has_function_call(part: dict[str, Any]) -> bool:
+    return isinstance(part, dict) and ("function_call" in part or "functionCall" in part)
+
+
+def _part_has_function_response(part: dict[str, Any]) -> bool:
+    return isinstance(part, dict) and (
+        "function_response" in part or "functionResponse" in part
+    )
+
+
+def _ensure_gemini_function_pairs(
+    contents: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Insert synthetic function_response turns when a model function_call is bare.
+
+    Gemini requires each function_call turn to be followed by matching
+    function_response parts before any other user text / next model turn.
+    """
+    out: list[dict[str, Any]] = []
+    i = 0
+    while i < len(contents):
+        turn = contents[i]
+        out.append(turn)
+        parts = turn.get("parts") or []
+        if turn.get("role") == "model" and any(_part_has_function_call(p) for p in parts):
+            fcs = [p for p in parts if _part_has_function_call(p)]
+            nxt = contents[i + 1] if i + 1 < len(contents) else None
+            has_fr = False
+            if nxt and nxt.get("role") == "user":
+                has_fr = any(_part_has_function_response(p) for p in (nxt.get("parts") or []))
+            if fcs and not has_fr:
+                synth: list[dict[str, Any]] = []
+                for p in fcs:
+                    fc = p.get("function_call") or p.get("functionCall") or {}
+                    name = str(fc.get("name") or "unknown")
+                    synth.append(
+                        {
+                            "function_response": {
+                                "name": name,
+                                "response": {
+                                    "result": "[tool call cancelled or skipped before a result was recorded]",
+                                },
+                            }
+                        }
+                    )
+                out.append({"role": "user", "parts": synth})
+        i += 1
+    return out
+
+
+def _coalesce_gemini_contents(
+    contents: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Merge consecutive same-role turns so Gemini sees strict user/model alternation.
+
+    Parallel tool results are each stored as role=tool → mapped to role=user. Without
+    merging, Gemini sees ``user,user,...`` and then rejects the next model
+    ``function_call`` with INVALID_ARGUMENT about turn ordering.
+    """
+    merged: list[dict[str, Any]] = []
+    for turn in contents:
+        role = turn.get("role")
+        parts = list(turn.get("parts") or [])
+        if role not in ("user", "model") or not parts:
+            continue
+        if merged and merged[-1].get("role") == role:
+            merged[-1]["parts"].extend(parts)
+        else:
+            merged.append({"role": role, "parts": parts})
+    # History must start with a user turn.
+    while merged and merged[0].get("role") == "model":
+        merged.pop(0)
+    return merged
+
+
 class GeminiProvider(LLMProvider):
     name = "gemini"
 
@@ -923,7 +998,13 @@ class GeminiProvider(LLMProvider):
                                 except (binascii.Error, ValueError):
                                     continue
                                 parts2.append({"inline_data": {"mime_type": mime, "data": decoded}})
-                    user_contents.append({"role": role_name, "parts": parts2})
+                    if parts2:
+                        user_contents.append({"role": role_name, "parts": parts2})
+
+        # Strict turn hygiene for Gemini (parallel tools / skipped tools / session replay).
+        user_contents = _coalesce_gemini_contents(
+            _ensure_gemini_function_pairs(user_contents)
+        )
 
         # ``__CACHE_BOUNDARY__`` is an Anthropic-only prompt-cache hint; strip
         # it so Gemini never receives the stray internal marker.
