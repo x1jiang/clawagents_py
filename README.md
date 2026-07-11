@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.10.4-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.10.5-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -26,9 +26,15 @@ pip install clawagents[anthropic]   # + Anthropic Claude support
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 6.10.4** — Gemini 3 tool-call id + thought_signature fix (July 2026): echo `function_call.id` on `function_response`, preserve signatures across session replay, rebuild a strict FC→FR transcript. Fixes lingering `400 … function response turn comes immediately after a function call turn`.
+> **Version 6.10.5** — Gemini history 400 recovery (July 2026): flatten poisoned FC/FR turns and retry; keep thought_signature only on the first parallel FC; close native tool pairs when external hooks block a call.
 
-### New In v6.10.4
+### New In v6.10.5
+
+- **Gemini 400 recovery** — on FR/FC / thought_signature `INVALID_ARGUMENT`, retry once with tool turns flattened to plain text.
+- **Signature fidelity** — do not copy `thought_signature` onto sibling parallel FCs.
+- **External hook skip** — close assistant+tool pair instead of a bare `[Tool Skipped]` user turn.
+
+### Previously In v6.10.4
 
 - **Gemini FC/FR ids** — use API `function_call.id` (or a stable generated id stamped into both FC and FR).
 - **thought_signature** — base64 round-trip for session JSON; always prefer preserved `gemini_parts` when replaying tool turns.
@@ -1555,6 +1561,12 @@ parity sweep.
 
 ## Changelog
 
+### v6.10.5 — Gemini history 400 recovery (July 2026)
+
+- Retry once with flattened tool history on FR/FC / thought_signature 400s.
+- Keep thought_signature only on the first parallel function_call part.
+- Close native tool pairs when an external hook blocks a call.
+
 ### v6.10.4 — Gemini 3 id + thought_signature (July 2026)
 
 - Echo `function_call.id` on matching `function_response`.
@@ -2163,7 +2175,7 @@ Also:
 - **New public exports** — `ErrorClass`, `ErrorDescriptor`, `classify_error`, `get_recovery_recipe`, `SessionWriter`, `SessionReader`, `list_sessions`, `HooksConfig`, `ExternalHookRunner`, `load_hooks_config`.
 
 ### v5.27.3 — Gemini Signature Regression Coverage
-- **Gemini signature regression test** — Added targeted tests for `_serialize_gemini_parts` to ensure `thought_signature` is propagated to sibling parallel `function_call` parts.
+- **Gemini signature regression test** — Added targeted tests for `_serialize_gemini_parts` to ensure `thought_signature` is preserved on the first parallel `function_call` part (not copied onto siblings).
 - **Parallel integration test reliability** — Fixed integration test fixture validation mismatch so large-output parallel execution is validated correctly.
 
 ### v5.27.2 — Gemini 3 Thought Signature Fix

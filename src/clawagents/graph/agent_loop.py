@@ -2438,7 +2438,28 @@ async def run_agent_graph(
                         ext_allowed, ext_args = await ext_hook_runner.pre_tool_use(call.tool_name, call.args)
                         if not ext_allowed:
                             emit("tool_skipped", {"name": call.tool_name, "reason": "blocked by external hook"})
-                            messages.append(LLMMessage(role="user", content=f"[Tool Skipped] {call.tool_name} was blocked by external hook."))
+                            if use_native_tools and native_tc and native_tc.tool_call_id:
+                                messages.append(LLMMessage(
+                                    role="assistant",
+                                    content=response.content or "",
+                                    tool_calls_meta=[{
+                                        "id": native_tc.tool_call_id,
+                                        "name": call.tool_name,
+                                        "args": call.args,
+                                    }],
+                                    gemini_parts=getattr(response, "gemini_parts", None),
+                                    thinking=_thinking_content,
+                                ))
+                                messages.append(LLMMessage(
+                                    role="tool",
+                                    content=f"[Tool Skipped] {call.tool_name} was blocked by external hook.",
+                                    tool_call_id=native_tc.tool_call_id,
+                                ))
+                            else:
+                                messages.append(LLMMessage(
+                                    role="user",
+                                    content=f"[Tool Skipped] {call.tool_name} was blocked by external hook.",
+                                ))
                             continue
                         call = ParsedToolCall(tool_name=call.tool_name, args=ext_args)
                     except Exception as hook_err:

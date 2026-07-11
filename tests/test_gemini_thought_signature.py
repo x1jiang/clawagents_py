@@ -38,8 +38,9 @@ def test_propagates_thought_signature_to_parallel_function_calls():
     assert serialized is not None
     assert serialized[0]["function_call"]["name"] == "get_university_detail"
     assert serialized[1]["function_call"]["name"] == "get_program_detail"
+    # Gemini 3: signature only on the first parallel FC — do not invent on siblings.
     assert serialized[0]["thought_signature"] == "sig-abc"
-    assert serialized[1]["thought_signature"] == "sig-abc"
+    assert "thought_signature" not in serialized[1]
 
 
 def test_does_not_invent_thought_signature_when_none_present():

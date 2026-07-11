@@ -68,3 +68,20 @@ def test_ensure_pairs_inserts_synthetic_fr():
     assert out[-1]["role"] == "user"
     assert "function_response" in out[-1]["parts"][0]
     assert out[-1]["parts"][0]["function_response"]["id"] == "x1"
+
+
+def test_flatten_tool_history_drops_fc_fr_structure():
+    from clawagents.providers.llm import _flatten_gemini_tool_history
+
+    raw = [
+        {"role": "user", "parts": [{"text": "hi"}]},
+        {"role": "model", "parts": [{"function_call": {"name": "ls", "args": {}}}]},
+        {"role": "user", "parts": [{"function_response": {"name": "ls", "response": {"result": "ok"}}}]},
+        {"role": "user", "parts": [{"text": "how many?"}]},
+    ]
+    flat = _flatten_gemini_tool_history(raw)
+    assert all(
+        not any("function_call" in p or "function_response" in p for p in t["parts"])
+        for t in flat
+    )
+    assert flat[0]["role"] == "user"

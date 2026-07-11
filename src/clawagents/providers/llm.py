@@ -823,8 +823,12 @@ def _serialize_gemini_parts(parts: Any) -> list[dict[str, Any]] | None:
     serialized = []
     for p in parts:
         d: dict[str, Any] = {}
-        if getattr(p, "text", None) is not None:
-            d["text"] = p.text
+        fc = getattr(p, "function_call", None)
+        text = getattr(p, "text", None)
+        # Skip empty text on function_call parts — empty-only text can make
+        # history curators drop the model turn, leaving an orphan FR → 400.
+        if text is not None and not (fc and text == ""):
+            d["text"] = text
         if getattr(p, "thought", None):
             d["thought"] = True
         sig = getattr(p, "thought_signature", None)
@@ -835,7 +839,6 @@ def _serialize_gemini_parts(parts: Any) -> list[dict[str, Any]] | None:
                 d["_thought_signature_b64"] = True
             else:
                 d["thought_signature"] = sig
-        fc = getattr(p, "function_call", None)
         if fc:
             fc_dict: dict[str, Any] = {
                 "name": fc.name,
@@ -845,26 +848,11 @@ def _serialize_gemini_parts(parts: Any) -> list[dict[str, Any]] | None:
             if fc_id:
                 fc_dict["id"] = str(fc_id)
             d["function_call"] = fc_dict
-            if sig is not None and "thought_signature" not in d:
-                if isinstance(sig, (bytes, bytearray)):
-                    d["thought_signature"] = base64.b64encode(bytes(sig)).decode("ascii")
-                    d["_thought_signature_b64"] = True
-                else:
-                    d["thought_signature"] = sig
         if d:
             serialized.append(d)
 
-    # Propagate thought_signature to all function_call parts (Gemini 3 requirement)
-    if serialized:
-        first_sig = next((d["thought_signature"] for d in serialized if "thought_signature" in d), None)
-        first_b64 = next((d.get("_thought_signature_b64") for d in serialized if "thought_signature" in d), None)
-        if first_sig:
-            for d in serialized:
-                if "function_call" in d and "thought_signature" not in d:
-                    d["thought_signature"] = first_sig
-                    if first_b64:
-                        d["_thought_signature_b64"] = True
-
+    # Gemini 3 parallel calls: signature lives only on the first FC part.
+    # Do not copy onto siblings — replay parts as received.
     return serialized if serialized else None
 
 
@@ -1093,6 +1081,58 @@ def _sanitize_gemini_contents(contents: list[dict[str, Any]]) -> list[dict[str, 
     return out
 
 
+def _is_gemini_history_400(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return (
+        "400" in msg
+        or "invalid_argument" in msg
+        or "invalid argument" in msg
+    ) and (
+        "function response" in msg
+        or "function call" in msg
+        or "thought_signature" in msg
+        or "thought signature" in msg
+    )
+
+
+def _flatten_gemini_tool_history(
+    contents: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Convert FC/FR turns into plain text so a poisoned transcript can recover.
+
+    Used as a one-shot retry when Gemini rejects tool-turn ordering / signatures.
+    """
+    flat: list[dict[str, Any]] = []
+    for turn in contents:
+        role = turn.get("role")
+        parts = list(turn.get("parts") or [])
+        texts: list[str] = []
+        for p in parts:
+            if not isinstance(p, dict):
+                continue
+            if "text" in p and p["text"]:
+                texts.append(str(p["text"]))
+            elif _part_has_function_call(p):
+                fc = p.get("function_call") or p.get("functionCall") or {}
+                texts.append(f"[called {fc.get('name', 'tool')}({fc.get('args') or {}})]")
+            elif _part_has_function_response(p):
+                fr = p.get("function_response") or p.get("functionResponse") or {}
+                resp = fr.get("response")
+                texts.append(f"[result {fr.get('name', 'tool')}: {resp}]")
+        if not texts:
+            continue
+        # Map model→model, user/FR→user
+        out_role = "model" if role == "model" else "user"
+        blob = "\n".join(texts)
+        if flat and flat[-1]["role"] == out_role:
+            flat[-1]["parts"][0]["text"] += "\n" + blob
+        else:
+            flat.append({"role": out_role, "parts": [{"text": blob}]})
+    while flat and flat[0]["role"] == "model":
+        flat.pop(0)
+    return flat
+
+
 class GeminiProvider(LLMProvider):
     name = "gemini"
 
@@ -1191,15 +1231,30 @@ class GeminiProvider(LLMProvider):
             config_opts["tools"] = _to_gemini_tools(tools)
         gemini_config = types.GenerateContentConfig(**config_opts)
 
-        if not on_chunk:
-            return await _with_retry(
-                "gemini",
-                lambda: self._request_once(user_contents, gemini_config),
-                policy=getattr(self, "retry_policy", None),
+        async def _call(contents: list[dict[str, Any]]) -> LLMResponse:
+            if not on_chunk:
+                return await _with_retry(
+                    "gemini",
+                    lambda: self._request_once(contents, gemini_config),
+                    policy=getattr(self, "retry_policy", None),
+                )
+            return await self._stream_with_retry(
+                contents, gemini_config, on_chunk, cancel_event,
             )
-        return await self._stream_with_retry(
-            user_contents, gemini_config, on_chunk, cancel_event,
-        )
+
+        try:
+            return await _call(user_contents)
+        except Exception as exc:
+            if not _is_gemini_history_400(exc):
+                raise
+            flat = _flatten_gemini_tool_history(user_contents)
+            if flat == user_contents or not flat:
+                raise
+            logger.warning(
+                "  [gemini] history 400 (%s) — retrying with flattened tool turns",
+                type(exc).__name__,
+            )
+            return await _call(flat)
 
     async def _request_once(
         self,
