@@ -5,10 +5,11 @@ from __future__ import annotations
 from clawagents.providers.llm import (
     _coalesce_gemini_contents,
     _ensure_gemini_function_pairs,
+    _sanitize_gemini_contents,
 )
 
 
-def test_coalesce_merges_parallel_tool_responses():
+def test_coalesce_merges_parallel_tool_responses_only():
     raw = [
         {"role": "user", "parts": [{"text": "hi"}]},
         {
@@ -20,24 +21,24 @@ def test_coalesce_merges_parallel_tool_responses():
         },
         {"role": "user", "parts": [{"function_response": {"name": "a", "response": {"result": "1"}}}]},
         {"role": "user", "parts": [{"function_response": {"name": "b", "response": {"result": "2"}}}]},
-        {"role": "user", "parts": [{"text": "thanks"}]},
     ]
-    out = _coalesce_gemini_contents(raw)
+    out = _sanitize_gemini_contents(raw)
     assert [t["role"] for t in out] == ["user", "model", "user"]
-    assert len(out[2]["parts"]) == 3  # two FRs + thanks text
+    assert len(out[2]["parts"]) == 2
+    assert all("function_response" in p for p in out[2]["parts"])
 
 
-def test_ensure_pairs_inserts_synthetic_fr_before_plain_user():
+def test_fr_not_mixed_with_following_user_text():
+    """Gemini rejects function_response+plain text in the same user turn."""
     raw = [
         {"role": "user", "parts": [{"text": "hi"}]},
         {"role": "model", "parts": [{"function_call": {"name": "ask_user", "args": {"question": "?"}}}]},
         {"role": "user", "parts": [{"text": "hi again"}]},
     ]
-    paired = _ensure_gemini_function_pairs(raw)
-    out = _coalesce_gemini_contents(paired)
-    assert [t["role"] for t in out] == ["user", "model", "user"]
-    assert any("function_response" in p for p in out[2]["parts"])
-    assert any(p.get("text") == "hi again" for p in out[2]["parts"])
+    out = _sanitize_gemini_contents(raw)
+    assert [t["role"] for t in out] == ["user", "model", "user", "model", "user"]
+    assert all("function_response" in p for p in out[2]["parts"])
+    assert out[4]["parts"] == [{"text": "hi again"}]
 
 
 def test_coalesce_drops_leading_model():
@@ -49,13 +50,22 @@ def test_coalesce_drops_leading_model():
     assert out == [{"role": "user", "parts": [{"text": "hi"}]}]
 
 
-def test_skipped_tool_plus_new_user_alternates():
-    """Regression: Tool Skipped as bare user then new 'hi' must not leave user,user,user."""
+def test_orphan_fr_after_text_model_dropped():
     raw = [
         {"role": "user", "parts": [{"text": "hi"}]},
-        {"role": "user", "parts": [{"text": "[Tool Skipped] ask_user was not approved"}]},
-        {"role": "user", "parts": [{"text": "hi"}]},
+        {"role": "model", "parts": [{"text": "thinking only"}]},
+        {"role": "user", "parts": [{"function_response": {"name": "x", "response": {"result": "1"}}}]},
     ]
-    out = _coalesce_gemini_contents(raw)
-    assert [t["role"] for t in out] == ["user"]
-    assert len(out[0]["parts"]) == 3
+    out = _sanitize_gemini_contents(raw)
+    assert [t["role"] for t in out] == ["user", "model"]
+    assert out[1]["parts"] == [{"text": "thinking only"}]
+
+
+def test_ensure_pairs_inserts_synthetic_fr():
+    raw = [
+        {"role": "user", "parts": [{"text": "hi"}]},
+        {"role": "model", "parts": [{"function_call": {"name": "ask_user", "args": {}}}]},
+    ]
+    paired = _ensure_gemini_function_pairs(raw)
+    assert paired[-1]["role"] == "user"
+    assert "function_response" in paired[-1]["parts"][0]

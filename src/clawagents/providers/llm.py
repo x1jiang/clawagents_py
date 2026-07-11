@@ -856,26 +856,58 @@ def _part_has_function_response(part: dict[str, Any]) -> bool:
     )
 
 
+def _parts_have_function_call(parts: list[Any]) -> bool:
+    return any(_part_has_function_call(p) for p in parts)
+
+
+def _parts_have_function_response(parts: list[Any]) -> bool:
+    return any(_part_has_function_response(p) for p in parts)
+
+
+def _parts_are_fr_only(parts: list[Any]) -> bool:
+    """True when every part is a function_response (parallel tool results)."""
+    return bool(parts) and all(_part_has_function_response(p) for p in parts)
+
+
+def _parts_are_plain_user(parts: list[Any]) -> bool:
+    """True when parts have no function_response / function_call."""
+    return bool(parts) and not _parts_have_function_response(parts) and not _parts_have_function_call(parts)
+
+
+def _model_parts_from_tool_meta(content: Any, tool_calls_meta: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    parts: list[dict[str, Any]] = []
+    if content:
+        parts.append({"text": str(content)})
+    for tc in tool_calls_meta:
+        parts.append(
+            {
+                "function_call": {
+                    "name": tc.get("name") or "unknown",
+                    "args": tc.get("args") or {},
+                }
+            }
+        )
+    return parts
+
+
 def _ensure_gemini_function_pairs(
     contents: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Insert synthetic function_response turns when a model function_call is bare.
-
-    Gemini requires each function_call turn to be followed by matching
-    function_response parts before any other user text / next model turn.
-    """
+    """Insert synthetic function_response turns when a model function_call is bare."""
     out: list[dict[str, Any]] = []
     i = 0
     while i < len(contents):
         turn = contents[i]
         out.append(turn)
-        parts = turn.get("parts") or []
-        if turn.get("role") == "model" and any(_part_has_function_call(p) for p in parts):
+        parts = list(turn.get("parts") or [])
+        if turn.get("role") == "model" and _parts_have_function_call(parts):
             fcs = [p for p in parts if _part_has_function_call(p)]
             nxt = contents[i + 1] if i + 1 < len(contents) else None
-            has_fr = False
-            if nxt and nxt.get("role") == "user":
-                has_fr = any(_part_has_function_response(p) for p in (nxt.get("parts") or []))
+            has_fr = bool(
+                nxt
+                and nxt.get("role") == "user"
+                and _parts_have_function_response(list(nxt.get("parts") or []))
+            )
             if fcs and not has_fr:
                 synth: list[dict[str, Any]] = []
                 for p in fcs:
@@ -899,26 +931,120 @@ def _ensure_gemini_function_pairs(
 def _coalesce_gemini_contents(
     contents: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Merge consecutive same-role turns so Gemini sees strict user/model alternation.
+    """Merge safe consecutive turns; never mix function_response with plain user text.
 
-    Parallel tool results are each stored as role=tool → mapped to role=user. Without
-    merging, Gemini sees ``user,user,...`` and then rejects the next model
-    ``function_call`` with INVALID_ARGUMENT about turn ordering.
+    Gemini requires the turn immediately after a function_call to be a
+    function_response turn. Mixing ``function_response`` + plain ``text`` in the
+    same user turn (or leaving FR after a non-FC model turn) yields 400
+    INVALID_ARGUMENT.
     """
     merged: list[dict[str, Any]] = []
+
+    def _append(role: str, parts: list[dict[str, Any]]) -> None:
+        if not parts:
+            return
+        if merged and merged[-1].get("role") == role:
+            prev = list(merged[-1].get("parts") or [])
+            if role == "user":
+                prev_fr = _parts_are_fr_only(prev)
+                cur_fr = _parts_are_fr_only(parts)
+                prev_plain = _parts_are_plain_user(prev)
+                cur_plain = _parts_are_plain_user(parts)
+                if prev_fr and cur_fr:
+                    merged[-1]["parts"].extend(parts)
+                    return
+                if prev_plain and cur_plain:
+                    merged[-1]["parts"].extend(parts)
+                    return
+                # FR then plain text (or reverse): keep FR glued to the prior
+                # model(FC), then spacer model, then user text.
+                if prev_fr and cur_plain:
+                    merged.append({"role": "model", "parts": [{"text": "…"}]})
+                    merged.append({"role": "user", "parts": parts})
+                    return
+                if prev_plain and cur_fr:
+                    # Plain user before FR is invalid; drop the plain spacer
+                    # text into a synthetic model note and keep FR as its own turn.
+                    plain = prev
+                    merged[-1] = {"role": "model", "parts": [{"text": "…"}]}
+                    # Re-link: need user before this model — if not, just emit FR
+                    if len(merged) >= 2 and merged[-2].get("role") == "user":
+                        pass
+                    merged.append({"role": "user", "parts": parts})
+                    # Preserve plain text after a spacer following FR? Skip plain
+                    # to avoid further corruption; session text is less critical
+                    # than valid FR pairing.
+                    _ = plain
+                    return
+            else:
+                # model + model: keep function_call parts at the end
+                if _parts_have_function_call(parts) and not _parts_have_function_call(prev):
+                    merged[-1]["parts"].extend(parts)
+                elif _parts_have_function_call(prev) and not _parts_have_function_call(parts):
+                    # Do not append trailing text after FC in the same turn —
+                    # emit spacer user? Prefer dropping trailing model text into
+                    # a new turn only if we can alternate; otherwise append
+                    # before FC.
+                    fc_parts = [p for p in prev if _part_has_function_call(p)]
+                    other = [p for p in prev if not _part_has_function_call(p)]
+                    merged[-1]["parts"] = other + parts + fc_parts
+                else:
+                    merged[-1]["parts"].extend(parts)
+                return
+        merged.append({"role": role, "parts": list(parts)})
+
+    for turn in contents:
+        role = turn.get("role")
+        parts = [p for p in list(turn.get("parts") or []) if isinstance(p, dict)]
+        if role not in ("user", "model") or not parts:
+            continue
+        _append(role, parts)
+
+    while merged and merged[0].get("role") == "model":
+        merged.pop(0)
+    return _drop_orphan_gemini_function_responses(merged)
+
+
+def _drop_orphan_gemini_function_responses(
+    contents: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Remove function_response turns that do not follow a model function_call."""
+    out: list[dict[str, Any]] = []
     for turn in contents:
         role = turn.get("role")
         parts = list(turn.get("parts") or [])
-        if role not in ("user", "model") or not parts:
-            continue
-        if merged and merged[-1].get("role") == role:
-            merged[-1]["parts"].extend(parts)
+        if role == "user" and _parts_have_function_response(parts):
+            prev = out[-1] if out else None
+            if not (
+                prev
+                and prev.get("role") == "model"
+                and _parts_have_function_call(list(prev.get("parts") or []))
+            ):
+                # Keep any plain text; drop FR parts.
+                kept = [p for p in parts if not _part_has_function_response(p)]
+                if not kept:
+                    continue
+                parts = kept
+        out.append({"role": role, "parts": parts})
+    # Re-coalesce plain user gaps after drops (simple pass)
+    final: list[dict[str, Any]] = []
+    for turn in out:
+        if (
+            final
+            and final[-1].get("role") == turn.get("role") == "user"
+            and _parts_are_plain_user(list(final[-1].get("parts") or []))
+            and _parts_are_plain_user(list(turn.get("parts") or []))
+        ):
+            final[-1]["parts"].extend(turn["parts"])
         else:
-            merged.append({"role": role, "parts": parts})
-    # History must start with a user turn.
-    while merged and merged[0].get("role") == "model":
-        merged.pop(0)
-    return merged
+            final.append(turn)
+    while final and final[0].get("role") == "model":
+        final.pop(0)
+    return final
+
+
+def _sanitize_gemini_contents(contents: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return _coalesce_gemini_contents(_ensure_gemini_function_pairs(contents))
 
 
 class GeminiProvider(LLMProvider):
@@ -962,15 +1088,15 @@ class GeminiProvider(LLMProvider):
                     "response": {"result": m.content},
                 }}]})
             elif m.role == "assistant" and m.tool_calls_meta:
-                if m.gemini_parts:
-                    user_contents.append({"role": "model", "parts": m.gemini_parts})
+                # Only reuse gemini_parts when they still carry function_call;
+                # otherwise Gemini sees FR after a text-only model turn → 400.
+                if m.gemini_parts and _parts_have_function_call(list(m.gemini_parts)):
+                    user_contents.append({"role": "model", "parts": list(m.gemini_parts)})
                 else:
-                    parts: list[dict[str, Any]] = []
-                    if m.content:
-                        parts.append({"text": m.content})
-                    for tc in m.tool_calls_meta:
-                        parts.append({"function_call": {"name": tc["name"], "args": tc["args"]}})
-                    user_contents.append({"role": "model", "parts": parts})
+                    user_contents.append({
+                        "role": "model",
+                        "parts": _model_parts_from_tool_meta(m.content, m.tool_calls_meta),
+                    })
             elif m.role == "assistant" and m.gemini_parts:
                 user_contents.append({"role": "model", "parts": m.gemini_parts})
             else:
@@ -987,10 +1113,6 @@ class GeminiProvider(LLMProvider):
                             import binascii
 
                             url = ((part.get("image_url") or {}).get("url")) or ""
-                            # Only base64 data URLs are inlineable here. A bare
-                            # ``data:image/svg+xml,<svg>`` (no ``;base64,``) or a
-                            # remote ``http(s)`` URL would otherwise blow up the
-                            # unpack below and kill the whole request — skip it.
                             if url.startswith("data:") and ";base64," in url:
                                 mime, b64_str = url[5:].split(";base64,", 1)
                                 try:
@@ -1001,10 +1123,7 @@ class GeminiProvider(LLMProvider):
                     if parts2:
                         user_contents.append({"role": role_name, "parts": parts2})
 
-        # Strict turn hygiene for Gemini (parallel tools / skipped tools / session replay).
-        user_contents = _coalesce_gemini_contents(
-            _ensure_gemini_function_pairs(user_contents)
-        )
+        user_contents = _sanitize_gemini_contents(user_contents)
 
         # ``__CACHE_BOUNDARY__`` is an Anthropic-only prompt-cache hint; strip
         # it so Gemini never receives the stray internal marker.

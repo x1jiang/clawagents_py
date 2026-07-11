@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.10.2-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.10.3-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -26,9 +26,15 @@ pip install clawagents[anthropic]   # + Anthropic Claude support
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 6.10.2** — Gemini turn-hygiene patch (July 2026): coalesce parallel tool responses and repair bare function_call turns so Gemini no longer returns `400 … function call turn comes immediately after a user turn`. Builds on 6.10.1 provider/MCP/session fixes. See [Changelog](#changelog).
+> **Version 6.10.3** — Gemini turn-hygiene fix (July 2026): never mix `function_response` with plain user text; drop orphan FRs; rebuild model turns when `gemini_parts` lost the function_call. Fixes the follow-on `400 … function response turn comes immediately after a function call turn`.
 
-### New In v6.10.2
+### New In v6.10.3
+
+- **Gemini FR purity** — keep `function_response` turns FR-only (do not coalesce with following user text); insert a spacer model turn when needed.
+- **Orphan FR drop** — remove `function_response` that does not follow a model `function_call`.
+- **gemini_parts safety** — if stored parts lack `function_call` but `tool_calls_meta` exists, rebuild the model turn from meta.
+
+### Previously In v6.10.2
 
 - **Gemini conversation hygiene** — merge consecutive `user`/`model` turns (parallel tool results); insert synthetic `function_response` when a call was skipped; drop leading orphan model turns. Fixes `INVALID_ARGUMENT` about function-call turn ordering.
 - **Skipped-tool transcript** — `before_tool` / RunContext rejects now close the native assistant+tool pair instead of appending a bare `[Tool Skipped]` user message.
@@ -1542,6 +1548,11 @@ parity sweep.
 ---
 
 ## Changelog
+
+### v6.10.3 — Gemini FR/FC turn purity (July 2026)
+
+- Do not mix `function_response` with plain user text in one turn.
+- Drop orphan FRs; rebuild model turns when `gemini_parts` omit `function_call`.
 
 ### v6.10.2 — Gemini turn hygiene (July 2026)
 
