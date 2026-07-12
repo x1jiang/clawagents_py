@@ -112,7 +112,18 @@ async def _run_case(case: dict[str, Any], *, judge: bool) -> dict[str, Any]:
         try:
             from clawagents.trajectory.judge import judge_run
 
-            judgment = await judge_run(task=task, result=result_text, llm=agent.llm)
+            summary = {
+                "task_type": scored.get("task_type", "general"),
+                "outcome": getattr(state, "status", "unknown"),
+                "total_tool_calls": int(getattr(state, "tool_calls", 0) or 0),
+            }
+            judgment = await judge_run(
+                agent.llm,
+                task,
+                summary,
+                result_text,
+            )
+            judgment.pop("_llm_response", None)
             row["judge"] = judgment
         except Exception as exc:
             row["judge_error"] = str(exc)

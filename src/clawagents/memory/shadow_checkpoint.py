@@ -4,13 +4,24 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shutil
+import re
 import subprocess
 import time
 from pathlib import Path
 from typing import Any, Literal
 
 RestoreMode = Literal["files", "conversation", "both"]
+
+# A git object name we're willing to hand to `git reset/diff/rev-parse`.
+# Commit SHAs (full/abbrev) plus HEAD-relative forms. Anything starting with
+# '-' (which git would parse as an option) is rejected. Defence-in-depth:
+# these calls are already list-based (no shell) and the sha comes from our
+# own checkpoint index, so this only guards against a malformed/hostile id.
+_REF_RE = re.compile(r"^[0-9a-fA-F]{4,64}(?:[~^]\d*)*$|^HEAD(?:[~^]\d*)*$")
+
+
+def _valid_ref(ref: str) -> bool:
+    return bool(_REF_RE.match((ref or "").strip()))
 
 
 def _run(args: list[str], cwd: Path) -> tuple[int, str, str]:
@@ -308,6 +319,8 @@ def restore_checkpoint(
     sha = (sha or "").strip()
     if not sha:
         return {"ok": False, "error": "sha required"}
+    if not _valid_ref(sha):
+        return {"ok": False, "error": f"invalid checkpoint ref: {sha!r}", "sha": sha}
     mode_norm: RestoreMode = mode if mode in ("files", "conversation", "both") else "files"
     out: dict[str, Any] = {"ok": True, "sha": sha, "mode": mode_norm}
 
@@ -339,6 +352,8 @@ def checkpoint_diff(
     workspace: str | Path | None = None,
 ) -> dict[str, Any]:
     root = ensure_shadow_git(workspace)
+    if not _valid_ref(lhs) or (rhs is not None and not _valid_ref(rhs)):
+        return {"ok": False, "error": "invalid checkpoint ref", "files": []}
     args = ["git", "diff", "--name-status", lhs]
     if rhs:
         args.append(rhs)

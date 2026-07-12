@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.11.0-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.11.1-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -26,9 +26,15 @@ pip install clawagents[anthropic]   # + Anthropic Claude support
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 6.11.0** — Steal-list pack (July 2026): Cline-style shadow restore modes, always-on rules, custom modes + `--auto`, CodeAct, evals CLI, `require_approval`.
+> **Version 6.11.1** — CodeAct sandbox hardening + checkpoint ref validation (July 2026).
 
-### New In v6.11.0
+### New In v6.11.1
+
+- **CodeAct sandbox** — curated `__builtins__` + AST forbid-list so `open`/`__import__`/`eval` cannot bypass tool permissions.
+- **Checkpoint refs** — reject malformed SHAs before `git reset` / `diff`.
+- **Evals judge** — align `judge_run` call signature with the trajectory judge API.
+
+### Previously In v6.11.0
 
 - **Shadow-git restore modes** — `files` / `conversation` / `both` with turn binding + `checkpoint_diff`.
 - **Always-on rules** — `CLAUDE.md` + `.clawagents/rules/**` re-injected every LLM round.
@@ -1587,6 +1593,12 @@ parity sweep.
 ---
 
 ## Changelog
+
+### v6.11.1 — CodeAct sandbox + checkpoint ref hardening (July 2026)
+
+- Curated CodeAct builtins; block open/import/eval escapes that bypass permissions.
+- Validate checkpoint SHAs before git reset/diff.
+- Fix evals CLI `judge_run` argument order.
 
 ### v6.11.0 — Steal-list pack (July 2026)
 

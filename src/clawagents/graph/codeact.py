@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 import re
 import traceback
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 from clawagents.tools.registry import ToolRegistry, ToolResult
 
@@ -73,7 +73,7 @@ class _ToolsProxy:
                 try:
                     result = self._before_tool(name, args)
                     if isinstance(result, bool) and not result:
-                        return f"[blocked] denied"
+                        return "[blocked] denied"
                     if result is not None and hasattr(result, "allowed"):
                         if not result.allowed:
                             return f"[blocked] {getattr(result, 'reason', 'denied')}"
@@ -93,6 +93,43 @@ class _ToolsProxy:
         return _call
 
 
+# Names that grant filesystem, process, or arbitrary-code access outside the
+# tool layer. Referencing any of these fails the AST gate — the whole point of
+# CodeAct here is that side effects go through ``tools.<name>()`` so the
+# ``before_tool`` permission gate (Plan / read-only / auto-approve) still
+# applies. Without this, ``open(...)`` and ``__import__('os').system(...)``
+# would bypass every permission mode.
+_FORBIDDEN_NAMES = frozenset({
+    "__import__", "__builtins__", "__loader__", "__spec__",
+    "open", "eval", "exec", "compile", "input", "breakpoint",
+    "globals", "locals", "vars", "getattr", "setattr", "delattr",
+    "memoryview", "help", "exit", "quit", "license", "credits",
+})
+
+# The only builtins CodeAct snippets may use. exec() auto-injects the FULL
+# builtins when ``__builtins__`` is absent from globals, so we must set it
+# explicitly to this curated subset.
+_SAFE_BUILTIN_NAMES = (
+    "abs", "all", "any", "ascii", "bin", "bool", "bytearray", "bytes",
+    "chr", "dict", "divmod", "enumerate", "filter", "float", "format",
+    "frozenset", "hex", "int", "isinstance", "issubclass", "iter", "len",
+    "list", "map", "max", "min", "next", "oct", "ord", "pow", "print",
+    "range", "repr", "reversed", "round", "set", "slice", "sorted", "str",
+    "sum", "tuple", "type", "zip", "True", "False", "None",
+)
+
+
+def _safe_builtins() -> dict[str, Any]:
+    import builtins as _b
+
+    allowed: dict[str, Any] = {}
+    for name in _SAFE_BUILTIN_NAMES:
+        val = getattr(_b, name, None)
+        if val is not None or name == "None":
+            allowed[name] = val
+    return allowed
+
+
 def run_code_action(
     code: str,
     registry: ToolRegistry,
@@ -102,7 +139,14 @@ def run_code_action(
     run_async: Callable[[Any], Any],
     timeout_s: float = 30.0,
 ) -> dict[str, Any]:
-    """Execute a CodeAct Python snippet; return observation dict."""
+    """Execute a CodeAct Python snippet; return observation dict.
+
+    Side effects must go through ``tools.<name>()`` so the permission gate
+    applies. Raw filesystem / process / eval access is blocked at the AST
+    layer and by a curated ``__builtins__``; this is a best-effort barrier
+    (like smolagents' LocalPythonExecutor), not a hard security sandbox —
+    run untrusted models behind Docker/E2B for that.
+    """
     import io
     import contextlib
 
@@ -113,11 +157,15 @@ def run_code_action(
         run_async=run_async,
     )
     stdout = io.StringIO()
-    glb: dict[str, Any] = {"tools": tools, "done": False}
+    glb: dict[str, Any] = {
+        "tools": tools,
+        "done": False,
+        "__builtins__": _safe_builtins(),
+    }
     loc: dict[str, Any] = {}
     err: str | None = None
     try:
-        # Safety: reject imports and dunder access via AST gate
+        # Safety gate: no imports, no dunder access, no dangerous builtin names.
         tree = ast.parse(code)
         for node in ast.walk(tree):
             if isinstance(node, (ast.Import, ast.ImportFrom)):
@@ -125,6 +173,11 @@ def run_code_action(
             if isinstance(node, ast.Attribute) and isinstance(node.attr, str):
                 if node.attr.startswith("__"):
                     raise ValueError("dunder attribute access is not allowed")
+            if isinstance(node, ast.Name) and node.id in _FORBIDDEN_NAMES:
+                raise ValueError(
+                    f"name '{node.id}' is not allowed in CodeAct actions "
+                    "(use tools.<name>() so permissions apply)"
+                )
         with contextlib.redirect_stdout(stdout):
             exec(compile(tree, "<codeact>", "exec"), glb, loc)  # noqa: S102
     except Exception:
