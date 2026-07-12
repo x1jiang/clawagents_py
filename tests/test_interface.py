@@ -555,6 +555,7 @@ class TestLazyToolProvisioning:
         assert "ls" in tool_names
         assert "grep" in tool_names
         assert "web_fetch" in tool_names
+        assert "web_search" in tool_names
 
     def test_factory_lazy_tool_schemas_match_implementations(self, mock_provider_factory):
         from clawagents.agent import create_claw_agent

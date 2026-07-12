@@ -18,7 +18,7 @@ from typing import Any, Dict, Iterable, Optional
 
 from clawagents.tools.registry import ToolResult
 
-_DEFAULT_PERSIST_DENYLIST = {"read_file", "grep", "web_fetch", "explorer_read_source"}
+_DEFAULT_PERSIST_DENYLIST = {"read_file", "grep", "web_fetch", "web_search", "explorer_read_source"}
 
 
 class ResultCacheManager:

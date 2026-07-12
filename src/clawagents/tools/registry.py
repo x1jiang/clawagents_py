@@ -80,7 +80,7 @@ _NEVER_PARALLEL_TOOLS: frozenset[str] = frozenset({
 # excluded — they run sequentially via the snapshot path.
 _DEFAULT_PARALLEL_SAFE: frozenset[str] = frozenset({
     "read_file", "list_dir", "glob", "search_files", "grep",
-    "web_fetch", "shell",  # stateless reads
+    "web_fetch", "web_search", "shell",  # stateless reads
 })
 
 # Default declarations for path-scoped tools. Tools may override by setting

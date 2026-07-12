@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.11.1-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.11.2-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -26,9 +26,13 @@ pip install clawagents[anthropic]   # + Anthropic Claude support
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 6.11.1** — CodeAct sandbox hardening + checkpoint ref validation (July 2026).
+> **Version 6.11.2** — Tavily `web_search` (July 2026).
 
-### New In v6.11.1
+### New In v6.11.2
+
+- **`web_search`** — Tavily-backed search tool (`TAVILY_API_KEY`). Ranked URLs + snippets; use `web_fetch` for full pages.
+
+### Previously In v6.11.1
 
 - **CodeAct sandbox** — curated `__builtins__` + AST forbid-list so `open`/`__import__`/`eval` cannot bypass tool permissions.
 - **Checkpoint refs** — reject malformed SHAs before `git reset` / `diff`.
@@ -825,6 +829,7 @@ Every agent includes these — no setup needed:
 | `insert_lines` | Precise line-level insertion |
 | `think` | Structured reasoning without side effects |
 | `web_fetch` | URL fetching with HTML stripping (50KB cap) |
+| `web_search` | Web search via Tavily (`TAVILY_API_KEY` required) |
 | `write_todos` | Plan tasks as a checklist |
 | `tool_program` | Bounded read-only multi-tool sequence with `${step.output}` substitutions |
 | `update_todo` | Mark plan items complete |
@@ -1449,6 +1454,7 @@ untrusted prompts or LAN exposure:
 - **`web_fetch` tool** — refuses loopback / RFC1918 / link-local / multicast
   IPs by default to block SSRF. Set `CLAWAGENTS_WEB_ALLOW_PRIVATE=1` only in
   trusted dev environments.
+- **`web_search` tool** — calls fixed host `api.tavily.com` with `TAVILY_API_KEY`.
 - **Gateway** — defaults to loopback (`127.0.0.1`) bind. Set `GATEWAY_API_KEY`
   if you bind to `0.0.0.0`.
 
@@ -1496,6 +1502,7 @@ All environment variables are **optional**. They serve as defaults when the corr
 | `GEMINI_MODEL` | `gemini-3-flash-preview` | No | Gemini model name |
 | `ANTHROPIC_API_KEY` | — | **Yes** *(for Anthropic)* | Anthropic API key |
 | `ANTHROPIC_MODEL` | `claude-sonnet-4-5` | No | Anthropic model name (e.g. `claude-sonnet-4-5`, `claude-opus-4`) |
+| `TAVILY_API_KEY` | — | **Yes** *(for `web_search`)* | Tavily API key for the built-in `web_search` tool |
 
 **LLM Tuning**
 
@@ -1593,6 +1600,11 @@ parity sweep.
 ---
 
 ## Changelog
+
+### v6.11.2 — Tavily `web_search` (July 2026)
+
+- Built-in `web_search` tool via Tavily (`TAVILY_API_KEY`); fixed HTTPS host only.
+- Registered alongside `web_fetch` on `create_claw_agent`.
 
 ### v6.11.1 — CodeAct sandbox + checkpoint ref hardening (July 2026)
 

@@ -119,7 +119,7 @@ than the host process:
 Operators are expected to vet MCP server packages before configuring them; the
 library does not automatically scan `npx`/`uvx` packages for malware.
 
-### Network Egress (web_fetch)
+### Network Egress (web_fetch / web_search)
 
 `clawagents.tools.web` (`web.py` / `web.ts`) defends against SSRF when the
 agent calls `web_fetch`:
@@ -131,10 +131,14 @@ agent calls `web_fetch`:
   redirect handling. Every hop is re-validated, with a hop limit. This blocks
   the classic "public URL → 302 → `http://169.254.169.254/...`" SSRF chain.
 - Operators who genuinely need to hit private endpoints can set
-  `CLAW_FETCH_ALLOW_PRIVATE=1` to bypass the check.
+  `CLAWAGENTS_WEB_ALLOW_PRIVATE=1` to bypass the check.
 
-Note: this filter applies to `web_fetch` only. The agent has unrestricted
-network access via the shell `execute` tool by design — see § 3.
+`web_search` posts only to the fixed host `api.tavily.com` over HTTPS and
+requires `TAVILY_API_KEY`. It does not accept a user-supplied URL, so it is
+outside the SSRF path of `web_fetch`.
+
+Note: the private-IP filter applies to `web_fetch` only. The agent has
+unrestricted network access via the shell `execute` tool by design — see § 3.
 
 ### Subagents
 

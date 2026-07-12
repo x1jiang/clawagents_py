@@ -1,14 +1,14 @@
-"""Web Fetch Tool — retrieve content from a URL.
+"""Web tools — ``web_fetch`` (URL GET) and ``web_search`` (Tavily).
 
-Useful for reading documentation, API responses, or any web resource.
-Returns plain text with HTML tags stripped for readability.
+``web_fetch``
+------------
+Retrieve content from a URL. Useful for reading documentation, API
+responses, or any web resource. Returns plain text with HTML tags
+stripped for readability.
 
-Security
---------
-``web_fetch`` is callable by the LLM with arbitrary URLs, so it can be
-weaponized for SSRF (e.g. asking the agent to read cloud metadata at
-``http://169.254.169.254/`` or internal services on ``localhost``). To
-prevent that we:
+Security: ``web_fetch`` is callable by the LLM with arbitrary URLs, so it
+can be weaponized for SSRF (e.g. cloud metadata at
+``http://169.254.169.254/`` or ``localhost``). Defenses:
 
 * restrict to ``http`` / ``https``,
 * resolve the hostname and reject loopback, link-local, private (RFC1918),
@@ -23,9 +23,16 @@ prevent that we:
 If you genuinely need to hit private endpoints (dev environments,
 internal docs servers), set the env var or run a custom tool that
 bypasses ``web_fetch``.
+
+``web_search``
+--------------
+Query the public web via Tavily (``POST https://api.tavily.com/search``).
+Requires ``TAVILY_API_KEY``. No user-supplied host — fixed HTTPS endpoint
+only, so SSRF surface is limited to Tavily itself.
 """
 
 import http.client
+import json
 import os
 import re
 import asyncio
@@ -44,6 +51,12 @@ DEFAULT_TIMEOUT_S = 15
 MAX_REDIRECTS = 5
 _ALLOWED_SCHEMES = ("http", "https")
 _DEFAULT_PORTS = {"http": 80, "https": 443}
+
+TAVILY_HOST = "api.tavily.com"
+TAVILY_PATH = "/search"
+DEFAULT_SEARCH_RESULTS = 5
+MAX_SEARCH_RESULTS = 10
+_SEARCH_DEPTHS = frozenset({"basic", "advanced", "fast", "ultra-fast"})
 
 
 def _ip_is_private(ip: ipaddress._BaseAddress) -> bool:
@@ -319,4 +332,197 @@ class WebFetchTool:
             return ToolResult(success=False, output="", error=f"web_fetch failed: {e}")
 
 
-web_tools: List[Tool] = [WebFetchTool()]
+def _format_tavily_results(payload: Dict[str, Any], query: str) -> str:
+    lines: List[str] = [f"Query: {query}"]
+    answer = payload.get("answer")
+    if isinstance(answer, str) and answer.strip():
+        lines.append("")
+        lines.append(f"Answer: {answer.strip()}")
+
+    results = payload.get("results")
+    if not isinstance(results, list) or not results:
+        lines.append("")
+        lines.append("(no results)")
+        return "\n".join(lines)
+
+    lines.append("")
+    lines.append(f"Results ({len(results)}):")
+    for i, item in enumerate(results, 1):
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "(untitled)").strip()
+        url = str(item.get("url") or "").strip()
+        content = str(item.get("content") or "").strip()
+        score = item.get("score")
+        header = f"{i}. {title}"
+        if isinstance(score, (int, float)):
+            header = f"{i}. [{score:.2f}] {title}"
+        lines.append(header)
+        if url:
+            lines.append(f"   {url}")
+        if content:
+            if len(content) > 800:
+                content = content[:800] + "…"
+            lines.append(f"   {content}")
+        lines.append("")
+    text = "\n".join(lines).rstrip()
+    if len(text) > MAX_RESPONSE_CHARS:
+        text = text[:MAX_RESPONSE_CHARS] + f"\n...(truncated at {MAX_RESPONSE_CHARS} chars)"
+    return text
+
+
+def _tavily_post(
+    api_key: str,
+    body: Dict[str, Any],
+    timeout: int,
+) -> Tuple[int, Dict[str, Any]]:
+    raw = json.dumps(body).encode("utf-8")
+    headers = {
+        "Host": TAVILY_HOST,
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "ClawAgents/1.0",
+        "Connection": "close",
+        "Content-Length": str(len(raw)),
+    }
+    ctx = ssl.create_default_context()
+    conn = http.client.HTTPSConnection(TAVILY_HOST, 443, timeout=timeout, context=ctx)
+    try:
+        conn.request("POST", TAVILY_PATH, body=raw, headers=headers)
+        resp = conn.getresponse()
+        status = resp.status
+        data = resp.read(MAX_RESPONSE_BYTES + 1)
+        if len(data) > MAX_RESPONSE_BYTES:
+            data = data[:MAX_RESPONSE_BYTES]
+        try:
+            parsed: Any = json.loads(data.decode("utf-8", errors="replace") or "{}")
+        except json.JSONDecodeError:
+            parsed = {"detail": data.decode("utf-8", errors="replace")[:500]}
+        if not isinstance(parsed, dict):
+            parsed = {"detail": str(parsed)}
+        return status, parsed
+    finally:
+        conn.close()
+
+
+class WebSearchTool:
+    name = "web_search"
+    cacheable = True
+    parallel_safe = True
+    keywords = [
+        "search web", "google", "tavily", "look up", "find online",
+        "web search", "search internet",
+    ]
+    description = (
+        "Search the public web via Tavily. Returns ranked titles, URLs, and "
+        "snippets (optional short answer). Requires TAVILY_API_KEY. Use "
+        "web_fetch afterward to read a specific result URL in full."
+    )
+    parameters: Dict[str, Dict[str, Any]] = {
+        "query": {
+            "type": "string",
+            "description": "Search query",
+            "required": True,
+        },
+        "max_results": {
+            "type": "number",
+            "description": f"Number of results (1–{MAX_SEARCH_RESULTS}). Default: {DEFAULT_SEARCH_RESULTS}",
+        },
+        "search_depth": {
+            "type": "string",
+            "description": "Tavily depth: basic | advanced | fast | ultra-fast. Default: basic",
+        },
+        "include_answer": {
+            "type": "boolean",
+            "description": "Ask Tavily for a short synthesized answer. Default: true",
+        },
+        "timeout": {
+            "type": "number",
+            "description": f"Timeout in seconds. Default: {DEFAULT_TIMEOUT_S}",
+        },
+    }
+
+    async def execute(self, args: Dict[str, Any]) -> ToolResult:
+        query = str(args.get("query", "")).strip()
+        if not query:
+            return ToolResult(success=False, output="", error="No query provided")
+
+        api_key = os.environ.get("TAVILY_API_KEY", "").strip()
+        if not api_key:
+            return ToolResult(
+                success=False,
+                output="",
+                error=(
+                    "web_search requires TAVILY_API_KEY "
+                    "(https://tavily.com — set in env or workspace .env)"
+                ),
+            )
+
+        try:
+            max_results = int(args.get("max_results", DEFAULT_SEARCH_RESULTS))
+        except (TypeError, ValueError):
+            max_results = DEFAULT_SEARCH_RESULTS
+        max_results = max(1, min(MAX_SEARCH_RESULTS, max_results))
+
+        depth = str(args.get("search_depth") or "basic").strip().lower()
+        if depth not in _SEARCH_DEPTHS:
+            depth = "basic"
+
+        include_answer = args.get("include_answer", True)
+        if not isinstance(include_answer, bool):
+            include_answer = str(include_answer).strip().lower() in ("1", "true", "yes")
+
+        try:
+            timeout = max(1, int(args.get("timeout", DEFAULT_TIMEOUT_S)))
+        except (TypeError, ValueError):
+            timeout = DEFAULT_TIMEOUT_S
+
+        body = {
+            "query": query[:400],
+            "max_results": max_results,
+            "search_depth": depth,
+            "include_answer": include_answer,
+        }
+
+        loop = asyncio.get_running_loop()
+        try:
+            status, payload = await loop.run_in_executor(
+                None, _tavily_post, api_key, body, timeout
+            )
+        except TimeoutError:
+            return ToolResult(
+                success=False, output="",
+                error=f"web_search timed out after {timeout}s",
+            )
+        except OSError as e:
+            return ToolResult(success=False, output="", error=f"web_search failed: {e}")
+
+        if status == 401:
+            return ToolResult(
+                success=False, output="",
+                error="web_search: invalid or missing Tavily API key (HTTP 401)",
+            )
+        if status == 429:
+            return ToolResult(
+                success=False, output="",
+                error="web_search: Tavily rate limit exceeded (HTTP 429)",
+            )
+        if status == 432:
+            detail = payload.get("detail") if isinstance(payload.get("detail"), dict) else {}
+            msg = detail.get("error") if isinstance(detail, dict) else None
+            return ToolResult(
+                success=False, output="",
+                error=f"web_search: Tavily plan/key limit exceeded ({msg or 'HTTP 432'})",
+            )
+        if not (200 <= status < 300):
+            detail = payload.get("detail", payload.get("error", ""))
+            return ToolResult(
+                success=False, output="",
+                error=f"web_search: HTTP {status} {detail}".strip(),
+            )
+
+        return ToolResult(success=True, output=_format_tavily_results(payload, query))
+
+
+web_tools: List[Tool] = [WebFetchTool(), WebSearchTool()]

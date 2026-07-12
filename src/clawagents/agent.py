@@ -728,17 +728,24 @@ def create_claw_agent(
             keywords=getattr(spec, "keywords", []),
         ))
 
-    class _LazyWebFetch(LazyTool):
-        def __init__(self):
-            from clawagents.tools.web import web_tools as _wt
-            spec = next(t for t in _wt if t.name == "web_fetch")
-            super().__init__(spec.name, spec.description, spec.parameters, "clawagents.tools.web", "", getattr(spec, "keywords", []))
-        async def execute(self, args):
-            if self._resolved is None:
+    def _make_lazy_web_tool(tool_name: str):
+        class _LazyWebTool(LazyTool):
+            def __init__(self):
                 from clawagents.tools.web import web_tools as _wt
-                self._resolved = next(t for t in _wt if t.name == "web_fetch")
-            return await self._resolved.execute(args)
-    registry.register(_LazyWebFetch())
+                spec = next(t for t in _wt if t.name == tool_name)
+                super().__init__(
+                    spec.name, spec.description, spec.parameters,
+                    "clawagents.tools.web", "", getattr(spec, "keywords", []),
+                )
+            async def execute(self, args):
+                if self._resolved is None:
+                    from clawagents.tools.web import web_tools as _wt
+                    self._resolved = next(t for t in _wt if t.name == tool_name)
+                return await self._resolved.execute(args)
+        return _LazyWebTool()
+
+    for _web_name in ("web_fetch", "web_search"):
+        registry.register(_make_lazy_web_tool(_web_name))
 
     # ── Adapt and register user-provided tools ─────────────────────────
     if tools:

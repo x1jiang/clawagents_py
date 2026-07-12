@@ -24,6 +24,7 @@ DEFAULT_KNOWN_POLL_TOOLS: frozenset[str] = frozenset(
         "glob",
         "grep",
         "web_fetch",
+        "web_search",
         "browser_snapshot",
     }
 )

@@ -318,7 +318,7 @@ def _build_builtin_tool_catalog() -> list[dict[str, Any]]:
         *create_filesystem_tools(sb),
         *create_exec_tools(sb),
         *create_advanced_fs_tools(sb),
-        *[t for t in web_tools if t.name == "web_fetch"],
+        *web_tools,
         *create_background_task_tools(),
     ]:
         registry.register(tool)
