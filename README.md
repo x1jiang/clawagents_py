@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.10.8-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.11.0-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -26,9 +26,17 @@ pip install clawagents[anthropic]   # + Anthropic Claude support
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 6.10.8** — Compaction correctness (July 2026): escalate when still over budget; preserve message identity through compression.
+> **Version 6.11.0** — Steal-list pack (July 2026): Cline-style shadow restore modes, always-on rules, custom modes + `--auto`, CodeAct, evals CLI, `require_approval`.
 
-### New In v6.10.8
+### New In v6.11.0
+
+- **Shadow-git restore modes** — `files` / `conversation` / `both` with turn binding + `checkpoint_diff`.
+- **Always-on rules** — `CLAUDE.md` + `.clawagents/rules/**` re-injected every LLM round.
+- **Custom modes** — `.clawagents/modes.json` + builtins; CLI `--mode` / `--auto`.
+- **CodeAct** — `create_claw_agent(action_mode="code")` Python-as-action loop.
+- **Evals** — `python -m clawagents evals <suite.json>` + library `approval_handler`.
+
+### Previously In v6.10.8
 
 - **Compaction budget** — `compress_messages_safe` re-measures after the safe tier and escalates to summarization when still over context (no more false “under budget”).
 - **Message identity** — reuse original message objects when role+content survive compression so session tracking and `tool_calls_meta` / `tool_call_id` stay intact.
@@ -1579,6 +1587,13 @@ parity sweep.
 ---
 
 ## Changelog
+
+### v6.11.0 — Steal-list pack (July 2026)
+
+- Shadow-git restore modes + turn binding; path-faithful file snapshots.
+- Always-on `.clawagents/rules/` + CLAUDE.md every LLM round.
+- Custom modes JSON + CLI `--mode` / `--auto`; CodeAct `action_mode=code`.
+- `clawagents evals` suite runner; `approval_handler` / require_approval tools.
 
 ### v6.10.8 — Compaction correctness (July 2026)
 

@@ -368,6 +368,9 @@ async def cmd_task(
     advisor_model: str | None = None,
     profile: str | None = None,
     output_format: str = "text",
+    mode: str | None = None,
+    auto: bool = False,
+    action_mode: str = "tools",
 ):
     """Run a single task and print the result."""
     from clawagents.agent import create_claw_agent
@@ -388,6 +391,11 @@ async def cmd_task(
         kwargs["advisor_model"] = advisor_model
     if profile:
         kwargs["profile"] = profile
+    resolved_mode = mode or ("ci" if auto else None)
+    if resolved_mode:
+        kwargs["mode"] = resolved_mode
+    if action_mode and action_mode != "tools":
+        kwargs["action_mode"] = action_mode
     agent = create_claw_agent(**kwargs)
     tool_count = len(agent.tools.list())
     advisor_info = f" advisor={advisor_model}" if agent.advisor_llm else ""
@@ -643,7 +651,37 @@ def main():
         choices=["text", "json", "stream-json"],
         help="Output format for --task (text, json, stream-json)",
     )
+    parser.add_argument("--mode", type=str, help="Named agent mode from modes.json / builtins")
+    parser.add_argument(
+        "--auto",
+        action="store_true",
+        help="CI/headless: use mode=ci (bypass permissions) unless --mode is set",
+    )
+    parser.add_argument(
+        "--action-mode",
+        type=str,
+        choices=["tools", "code"],
+        default="tools",
+        help="tools (default) or code (CodeAct)",
+    )
+    parser.add_argument(
+        "command",
+        nargs="?",
+        default=None,
+        help="Subcommand: evals",
+    )
+    parser.add_argument("suite", nargs="?", default=None, help="For evals: suite path")
+    parser.add_argument("--judge", action="store_true", help="For evals: also run LLM judge")
+    parser.add_argument("--baseline", type=str, help="For evals: baseline report JSON")
+    parser.add_argument("-o", "--output", type=str, help="For evals: write report JSON")
     args = parser.parse_args()
+
+    if args.command == "evals":
+        if not args.suite:
+            parser.error("evals requires a suite path")
+        from clawagents.evals_cli import main_evals
+
+        sys.exit(main_evals(args))
 
     if args.prune_trajectories is not None:
         cmd_prune_trajectories(args.prune_trajectories)
@@ -679,6 +717,9 @@ def main():
                 advisor_model=args.advisor,
                 profile=args.profile,
                 output_format=args.output_format,
+                mode=args.mode,
+                auto=args.auto,
+                action_mode=args.action_mode,
             ))
         except KeyboardInterrupt:
             sys.stderr.write("\nInterrupted.\n")

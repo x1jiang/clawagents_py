@@ -161,11 +161,27 @@ def _snapshot_before_write(tool_name: str, args: Dict[str, Any]) -> None:
         return
 
     try:
+        rel = resolved.relative_to(root)
         snap_dir = root / ".clawagents" / "snapshots" / str(int(time.time()))
-        snap_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(str(resolved), str(snap_dir / file_path.name))
+        dest = snap_dir / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(resolved), str(dest))
     except Exception:
         pass  # Snapshot failure should never block tool execution
+
+    # Cline-style: pre-mutation whole-workspace shadow checkpoint
+    try:
+        from clawagents.config.features import is_enabled as _feat
+        if _feat("shadow_checkpoints"):
+            from clawagents.memory.shadow_checkpoint import create_checkpoint
+
+            create_checkpoint(
+                label=f"pre:{tool_name}",
+                tool=tool_name,
+                phase="pre",
+            )
+    except Exception:
+        pass
 
 
 def truncate_tool_output(output: str | list[dict[str, Any]], max_chars: int = MAX_TOOL_OUTPUT_CHARS) -> str | list[dict[str, Any]]:

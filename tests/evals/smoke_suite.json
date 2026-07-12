@@ -1,0 +1,10 @@
+{
+  "cases": [
+    {
+      "id": "echo-contains",
+      "task": "Reply with exactly: hello-evals",
+      "expect": { "contains": "hello-evals", "pass_score": 0.0 },
+      "mode": "ask"
+    }
+  ]
+}

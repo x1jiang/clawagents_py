@@ -976,6 +976,44 @@ def _extract_artifact_id(content: str) -> str | None:
     return m.group(1) if m else None
 
 
+async def _wait_for_tool_approval(
+    run_context: RunContext,
+    call_id: str,
+    tool_name: str,
+    args: dict[str, Any],
+    *,
+    approval_handler: Any,
+    emit: OnEvent,
+    timeout_s: float = 300.0,
+) -> bool:
+    """Block until RunContext has an approval decision, or handler returns one.
+
+    ``approval_handler`` may be:
+      - ``"event"``: poll ``is_tool_approved`` until decided (host must call
+        ``approve_tool`` / ``reject_tool``)
+      - callable ``(tool_name, args, call_id) -> bool | Awaitable[bool]``
+    """
+    if callable(approval_handler):
+        try:
+            result = approval_handler(tool_name, args, call_id)
+            if hasattr(result, "__await__"):
+                result = await result  # type: ignore[misc]
+            return bool(result)
+        except Exception as exc:
+            emit("warn", {"message": f"approval_handler error: {exc}"})
+            return False
+
+    # "event" (or any other truthy non-callable): poll RunContext
+    deadline = asyncio.get_event_loop().time() + max(1.0, timeout_s)
+    while asyncio.get_event_loop().time() < deadline:
+        state = run_context.is_tool_approved(call_id, tool_name=tool_name)
+        if state is not None:
+            return bool(state)
+        await asyncio.sleep(0.05)
+    emit("warn", {"message": f"approval timed out for {tool_name}"})
+    return False
+
+
 def _post_tool_side_effects(
     tool_name: str,
     args: dict[str, Any],
@@ -1005,14 +1043,51 @@ def _post_tool_side_effects(
             from clawagents.permissions.mode import is_write_class_tool
             from clawagents.memory.shadow_checkpoint import create_checkpoint
 
-            if is_write_class_tool(tool_name) or tool_name in {
-                "write_file", "edit_file", "apply_patch", "execute", "git_commit",
-            }:
-                info = create_checkpoint(label=tool_name)
+            # Post-success for execute/git_commit (pre-mutation already covers writes).
+            if tool_name in {"execute", "git_commit"} or (
+                is_write_class_tool(tool_name)
+                and tool_name not in {
+                    "write_file", "edit_file", "apply_patch", "create_file",
+                    "replace_in_file", "insert_in_file", "insert_lines", "patch_file",
+                }
+            ):
+                info = create_checkpoint(label=tool_name, tool=tool_name, phase="post")
                 if info.get("ok") and info.get("sha"):
-                    emit("checkpoint", {"kind": "shadow", "sha": info["sha"], "tool": tool_name})
+                    emit(
+                        "checkpoint",
+                        {
+                            "kind": "shadow",
+                            "sha": info["sha"],
+                            "tool": tool_name,
+                            "phase": "post",
+                            "label": tool_name,
+                            "ts": info.get("ts"),
+                        },
+                    )
                     if isinstance(out, str):
                         out = out + f"\n[checkpoint {info['sha'][:12]}]"
+            elif is_write_class_tool(tool_name) or tool_name in {
+                "write_file", "edit_file", "apply_patch",
+            }:
+                # Pre-mutation checkpoint already created in registry; emit latest HEAD for UI.
+                from clawagents.memory.shadow_checkpoint import list_checkpoints
+
+                rows = list_checkpoints(limit=1)
+                if rows:
+                    row = rows[0]
+                    emit(
+                        "checkpoint",
+                        {
+                            "kind": "shadow",
+                            "sha": row.get("sha"),
+                            "tool": tool_name,
+                            "phase": "pre",
+                            "label": row.get("label") or tool_name,
+                            "ts": row.get("ts"),
+                        },
+                    )
+                    if isinstance(out, str) and row.get("sha"):
+                        out = out + f"\n[checkpoint {str(row['sha'])[:12]}]"
     except Exception:
         logger.debug("shadow checkpoint failed", exc_info=True)
 
@@ -1816,6 +1891,9 @@ async def run_agent_graph(
     session_preload_limit: int | None = 200,
     handoffs: Optional[list[Handoff]] = None,
     agent_name: Optional[str] = None,
+    action_mode: str = "tools",
+    approval_handler: Any = None,
+    require_approval_tools: Optional[list[str]] = None,
 ) -> AgentState:
     """Single ReAct loop: LLM → tools → LLM → tools → ... → final answer."""
     if features is not None:
@@ -1823,6 +1901,15 @@ async def run_agent_graph(
         set_overrides(features)
 
     registry = tools or ToolRegistry()
+    action_mode_norm = action_mode if action_mode in ("tools", "code") else "tools"
+    require_approval_set = {
+        n for n in (require_approval_tools or []) if n
+    }
+    # When approval_handler is set, write-class tools require approval by default.
+    if approval_handler is not None:
+        from clawagents.permissions.mode import WRITE_CLASS_TOOLS
+
+        require_approval_set |= set(WRITE_CLASS_TOOLS)
     native_schemas: list[NativeToolSchema] | None = (
         registry.to_native_schemas() if use_native_tools and tools else None
     )
@@ -2488,6 +2575,55 @@ async def run_agent_graph(
                     ))
                     continue
 
+                # ── CodeAct: execute Python action when no native tool calls ──
+                if action_mode_norm == "code":
+                    from clawagents.graph.codeact import extract_code_action, run_code_action
+
+                    code = extract_code_action(response.content or "")
+                    if code:
+                        messages.append(LLMMessage(
+                            role="assistant",
+                            content=response.content,
+                            thinking=_thinking_content,
+                        ))
+                        emit("tool_call", {"name": "codeact", "args": {"code": code[:500]}})
+
+                        def _run_async(coro: Any) -> Any:
+                            try:
+                                loop = asyncio.get_running_loop()
+                            except RuntimeError:
+                                return asyncio.run(coro)
+                            import concurrent.futures
+
+                            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                                return pool.submit(asyncio.run, coro).result()
+
+                        result = run_code_action(
+                            code,
+                            registry,
+                            before_tool=before_tool,
+                            run_context=run_context,
+                            run_async=_run_async,
+                        )
+                        state.tool_calls += len(result.get("tool_calls") or []) or 1
+                        obs = str(result.get("observation") or "")
+                        emit("tool_result", {
+                            "name": "codeact",
+                            "success": not result.get("error"),
+                            "output": obs[:2000],
+                        })
+                        if result.get("done"):
+                            state.result = obs
+                            state.status = "done"
+                            emit("final_content", {"content": state.result})
+                            _emit_typed("assistant_message", {"content": state.result})
+                            break
+                        messages.append(LLMMessage(
+                            role="user",
+                            content=f"[CodeAct Observation]\n{obs}",
+                        ))
+                        continue
+
                 # ── Advisor: final check before declaring done ──
                 # Track whether the final-check path already appended the
                 # assistant message: when the advisor errored or returned
@@ -2895,12 +3031,55 @@ async def run_agent_graph(
                         ))
                     continue
                 if approval_state is None:
+                    tool_obj = registry.tools.get(call.tool_name)
+                    needs_approval = (
+                        call.tool_name in require_approval_set
+                        or bool(getattr(tool_obj, "require_approval", False))
+                    )
                     emit("approval_required", {"name": call.tool_name, "id": native_tc_id})
                     _emit_typed("approval_required", {
                         "tool_name": call.tool_name,
                         "call_id": native_tc_id,
                         "args": call.args,
                     })
+                    if needs_approval and approval_handler is not None:
+                        approved = await _wait_for_tool_approval(
+                            run_context,
+                            native_tc_id,
+                            call.tool_name,
+                            call.args if isinstance(call.args, dict) else {},
+                            approval_handler=approval_handler,
+                            emit=emit,
+                        )
+                        if not approved:
+                            emit("tool_skipped", {
+                                "name": call.tool_name,
+                                "reason": "approval denied or timed out",
+                            })
+                            if use_native_tools and native_tc and native_tc.tool_call_id:
+                                messages.append(LLMMessage(
+                                    role="assistant",
+                                    content=response.content or "",
+                                    tool_calls_meta=[{
+                                        "id": native_tc.tool_call_id,
+                                        "name": call.tool_name,
+                                        "args": call.args,
+                                    }],
+                                    gemini_parts=getattr(response, "gemini_parts", None),
+                                    thinking=_thinking_content,
+                                ))
+                                messages.append(LLMMessage(
+                                    role="tool",
+                                    content=f"[Tool Skipped] {call.tool_name} was not approved",
+                                    tool_call_id=native_tc.tool_call_id,
+                                ))
+                            else:
+                                messages.append(LLMMessage(
+                                    role="user",
+                                    content=f"[Tool Skipped] {call.tool_name} was not approved",
+                                ))
+                            continue
+                        run_context.approve_tool(native_tc_id, tool_name=call.tool_name)
 
                 _emit_typed("tool_started", {
                     "tool_name": call.tool_name,

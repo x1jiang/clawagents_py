@@ -184,9 +184,16 @@ class CheckpointCreateTool:
 
 class CheckpointRestoreTool:
     name = "checkpoint_restore"
-    description = "Restore workspace files from a shadow-git checkpoint SHA."
+    description = (
+        "Restore from a shadow-git checkpoint SHA. "
+        "mode=files|conversation|both (default files)."
+    )
     parameters = {
         "sha": {"type": "string", "description": "Checkpoint SHA", "required": True},
+        "mode": {
+            "type": "string",
+            "description": "files | conversation | both",
+        },
     }
 
     def __init__(self, workspace: str | None = None) -> None:
@@ -195,7 +202,14 @@ class CheckpointRestoreTool:
     async def execute(self, args: dict[str, Any]) -> ToolResult:
         from clawagents.memory.shadow_checkpoint import restore_checkpoint
 
-        info = restore_checkpoint(str(args.get("sha") or ""), workspace=self._workspace)
+        mode = str(args.get("mode") or "files").strip().lower()
+        if mode not in ("files", "conversation", "both"):
+            mode = "files"
+        info = restore_checkpoint(
+            str(args.get("sha") or ""),
+            workspace=self._workspace,
+            mode=mode,  # type: ignore[arg-type]
+        )
         if not info.get("ok"):
             return ToolResult(success=False, output="", error=str(info.get("error")))
         return ToolResult(success=True, output=str(info))
@@ -222,6 +236,30 @@ class CheckpointListTool:
         rows = list_checkpoints(workspace=self._workspace, limit=limit)
         return ToolResult(success=True, output=json.dumps(rows, indent=2))
 
+
+class CheckpointDiffTool:
+    name = "checkpoint_diff"
+    description = "List file changes between two shadow-git checkpoints (name-status)."
+    parameters = {
+        "lhs": {"type": "string", "description": "Left SHA", "required": True},
+        "rhs": {"type": "string", "description": "Right SHA (default: working tree)"},
+    }
+
+    def __init__(self, workspace: str | None = None) -> None:
+        self._workspace = workspace or os.getcwd()
+
+    async def execute(self, args: dict[str, Any]) -> ToolResult:
+        from clawagents.memory.shadow_checkpoint import checkpoint_diff
+        import json
+
+        info = checkpoint_diff(
+            str(args.get("lhs") or ""),
+            str(args.get("rhs") or "") or None,
+            workspace=self._workspace,
+        )
+        if not info.get("ok"):
+            return ToolResult(success=False, output="", error=str(info.get("error")))
+        return ToolResult(success=True, output=json.dumps(info.get("files") or [], indent=2))
 
 class WritePlanTool:
     name = "write_plan"
@@ -277,5 +315,6 @@ def create_context_tools(workspace: str | None = None) -> list[Tool]:
         CheckpointCreateTool(ws),
         CheckpointRestoreTool(ws),
         CheckpointListTool(ws),
+        CheckpointDiffTool(ws),
         WritePlanTool(ws),
     ]

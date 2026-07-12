@@ -31,6 +31,7 @@ _FEATURE_DEFAULTS: dict[str, str] = {
     "repo_map_inject":      "0",   # Inject ranked repo map into dynamic prompt
     "memory_bank":          "1",   # Optional .clawagents/memory-bank/* briefs
     "fact_store":           "1",   # Local superseding facts from lessons
+    "codeact":              "1",   # Allow action_mode=code CodeAct loop
 
     # Medium effort — opt-in
     "typed_memory":         "0",   # Parse frontmatter in memory files for type-based recall
