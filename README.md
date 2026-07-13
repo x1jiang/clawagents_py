@@ -15,7 +15,14 @@ ClawAgents is a **production-ready agentic framework** that gives LLMs the abili
 
 Built by extracting and unifying the best architectural patterns from [OpenClaw](https://github.com/anthropics/openclaw) (~5,800 files) and [DeepAgents](https://github.com/langchain-ai/deepagents) (~1,400 LOC core), ClawAgents delivers **the same power at a fraction of the complexity**.
 
+## Apps & extensions
 
+This repo is the **Python framework** (`pip install clawagents`). Ready-made clients:
+
+| Product | What it is | Link |
+|---------|------------|------|
+| **ClawAgents Desktop** | Native macOS app — project chats, file editor, SSH remotes, embedded gateway | [x1jiang/clawagents-desktop](https://github.com/x1jiang/clawagents-desktop) · [Download DMG (v0.2.2)](https://github.com/x1jiang/clawagents-desktop/releases/tag/v0.2.2) |
+| **ClawAgents for VS Code / Cursor** | Editor extension — chat, tools, and agent loop inside your IDE | [x1jiang/clawagents-vscode](https://github.com/x1jiang/clawagents-vscode) |
 
 ## Installation
 
