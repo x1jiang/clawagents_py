@@ -22,7 +22,7 @@ This repo is the **Python framework** (`pip install clawagents`). Ready-made cli
 | Product | Latest | What it is | Link |
 |---------|--------|------------|------|
 | **ClawAgents Desktop** | **v0.2.4** | Native macOS app — project chats, file editor, SSH remotes, Settings (incl. AWS Bedrock), Developer ID signed + notarized | [Repo](https://github.com/x1jiang/clawagents-desktop) · [Download DMG](https://github.com/x1jiang/clawagents-desktop/releases/tag/v0.2.4) |
-| **ClawAgents for VS Code / Cursor** | **v1.0.8** | Editor extension — chat, tools, Bedrock provider UI, agent loop inside your IDE | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Release + VSIX](https://github.com/x1jiang/clawagents-vscode/releases/tag/v1.0.8) |
+| **ClawAgents for VS Code / Cursor** | **v1.0.9** | Editor extension — chat, tools, Bedrock provider UI, agent loop inside your IDE | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Release + VSIX](https://github.com/x1jiang/clawagents-vscode/releases/tag/v1.0.9) |
 | **Python package** | **v6.12.0** | This library — `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/6.12.0/) · [Release](https://github.com/x1jiang/clawagents_py/releases/tag/v6.12.0) |
 
 ## Installation
