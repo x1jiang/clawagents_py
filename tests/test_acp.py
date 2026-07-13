@@ -94,7 +94,10 @@ def test_tool_call_complete_text_output() -> None:
     )
     encoded = encode_update(end)
     assert encoded["status"] == "completed"
-    assert encoded["content"][0] == {"type": "text", "text": "contents"}
+    assert encoded["content"][0] == {
+        "type": "content",
+        "content": {"type": "text", "text": "contents"},
+    }
 
 
 def test_tool_call_complete_json_output() -> None:
@@ -102,7 +105,7 @@ def test_tool_call_complete_json_output() -> None:
         tool_call_id="tc_x", name="search", output={"hits": [1, 2, 3]}
     )
     encoded = encode_update(end)
-    text = encoded["content"][0]["text"]
+    text = encoded["content"][0]["content"]["text"]
     assert json.loads(text) == {"hits": [1, 2, 3]}
 
 
@@ -181,8 +184,8 @@ def test_session_pairs_concurrent_tool_calls_in_order() -> None:
     ends = [u for u in sink if u["sessionUpdate"] == "tool_call_update"]
     assert starts[0]["toolCallId"] == ends[0]["toolCallId"]
     assert starts[1]["toolCallId"] == ends[1]["toolCallId"]
-    assert ends[0]["content"][0]["text"] == "first"
-    assert ends[1]["content"][0]["text"] == "second"
+    assert ends[0]["content"][0]["content"]["text"] == "first"
+    assert ends[1]["content"][0]["content"]["text"] == "second"
 
 
 def test_session_records_stop_reason() -> None:

@@ -24,6 +24,7 @@ Use :func:`encode_update` / :func:`decode_update` for the
 from __future__ import annotations
 
 import enum
+import re
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Union
@@ -156,6 +157,11 @@ class ToolCallStart:
         return {
             "sessionUpdate": "tool_call",
             "toolCallId": self.tool_call_id,
+            # ``title`` is REQUIRED by the ACP schema (spec-strict clients
+            # reject frames without it); name/label are kept for local
+            # round-trips and ignored by conforming peers.
+            "title": self.label or self.name,
+            "kind": _infer_tool_kind(self.name),
             "name": self.name,
             "label": self.label or self.name,
             "status": "in_progress",
@@ -182,16 +188,23 @@ class ToolCallComplete:
         return "failed" if self.error else "completed"
 
     def to_dict(self) -> Dict[str, Any]:
+        # Spec ``ToolCallContent`` wraps each ContentBlock as
+        # {"type": "content", "content": block}; bare text blocks fail
+        # schema validation on spec-strict clients.
         content_blocks: List[Dict[str, Any]] = []
         if self.error:
-            content_blocks.append({"type": "text", "text": str(self.error)})
+            content_blocks.append(
+                {"type": "content", "content": {"type": "text", "text": str(self.error)}}
+            )
         elif self.output is not None:
             text = (
                 self.output
                 if isinstance(self.output, str)
                 else _safe_dumps(self.output)
             )
-            content_blocks.append({"type": "text", "text": text})
+            content_blocks.append(
+                {"type": "content", "content": {"type": "text", "text": text}}
+            )
         payload: Dict[str, Any] = {
             "sessionUpdate": "tool_call_update",
             "toolCallId": self.tool_call_id,
@@ -296,16 +309,25 @@ def decode_update(payload: Mapping[str, Any]) -> SessionUpdate:
     if kind == "tool_call":
         return ToolCallStart(
             tool_call_id=str(payload.get("toolCallId") or _new_id("tc")),
-            name=str(payload.get("name") or ""),
+            # Wire frames from spec-strict peers carry only ``title``.
+            name=str(payload.get("name") or payload.get("title") or ""),
             arguments=dict(payload.get("rawInput") or {}),
-            label=payload.get("label"),
+            label=payload.get("label") or payload.get("title"),
         )
     if kind == "tool_call_update":
         content = payload.get("content") or []
         text_out: Optional[str] = None
         if isinstance(content, list):
             for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
+                if not isinstance(block, dict):
+                    continue
+                # Spec shape: {"type": "content", "content": ContentBlock};
+                # also accept bare ContentBlocks from older frames.
+                if block.get("type") == "content" and isinstance(
+                    block.get("content"), dict
+                ):
+                    block = block["content"]
+                if block.get("type") == "text":
                     text_out = str(block.get("text") or "")
                     break
         status = str(payload.get("status") or "completed").lower()
@@ -317,6 +339,28 @@ def decode_update(payload: Mapping[str, Any]) -> SessionUpdate:
             arguments=dict(payload.get("rawInput") or {}) or None,
         )
     raise ValueError(f"Unknown sessionUpdate variant: {kind!r}")
+
+
+def _infer_tool_kind(name: str) -> str:
+    """Map a clawagents tool name onto the closest ACP ``ToolKind``."""
+    n = (name or "").lower()
+    if re.search(r"(^|_)(read|cat|glob|ls|list|tree)($|_)", n):
+        return "read"
+    if re.search(r"(write|edit|patch|apply|create_file)", n):
+        return "edit"
+    if re.search(r"(delete|remove|rm)($|_)", n):
+        return "delete"
+    if re.search(r"(move|rename)", n):
+        return "move"
+    if re.search(r"(grep|search|find)", n):
+        return "search"
+    if re.search(r"(exec|bash|shell|run_command|command)", n):
+        return "execute"
+    if "think" in n:
+        return "think"
+    if re.search(r"(web|fetch|http|browse)", n):
+        return "fetch"
+    return "other"
 
 
 def _safe_dumps(value: Any) -> str:

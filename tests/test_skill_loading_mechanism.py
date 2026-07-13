@@ -321,3 +321,24 @@ def test_use_skill_reports_ineligible_reason_on_miss(tmp_path):
     assert not result.success
     assert "unavailable" in result.error
     assert "missing env var" in result.error
+
+
+def test_disable_model_invocation_hidden_and_refused(tmp_path):
+    root = tmp_path / "skills"
+    _write_skill(
+        root,
+        "user-only",
+        frontmatter="name: user-only\ndescription: d\ndisable-model-invocation: true",
+    )
+    _write_skill(root, "normal")
+    store = SkillStore()
+    store.add_directory(root)
+    _load(store)
+
+    assert [s.name for s in store.list()] == ["normal"]
+    assert len(store.list_all()) == 2
+
+    use_tool = [t for t in create_skill_tools(store) if t.name == "use_skill"][0]
+    result = asyncio.run(use_tool.execute({"name": "user-only"}))
+    assert not result.success
+    assert "disable-model-invocation" in result.error

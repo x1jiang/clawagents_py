@@ -39,6 +39,9 @@ class Skill:
     success_criteria: str = ""
     workflow_steps: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
+    # Claude Code / openclaw `disable-model-invocation`: keep the skill out of
+    # the model-facing catalog and refuse use_skill (user-invocation only).
+    disable_model_invocation: bool = False
 
     @property
     def base_dir(self) -> str:
@@ -192,6 +195,7 @@ def parse_skill_file(content: str, file_path: str) -> Skill:
     success_criteria: str = ""
     workflow_steps: List[str] = []
     warnings: List[str] = []
+    disable_model_invocation = False
 
     # Closing `---` may sit at EOF (no trailing newline / empty body).
     frontmatter_match = re.match(
@@ -213,6 +217,14 @@ def parse_skill_file(content: str, file_path: str) -> Skill:
         tools_match = re.search(r"^allowed-tools:\s*(.+)$", yaml_content, re.MULTILINE)
         if tools_match:
             allowed_tools = [t.strip(",") for t in tools_match.group(1).split() if t.strip(",")]
+
+        # Only the literal true counts (Claude Code boolean parsing rule).
+        dmi_match = re.search(
+            r"^disable-model-invocation:\s*[\"']?true[\"']?\s*$",
+            yaml_content,
+            re.MULTILINE,
+        )
+        disable_model_invocation = bool(dmi_match)
 
         req_os, req_bins, req_env = _parse_requires_block(yaml_content)
         if req_os or req_bins or req_env:
@@ -288,6 +300,7 @@ def parse_skill_file(content: str, file_path: str) -> Skill:
         success_criteria=success_criteria,
         workflow_steps=workflow_steps,
         warnings=warnings,
+        disable_model_invocation=disable_model_invocation,
     )
 
 
@@ -443,6 +456,11 @@ class SkillStore:
                     continue
 
     def list(self) -> List[Skill]:
+        """Model-invocable skills (feeds the catalog and skill tools)."""
+        return [s for s in self.skills.values() if not s.disable_model_invocation]
+
+    def list_all(self) -> List[Skill]:
+        """Every loaded skill, including user-invocation-only ones."""
         return list(self.skills.values())
 
     def get(self, name: str) -> Optional[Skill]:
@@ -518,6 +536,16 @@ def create_skill_tools(store: SkillStore) -> List[Tool]:
         async def execute(self, args: Dict[str, Any]) -> ToolResult:
             name = str(args.get("name", "")).strip()
             skill = resolve_skill(store, name)
+
+            if skill is not None and skill.disable_model_invocation:
+                return ToolResult(
+                    success=False,
+                    output="",
+                    error=(
+                        f'Skill "{skill.name}" sets disable-model-invocation and can '
+                        "only be invoked by the user, not by the model."
+                    ),
+                )
 
             if not skill:
                 available = sorted(s.name for s in store.list())
