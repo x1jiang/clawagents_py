@@ -805,7 +805,10 @@ def create_claw_agent(
 
         loaded_skills = skill_store.list()
         if loaded_skills:
-            skill_summaries = _build_skill_catalog_prompt(loaded_skills)
+            skill_summaries = _build_skill_catalog_prompt(
+                loaded_skills,
+                context_window=context_window,
+            )
 
         for skill_tool in create_skill_tools(skill_store):
             # Both tools: thin catalog in-prompt; list_skills for overflow;
@@ -1060,10 +1063,18 @@ def _get_bundled_skills_dir() -> str:
     return str(Path(__file__).resolve().parent / "skills")
 
 
-# Default locations for auto-discovery
-# Cost-effective skill prompt: short catalog only; full bodies via use_skill.
-MAX_SKILLS_IN_PROMPT = 20
-MAX_SKILLS_PROMPT_CHARS = 4000
+# Skill catalog: progressive disclosure (Claude Code / Codex pattern).
+# Metadata only in-prompt; full bodies via use_skill. Budget scales with
+# context window (~1.5%), with floor/ceiling so tiny and huge windows stay sane.
+SKILL_LISTING_BUDGET_FRACTION = 0.015
+SKILL_LISTING_BUDGET_FLOOR_CHARS = 4000
+SKILL_LISTING_BUDGET_CEILING_CHARS = 16000
+SKILL_LISTING_MAX_DESC_CHARS = 400
+SKILL_LISTING_CHARS_PER_TOKEN = 4
+# Soft cap on how many skills appear with descriptions before name-only overflow.
+MAX_SKILLS_IN_PROMPT = 80
+# Back-compat alias (older tests / callers).
+MAX_SKILLS_PROMPT_CHARS = SKILL_LISTING_BUDGET_FLOOR_CHARS
 
 _SKILL_CATALOG_HEADER = (
     "## Available Skills\n"
@@ -1074,24 +1085,124 @@ _SKILL_CATALOG_HEADER = (
 )
 
 
-def _build_skill_catalog_prompt(loaded_skills: list) -> str:
-    """Build a bounded name/description catalog for the system prompt."""
-    lines = [
-        f"- **{s.name}**: {s.description or '(no description)'}"
+def _effective_listing_context_window(context_window: int | None) -> int:
+    """Clamp config context_window for listing math.
+
+    EngineConfig often defaults to 1_000_000 (soft ceiling), which would make
+    a %-budget enormous. Cap at 256k for listing; floor at 32k.
+    """
+    cw = int(context_window or 128_000)
+    return max(32_000, min(cw, 256_000))
+
+
+def skill_listing_budget_chars(context_window: int | None = None) -> int:
+    """Character budget for the in-prompt skills catalog.
+
+    Overrides:
+      CLAW_SKILL_LISTING_CHAR_BUDGET — absolute char budget
+      CLAW_SKILL_LISTING_BUDGET_FRACTION — fraction of context (default 0.015)
+    """
+    fixed = (os.environ.get("CLAW_SKILL_LISTING_CHAR_BUDGET") or "").strip()
+    if fixed.isdigit():
+        return max(1000, int(fixed))
+    frac_raw = (os.environ.get("CLAW_SKILL_LISTING_BUDGET_FRACTION") or "").strip()
+    try:
+        frac = float(frac_raw) if frac_raw else SKILL_LISTING_BUDGET_FRACTION
+    except ValueError:
+        frac = SKILL_LISTING_BUDGET_FRACTION
+    frac = max(0.005, min(frac, 0.05))
+    cw = _effective_listing_context_window(context_window)
+    dynamic = int(cw * frac * SKILL_LISTING_CHARS_PER_TOKEN)
+    return max(
+        SKILL_LISTING_BUDGET_FLOOR_CHARS,
+        min(SKILL_LISTING_BUDGET_CEILING_CHARS, dynamic),
+    )
+
+
+def _clamp_skill_description(text: str, max_chars: int) -> str:
+    cleaned = " ".join((text or "").split())
+    if max_chars <= 0:
+        return ""
+    if len(cleaned) <= max_chars:
+        return cleaned
+    if max_chars <= 3:
+        return cleaned[:max_chars]
+    return cleaned[: max_chars - 1].rstrip() + "…"
+
+
+def _format_skill_line(name: str, description: str, desc_cap: int) -> str:
+    desc = _clamp_skill_description(description, desc_cap)
+    if desc:
+        return f"- **{name}**: {desc}"
+    return f"- **{name}**"
+
+
+def _build_skill_catalog_prompt(
+    loaded_skills: list,
+    *,
+    context_window: int | None = None,
+) -> str:
+    """Build a bounded name/description catalog (Claude/Codex-style).
+
+    Strategy (cost-effective):
+    1. Always keep skill *names* when possible.
+    2. Shorten descriptions first (per-skill cap, then global shorten steps).
+    3. Only omit skills after descriptions are exhausted; point to list_skills.
+    """
+    if not loaded_skills:
+        return ""
+
+    max_desc = SKILL_LISTING_MAX_DESC_CHARS
+    env_desc = (os.environ.get("CLAW_SKILL_LISTING_MAX_DESC_CHARS") or "").strip()
+    if env_desc.isdigit():
+        max_desc = max(40, int(env_desc))
+
+    budget = skill_listing_budget_chars(context_window)
+    footer_full = "\n\n({n} more skills available — use list_skills to see all)"
+    # Reserve space for a worst-case overflow footer.
+    reserve = len(footer_full.format(n=len(loaded_skills))) + 8
+    body_budget = max(200, budget - len(_SKILL_CATALOG_HEADER) - reserve)
+
+    entries = [
+        (str(getattr(s, "name", "") or "skill"), str(getattr(s, "description", "") or ""))
         for s in loaded_skills
     ]
-    total = len(lines)
-    shown = lines[:MAX_SKILLS_IN_PROMPT]
+    entries = [(n, d) for n, d in entries if n.strip()]
+    if not entries:
+        return ""
+
+    # Try progressively shorter descriptions until everything fits, else pack
+    # as many name(+desc) lines as fit under body_budget.
+    desc_caps = [max_desc, 220, 140, 80, 40, 0]
+    shown: list[str] = []
+    omitted = 0
+    for desc_cap in desc_caps:
+        shown = []
+        used = 0
+        omitted = 0
+        for i, (name, desc) in enumerate(entries):
+            if i >= MAX_SKILLS_IN_PROMPT and desc_cap > 0:
+                # Beyond soft count: name-only for the rest of this pass.
+                line = _format_skill_line(name, desc, 0)
+            else:
+                line = _format_skill_line(name, desc, desc_cap)
+            add = len(line) + (1 if shown else 0)
+            if used + add > body_budget:
+                omitted = len(entries) - len(shown)
+                break
+            shown.append(line)
+            used += add
+        else:
+            omitted = 0
+        if omitted == 0:
+            break
+
     text = _SKILL_CATALOG_HEADER + "\n".join(shown)
-    if total > MAX_SKILLS_IN_PROMPT:
-        text += (
-            f"\n\n({total - MAX_SKILLS_IN_PROMPT} more skills available — "
-            "use list_skills to see all)"
-        )
-    if len(text) > MAX_SKILLS_PROMPT_CHARS:
-        text = (
-            text[:MAX_SKILLS_PROMPT_CHARS]
-            + "\n\n...(skill list truncated — use list_skills to see all)"
+    if omitted:
+        text += f"\n\n({omitted} more skills available — use list_skills to see all)"
+    if len(text) > budget:
+        text = text[: max(0, budget - 80)].rstrip() + (
+            "\n\n...(skill list truncated — use list_skills to see all)"
         )
     return text
 
