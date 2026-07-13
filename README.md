@@ -35,12 +35,17 @@ pip install clawagents[bedrock]     # + Amazon Bedrock (Claude via IAM + Nova/Co
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 6.12.1** — OpenAI `reasoning_effort` for GPT-5.5/5.6 and o-series (July 2026).
+> **Version 6.12.2** — OpenAI Responses API with auto model routing (July 2026).
+
+### New In v6.12.2
+
+- **Responses API** — `OpenAIProvider` auto-selects `/v1/responses` vs Chat Completions from model + endpoint (GPT-5.5/5.6/Codex on official OpenAI; Ollama/BAG/Azure stay on Chat Completions; sticky fallback if Responses is missing).
+- **Reasoning + tools** — Responses path keeps `reasoning.effort` with function tools (no more forced `none` on GPT-5.5/5.6 when Responses is available).
 
 ### New In v6.12.1
 
 - **`reasoning_effort`** on `create_claw_agent` / OpenAI provider (`none`|`low`|`medium`|`high`|`xhigh`|`max`; UI aliases Light→low, Extra High→xhigh)
-- Chat Completions + tools on GPT-5.5/5.6 still force `none` (API limit) until Responses API
+- Chat Completions + tools on GPT-5.5/5.6 force `none` when falling back from Responses
 
 ### New In v6.12.0
 
@@ -118,7 +123,7 @@ pip install clawagents[all]         # All providers + tiktoken
 ### Previously In v6.10.1
 
 - **Gemini / OpenAI tool schemas** — array parameters always declare `items.type` (fixes Gemini `400 INVALID_ARGUMENT` on tools).
-- **GPT-5.5 / GPT-5.6 + tools** — Chat Completions sets `reasoning_effort=none` when tools are attached (avoids HTTP 400 until Responses API).
+- **GPT-5.5 / GPT-5.6 + tools** — prefer Responses API; Chat Completions fallback still sets `reasoning_effort=none`.
 - **Orphan tool messages** — session preload and OpenAI formatting drop tool results without a matching `tool_calls` id (fixes provider 400 after limited history).
 - **MCP loop affinity** — stdio/SSE sessions reconnect when invoked from a different event loop than registration (VS Code / threaded hosts).
 - **`skills_exclude`** — `create_claw_agent(..., skills_exclude=[...])` drops named skills after load.
@@ -1716,8 +1721,9 @@ Python-focused reliability patch for hosts that embed the agent (VS Code sidecar
 threaded servers) and for GPT-5.5/5.6 + Gemini tool calling.
 
 - **Tool schemas** — OpenAI/Gemini converters always attach `items` for arrays.
-- **GPT-5.5/5.6** — force `reasoning_effort=none` on Chat Completions when tools
-  are present; sanitize orphan `role=tool` messages before the request.
+- **GPT-5.5/5.6** — prefer Responses API; Chat Completions fallback still forces
+  `reasoning_effort=none` when tools are present; sanitize orphan `role=tool`
+  messages before the request.
 - **Sessions** — drop leading orphan tools on limited preload; persist the user
   task message; re-sanitize after compaction; insert replayed history in order.
 - **MCP** — reconnect when the owning event loop changes; regression coverage

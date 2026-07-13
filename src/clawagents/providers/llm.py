@@ -450,13 +450,11 @@ def _parse_openai_tool_calls(
 
 # ─── OpenAI Provider ──────────────────────────────────────────────────────
 #
-# Uses the Chat Completions API (chat.completions.create). Supports native
-# function calling via the `tools` parameter for models like GPT-4o, GPT-5,
-# GPT-5-nano, GPT-5.1, and GPT-5.2 (non-Codex).
-#
-# NOTE: GPT-5.2-Codex and similar models use the Responses API
-# (client.responses.create) which has a different tool-calling interface.
-# Those would need a separate ResponsesAPIProvider.
+# Auto-selects Chat Completions (``chat.completions.create``) vs Responses
+# (``responses.create``) from model + endpoint. GPT-5.5 / GPT-5.6 / Codex and
+# reasoning+tools on official OpenAI prefer Responses so effort works with
+# tools; Ollama/BAG/Azure stay on Chat Completions. If Responses is missing on
+# the endpoint, the provider falls back to Chat Completions for the session.
 
 
 # o-series reasoning models require temperature=1 (API restriction).
@@ -495,8 +493,9 @@ def _chat_completions_needs_reasoning_none(model: str) -> bool:
 
     GPT-5.5 / GPT-5.6 default to a non-``none`` reasoning effort. On
     ``/v1/chat/completions``, that combination with function tools returns
-    HTTP 400 ("use /v1/responses or set reasoning_effort to 'none'"). Until
-    we speak Responses API, force ``none`` whenever tools are attached.
+    HTTP 400 ("use /v1/responses or set reasoning_effort to 'none'"). Prefer
+    Responses for those models; this force-none is only for the Chat Completions
+    fallback path.
     """
     m = (model or "").strip().lower()
     return m.startswith("gpt-5.5") or m.startswith("gpt-5.6")
@@ -526,7 +525,7 @@ def normalize_reasoning_effort(value: str | None) -> str | None:
 
 
 def model_supports_reasoning_effort(model: str) -> bool:
-    """Heuristic: models that accept ``reasoning_effort`` on Chat Completions."""
+    """Heuristic: models that accept ``reasoning_effort`` / Responses ``reasoning``."""
     m = (model or "").strip().lower()
     if not m:
         return False
@@ -540,6 +539,62 @@ def model_supports_reasoning_effort(model: str) -> bool:
     return False
 
 
+def _responses_endpoint_likely(base_url: str | None, api_type: str = "") -> bool:
+    """True when the host is likely to speak ``/v1/responses``."""
+    if (api_type or "").lower() == "azure":
+        return False
+    if not base_url:
+        return True
+    host = base_url.lower()
+    return "api.openai.com" in host
+
+
+def prefers_responses_api(
+    model: str,
+    *,
+    base_url: str | None = None,
+    api_type: str = "",
+    has_tools: bool = False,
+    reasoning_effort: str | None = None,
+) -> bool:
+    """Pick Responses vs Chat Completions from model + endpoint capabilities."""
+    if not _responses_endpoint_likely(base_url, api_type):
+        return False
+    m = (model or "").strip().lower()
+    if not m:
+        return False
+    if "codex" in m:
+        return True
+    if m.startswith(("gpt-5.5", "gpt-5.6")):
+        return True
+    # Other GPT-5 / o-series: Responses when tools + non-none effort so the
+    # API accepts both (Chat Completions often forces effort=none).
+    effort = normalize_reasoning_effort(reasoning_effort)
+    if has_tools and effort and effort != "none":
+        if m.startswith(("o1", "o3", "o4")) or m == "gpt-5" or m.startswith("gpt-5"):
+            return True
+    return False
+
+
+def _is_responses_unsupported(exc: BaseException) -> bool:
+    """True when the endpoint does not implement Responses (safe to fall back)."""
+    if isinstance(exc, APIStatusError) and exc.status_code in (404, 405, 501):
+        return True
+    msg = str(exc).lower()
+    needles = (
+        "unrecognized request url",
+        "invalid pathname",
+        "unknown route",
+        "not implemented",
+        "/v1/responses",
+        "does not support responses",
+        "no such endpoint",
+    )
+    if isinstance(exc, APIStatusError) and exc.status_code in (400, 404, 405, 501):
+        return any(n in msg for n in needles)
+    return "unrecognized request url" in msg or "does not support responses" in msg
+
+
 def _apply_tool_reasoning_compat(
     kwargs: dict[str, Any],
     *,
@@ -547,12 +602,144 @@ def _apply_tool_reasoning_compat(
     has_tools: bool,
     preferred: str | None = None,
 ) -> None:
+    """Chat Completions reasoning_effort (forces none for GPT-5.5/5.6 + tools)."""
     effort = normalize_reasoning_effort(preferred)
     if effort:
         kwargs["reasoning_effort"] = effort
     # Chat Completions + tools on GPT-5.5/5.6 still requires none.
     if has_tools and _chat_completions_needs_reasoning_none(model):
         kwargs["reasoning_effort"] = "none"
+
+
+def _apply_responses_reasoning(
+    kwargs: dict[str, Any],
+    *,
+    preferred: str | None = None,
+) -> None:
+    """Responses API uses ``reasoning={"effort": ...}`` (tools keep effort)."""
+    effort = normalize_reasoning_effort(preferred)
+    if effort:
+        kwargs["reasoning"] = {"effort": effort}
+
+
+
+def _chat_tools_to_responses_tools(
+    oai_tools: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]] | None:
+    """Chat Completions nested ``function`` tools → Responses flat tools."""
+    if not oai_tools:
+        return None
+    out: list[dict[str, Any]] = []
+    for t in oai_tools:
+        if not isinstance(t, dict):
+            continue
+        if t.get("type") == "function" and isinstance(t.get("function"), dict):
+            fn = t["function"]
+            item: dict[str, Any] = {
+                "type": "function",
+                "name": fn.get("name") or "",
+                "description": fn.get("description") or "",
+                "parameters": fn.get("parameters") or {"type": "object", "properties": {}},
+                # Explicit non-strict: our schemas may omit additionalProperties /
+                # full required lists that Responses strict mode expects.
+                "strict": False,
+            }
+            out.append(item)
+        else:
+            out.append(t)
+    return out or None
+
+
+def _messages_to_responses_input(
+    messages: list[dict[str, Any]],
+) -> tuple[str | None, list[dict[str, Any]]]:
+    """Convert Chat Completions-style messages to Responses ``instructions`` + ``input``."""
+    instructions_parts: list[str] = []
+    items: list[dict[str, Any]] = []
+    for m in messages:
+        role = m.get("role")
+        if role == "system":
+            content = m.get("content")
+            if isinstance(content, str) and content.strip():
+                instructions_parts.append(content)
+            continue
+        if role == "tool":
+            content = m.get("content")
+            if not isinstance(content, str):
+                content = json.dumps(content)
+            items.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": str(m.get("tool_call_id") or ""),
+                    "output": content or "",
+                }
+            )
+            continue
+        if role == "assistant" and m.get("tool_calls"):
+            content = m.get("content")
+            if isinstance(content, str) and content:
+                items.append({"role": "assistant", "content": content})
+            for tc in m.get("tool_calls") or []:
+                fn = tc.get("function") or {}
+                items.append(
+                    {
+                        "type": "function_call",
+                        "call_id": str(tc.get("id") or ""),
+                        "name": fn.get("name") or "",
+                        "arguments": fn.get("arguments") or "{}",
+                    }
+                )
+            continue
+        if role in ("user", "assistant", "developer"):
+            content = m.get("content")
+            if content is None:
+                content = ""
+            items.append({"role": role, "content": content})
+            continue
+        # Unknown roles: pass through if they look like Responses items.
+        if isinstance(m.get("type"), str):
+            items.append(m)
+    instructions = "\n\n".join(instructions_parts) if instructions_parts else None
+    return instructions, items
+
+
+def _parse_responses_result(
+    resp: Any,
+) -> tuple[str, list[NativeToolCall] | None, int, int, int]:
+    """Return (text, tool_calls, total_tokens, prompt_tokens, cached_tokens)."""
+    content_parts: list[str] = []
+    calls: list[NativeToolCall] = []
+    for item in getattr(resp, "output", None) or []:
+        itype = getattr(item, "type", None)
+        if itype == "message":
+            for part in getattr(item, "content", None) or []:
+                ptype = getattr(part, "type", None)
+                if ptype in ("output_text", "text"):
+                    content_parts.append(getattr(part, "text", "") or "")
+        elif itype == "function_call":
+            calls.append(
+                NativeToolCall(
+                    tool_name=getattr(item, "name", "") or "",
+                    args=_repair_json(getattr(item, "arguments", None) or "{}"),
+                    tool_call_id=(
+                        getattr(item, "call_id", "") or getattr(item, "id", "") or ""
+                    ),
+                )
+            )
+    text = "".join(content_parts)
+    if not text:
+        text = getattr(resp, "output_text", None) or ""
+    usage = getattr(resp, "usage", None)
+    total = int(getattr(usage, "total_tokens", 0) or 0) if usage else 0
+    prompt = int(getattr(usage, "input_tokens", 0) or 0) if usage else 0
+    cached = 0
+    if usage:
+        details = getattr(usage, "input_tokens_details", None)
+        try:
+            cached = int(getattr(details, "cached_tokens", 0) or 0) if details else 0
+        except (TypeError, ValueError):
+            cached = 0
+    return text, (calls or None), total, prompt, cached
 
 
 def _sanitize_openai_tool_pairs(formatted: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -647,6 +834,21 @@ class OpenAIProvider(LLMProvider):
         self._reasoning_effort = normalize_reasoning_effort(
             getattr(config, "reasoning_effort", None) or None
         )
+        self._base_url = base_url
+        self._api_type = "azure" if is_azure else api_type
+        # Sticky fallback when Responses is missing on this endpoint.
+        self._force_chat_completions = False
+
+    def _should_use_responses(self, has_tools: bool) -> bool:
+        if self._force_chat_completions:
+            return False
+        return prefers_responses_api(
+            self.model,
+            base_url=self._base_url,
+            api_type=self._api_type,
+            has_tools=has_tools,
+            reasoning_effort=self._reasoning_effort,
+        )
 
     async def chat(
         self,
@@ -678,6 +880,28 @@ class OpenAIProvider(LLMProvider):
                 formatted.append({"role": m.role, "content": content})
         formatted = _sanitize_openai_tool_pairs(formatted)
         oai_tools = _to_openai_tools(tools) if tools else None
+
+        if self._should_use_responses(bool(oai_tools)):
+            try:
+                if not on_chunk:
+                    return await _with_retry(
+                        "openai-responses",
+                        lambda: self._request_once_responses(formatted, oai_tools),
+                        policy=getattr(self, "retry_policy", None),
+                    )
+                return await self._stream_with_retry_responses(
+                    formatted, on_chunk, cancel_event, oai_tools,
+                )
+            except Exception as exc:
+                if _is_responses_unsupported(exc):
+                    logger.warning(
+                        "  [openai] Responses API unavailable (%s) — "
+                        "falling back to Chat Completions",
+                        type(exc).__name__,
+                    )
+                    self._force_chat_completions = True
+                else:
+                    raise
 
         if not on_chunk:
             return await _with_retry(
@@ -726,6 +950,213 @@ class OpenAIProvider(LLMProvider):
             cache_read_tokens=_cached_tokens,
             tool_calls=native_calls,
         )
+
+    def _responses_kwargs(
+        self,
+        messages: list[dict[str, Any]],
+        oai_tools: list[dict[str, Any]] | None,
+        *,
+        stream: bool = False,
+    ) -> dict[str, Any]:
+        instructions, input_items = _messages_to_responses_input(messages)
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "input": input_items,
+            "max_output_tokens": self._max_tokens,
+            "temperature": self._temperature,
+            "store": False,
+        }
+        if instructions:
+            kwargs["instructions"] = instructions
+        resp_tools = _chat_tools_to_responses_tools(oai_tools)
+        if resp_tools:
+            kwargs["tools"] = resp_tools
+        _apply_responses_reasoning(kwargs, preferred=self._reasoning_effort)
+        if stream:
+            kwargs["stream"] = True
+        return kwargs
+
+    async def _request_once_responses(
+        self,
+        messages: list[dict[str, Any]],
+        oai_tools: list[dict[str, Any]] | None = None,
+    ) -> LLMResponse:
+        kwargs = self._responses_kwargs(messages, oai_tools, stream=False)
+        resp = await self.client.responses.create(**kwargs)
+        text, native_calls, total, prompt, cached = _parse_responses_result(resp)
+        return LLMResponse(
+            content=text,
+            model=self.model,
+            tokens_used=total,
+            prompt_tokens=prompt,
+            cache_read_tokens=cached,
+            tool_calls=native_calls,
+        )
+
+    async def _stream_with_retry_responses(
+        self,
+        messages: list[dict[str, Any]],
+        on_chunk: OnChunkCallback,
+        cancel_event: asyncio.Event | None,
+        oai_tools: list[dict[str, Any]] | None = None,
+    ) -> LLMResponse:
+        last_error: BaseException | None = None
+
+        for attempt in range(_MAX_RETRIES + 1):
+            if attempt > 0:
+                delay = _jittered_delay(attempt - 1)
+                logger.warning(
+                    "  [openai-responses] Stream retry %d/%d after %.1fs",
+                    attempt, _MAX_RETRIES, delay,
+                )
+                await asyncio.sleep(delay)
+
+            chunks: list[str] = []
+            final_tokens = 0
+            final_prompt_tokens = 0
+            final_cached_tokens = 0
+            tools_accumulation: dict[int, dict[str, Any]] = {}
+
+            def _accumulated_calls() -> list[NativeToolCall] | None:
+                if not tools_accumulation:
+                    return None
+                calls: list[NativeToolCall] = []
+                for _idx in sorted(tools_accumulation.keys()):
+                    _fn = tools_accumulation[_idx]
+                    if not _fn.get("name"):
+                        continue
+                    calls.append(NativeToolCall(
+                        tool_name=_fn["name"],
+                        args=_repair_json(_fn["arguments"] or "{}"),
+                        tool_call_id=_fn.get("id", ""),
+                    ))
+                return calls or None
+
+            try:
+                kwargs = self._responses_kwargs(messages, oai_tools, stream=True)
+                stream = await self.client.responses.create(**kwargs)
+
+                async for event in _stall_guarded_stream(stream, _CHUNK_STALL_S):
+                    if cancel_event and cancel_event.is_set():
+                        close = getattr(stream, "close", None)
+                        if callable(close):
+                            maybe = close()
+                            if asyncio.iscoroutine(maybe):
+                                await maybe
+                        return LLMResponse(
+                            content="".join(chunks),
+                            model=self.model,
+                            tokens_used=final_tokens,
+                            prompt_tokens=final_prompt_tokens,
+                            cache_read_tokens=final_cached_tokens,
+                            partial=True,
+                            tool_calls=_accumulated_calls(),
+                        )
+
+                    try:
+                        etype = getattr(event, "type", "") or ""
+                        if etype == "response.output_text.delta":
+                            text = getattr(event, "delta", None) or ""
+                            if text:
+                                chunks.append(text)
+                                await _invoke_callback(on_chunk, text)
+                        elif etype == "response.output_item.added":
+                            item = getattr(event, "item", None)
+                            idx = int(getattr(event, "output_index", 0) or 0)
+                            if item is not None and getattr(item, "type", None) == "function_call":
+                                tools_accumulation[idx] = {
+                                    "id": getattr(item, "call_id", "")
+                                    or getattr(item, "id", "")
+                                    or "",
+                                    "name": getattr(item, "name", "") or "",
+                                    "arguments": getattr(item, "arguments", "") or "",
+                                }
+                        elif etype == "response.function_call_arguments.delta":
+                            idx = int(getattr(event, "output_index", 0) or 0)
+                            if idx not in tools_accumulation:
+                                tools_accumulation[idx] = {
+                                    "id": "",
+                                    "name": "",
+                                    "arguments": "",
+                                }
+                            delta = getattr(event, "delta", None) or ""
+                            tools_accumulation[idx]["arguments"] += delta
+                        elif etype == "response.output_item.done":
+                            item = getattr(event, "item", None)
+                            idx = int(getattr(event, "output_index", 0) or 0)
+                            if item is not None and getattr(item, "type", None) == "function_call":
+                                prev = tools_accumulation.get(idx, {})
+                                tools_accumulation[idx] = {
+                                    "id": getattr(item, "call_id", "")
+                                    or getattr(item, "id", "")
+                                    or prev.get("id", ""),
+                                    "name": getattr(item, "name", "")
+                                    or prev.get("name", ""),
+                                    "arguments": getattr(item, "arguments", None)
+                                    or prev.get("arguments", "")
+                                    or "",
+                                }
+                        elif etype == "response.completed":
+                            resp = getattr(event, "response", None)
+                            if resp is not None:
+                                _t, _c, total, prompt, cached = _parse_responses_result(resp)
+                                final_tokens = total
+                                final_prompt_tokens = prompt
+                                final_cached_tokens = cached
+                                if _t and not chunks:
+                                    chunks.append(_t)
+                                    await _invoke_callback(on_chunk, _t)
+                                if _c and not tools_accumulation:
+                                    for i, call in enumerate(_c):
+                                        tools_accumulation[i] = {
+                                            "id": call.tool_call_id,
+                                            "name": call.tool_name,
+                                            "arguments": json.dumps(call.args),
+                                        }
+                        elif etype in ("response.failed", "error"):
+                            raise RuntimeError(f"Responses stream failed: {event}")
+                    except RuntimeError:
+                        raise
+                    except Exception:
+                        pass  # malformed event — skip
+
+                return LLMResponse(
+                    content="".join(chunks),
+                    model=self.model,
+                    tokens_used=final_tokens,
+                    prompt_tokens=final_prompt_tokens,
+                    cache_read_tokens=final_cached_tokens,
+                    tool_calls=_accumulated_calls(),
+                )
+
+            except Exception as exc:
+                last_error = exc
+                if _is_responses_unsupported(exc):
+                    raise
+                if _is_retryable(exc) and attempt < _MAX_RETRIES:
+                    logger.warning(
+                        "  [openai-responses] Stream interrupted after %d chars — retrying",
+                        len("".join(chunks)),
+                    )
+                    continue
+                if chunks or tools_accumulation:
+                    partial = "".join(chunks)
+                    logger.warning(
+                        "  [openai-responses] Stream interrupted after %d chars — returning partial",
+                        len(partial),
+                    )
+                    return LLMResponse(
+                        content=partial,
+                        model=self.model,
+                        tokens_used=final_tokens,
+                        prompt_tokens=final_prompt_tokens,
+                        cache_read_tokens=final_cached_tokens,
+                        partial=True,
+                        tool_calls=_accumulated_calls(),
+                    )
+                break
+
+        raise last_error  # type: ignore[misc]
 
     async def _stream_with_retry(
         self,
