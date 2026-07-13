@@ -1,12 +1,24 @@
+import json
 import os
 import re
 import shutil
 import sys
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from dataclasses import dataclass, field
 
 from clawagents.tools.registry import Tool, ToolResult
+
+# Agent Skills spec limits (agentskills.io; mirrored from deepagents/Claude Code).
+# Violations warn — they never reject a skill (lenient like Claude Code).
+MAX_SKILL_NAME_LENGTH = 64
+MAX_SKILL_DESCRIPTION_LENGTH = 1024
+# Oversized SKILL.md files are skipped outright (openclaw caps at 256K,
+# deepagents at 10M; 1M is a safe middle ground for an instruction file).
+MAX_SKILL_FILE_BYTES = 1024 * 1024
+
+# Max bundled-resource entries shown by use_skill.
+_MAX_RESOURCE_ENTRIES = 20
 
 @dataclass
 class SkillRequires:
@@ -26,10 +38,151 @@ class Skill:
     workspace_layout: str = ""
     success_criteria: str = ""
     workflow_steps: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+
+    @property
+    def base_dir(self) -> str:
+        """Directory containing the skill file (resources live beside it)."""
+        return str(Path(self.path).parent)
+
+    @property
+    def is_dir_skill(self) -> bool:
+        """True for `<dir>/SKILL.md` skills, which own their directory."""
+        return Path(self.path).name.lower() == "skill.md"
+
+
+def _default_skill_name(file_path: str) -> str:
+    """`<dir>/SKILL.md` is named after the directory (Claude Code rule);
+    flat `foo.md` skills fall back to the file stem."""
+    p = Path(file_path)
+    if p.name.lower() == "skill.md" and p.parent.name:
+        return p.parent.name
+    return p.stem
+
+
+def _validate_skill_name(name: str, file_path: str) -> List[str]:
+    """Agent Skills spec checks — warn, never reject."""
+    warnings: List[str] = []
+    if len(name) > MAX_SKILL_NAME_LENGTH:
+        warnings.append(
+            f"skill name exceeds {MAX_SKILL_NAME_LENGTH} chars: {name[:40]}…"
+        )
+    if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", name):
+        warnings.append(
+            f'skill name "{name}" is not spec-conformant '
+            "(lowercase letters/digits/hyphens; no leading/trailing/double hyphen)"
+        )
+    p = Path(file_path)
+    if p.name.lower() == "skill.md" and p.parent.name and name != p.parent.name:
+        warnings.append(
+            f'skill name "{name}" does not match its directory "{p.parent.name}"'
+        )
+    return warnings
+
+
+def _fallback_description(body: str) -> str:
+    """First meaningful markdown line (Claude Code fallback for missing
+    description) so bare .md skills still surface something in the catalog."""
+    for line in (body or "").splitlines():
+        text = line.strip()
+        if not text or text.startswith(("#", "```", "<!--", "---", "|")):
+            continue
+        text = re.sub(r"[*_`>]+", "", text).strip()
+        if text:
+            return text[:200]
+    return ""
+
+
+def _parse_inline_list(raw: str) -> List[str]:
+    cleaned = re.sub(r'[\[\]"\']', "", raw)
+    return [x.strip() for x in re.split(r"[\s,]+", cleaned) if x.strip()]
+
+
+def _parse_requires_block(yaml_content: str) -> Tuple[Optional[str], Optional[List[str]], Optional[List[str]]]:
+    """Parse eligibility requirements without false-matching other blocks.
+
+    Accepts, in priority order:
+      1. dotted keys at top level: ``requires.os: darwin``
+      2. a scoped ``requires:`` block (indented ``os:``/``bins:``/``env:``,
+         inline or block lists)
+      3. openclaw-style single-line JSON metadata:
+         ``metadata: {"openclaw": {"os": [...], "requires": {"bins": [...]}}}``
+
+    Earlier versions matched ``^\\s+os:`` anywhere in the frontmatter, so an
+    indented key inside an unrelated block (e.g. ``metadata:``) silently gated
+    the skill. Requirements are now only read from the shapes above.
+    """
+    os_val: Optional[str] = None
+    bins: Optional[List[str]] = None
+    env: Optional[List[str]] = None
+
+    # 1. Dotted keys.
+    m = re.search(r"^requires\.os:\s*(.+)$", yaml_content, re.MULTILINE)
+    if m:
+        os_val = m.group(1).strip()
+    m = re.search(r"^requires\.bins:\s*(.+)$", yaml_content, re.MULTILINE)
+    if m:
+        bins = _parse_inline_list(m.group(1))
+    m = re.search(r"^requires\.env:\s*(.+)$", yaml_content, re.MULTILINE)
+    if m:
+        env = _parse_inline_list(m.group(1))
+
+    # 2. Scoped `requires:` block — only lines indented under it.
+    block_match = re.search(
+        r"^requires:\s*\n((?:[ \t]+[^\n]*\n?)+)", yaml_content, re.MULTILINE
+    )
+    if block_match:
+        block = block_match.group(1)
+
+        def _block_value(key: str) -> Optional[List[str]]:
+            inline = re.search(rf"^[ \t]+{key}:[ \t]*(\S.*)$", block, re.MULTILINE)
+            if inline and inline.group(1).strip():
+                return _parse_inline_list(inline.group(1))
+            # Block list: `env:` followed by deeper-indented `- ITEM` lines.
+            lst = re.search(
+                rf"^([ \t]+){key}:\s*\n((?:\1[ \t]+-[^\n]*\n?)+)", block, re.MULTILINE
+            )
+            if lst:
+                return [
+                    i.strip()
+                    for i in re.findall(r"-\s*([^\n]+)", lst.group(2))
+                    if i.strip()
+                ]
+            return None
+
+        os_items = _block_value("os")
+        if os_val is None and os_items:
+            os_val = " ".join(os_items)
+        if bins is None:
+            bins = _block_value("bins")
+        if env is None:
+            env = _block_value("env")
+
+    # 3. openclaw single-line JSON metadata (best-effort, strict JSON only).
+    if os_val is None and bins is None and env is None:
+        meta_match = re.search(r"^metadata:\s*(\{.+\})\s*$", yaml_content, re.MULTILINE)
+        if meta_match:
+            try:
+                meta = json.loads(meta_match.group(1))
+                oc = meta.get("openclaw") if isinstance(meta, dict) else None
+                if isinstance(oc, dict):
+                    oc_os = oc.get("os")
+                    if isinstance(oc_os, list) and oc_os:
+                        os_val = " ".join(str(x) for x in oc_os)
+                    oc_req = oc.get("requires")
+                    if isinstance(oc_req, dict):
+                        if isinstance(oc_req.get("bins"), list):
+                            bins = [str(b) for b in oc_req["bins"]]
+                        if isinstance(oc_req.get("env"), list):
+                            env = [str(e) for e in oc_req["env"]]
+            except (ValueError, TypeError):
+                pass
+
+    return os_val, bins, env
+
 
 def parse_skill_file(content: str, file_path: str) -> Skill:
-    default_name = Path(file_path).stem
-    name = default_name
+    name = _default_skill_name(file_path)
     description = ""
     body = content
     allowed_tools: List[str] = []
@@ -38,15 +191,21 @@ def parse_skill_file(content: str, file_path: str) -> Skill:
     workspace_layout: str = ""
     success_criteria: str = ""
     workflow_steps: List[str] = []
+    warnings: List[str] = []
 
-    frontmatter_match = re.match(r"^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]*)$", content)
+    # Closing `---` may sit at EOF (no trailing newline / empty body).
+    frontmatter_match = re.match(
+        r"^---\s*\n([\s\S]*?)\n---\s*(?:\n([\s\S]*))?$", content
+    )
     if frontmatter_match:
         yaml_content = frontmatter_match.group(1) or ""
         body = frontmatter_match.group(2) or ""
 
         name_match = re.search(r"^name:\s*(.+)$", yaml_content, re.MULTILINE)
         if name_match:
-            name = name_match.group(1).strip().strip("\"'")
+            explicit = name_match.group(1).strip().strip("\"'")
+            if explicit:
+                name = explicit
 
         description = _parse_frontmatter_description(yaml_content)
 
@@ -55,28 +214,9 @@ def parse_skill_file(content: str, file_path: str) -> Skill:
         if tools_match:
             allowed_tools = [t.strip(",") for t in tools_match.group(1).split() if t.strip(",")]
 
-        # Parse requires block for eligibility gating
-        os_match = re.search(r"^requires\.os:\s*(.+)$", yaml_content, re.MULTILINE) \
-            or re.search(r"^\s+os:\s*(.+)$", yaml_content, re.MULTILINE)
-        bins_match = re.search(r"^requires\.bins:\s*(.+)$", yaml_content, re.MULTILINE) \
-            or re.search(r"^\s+bins:\s*(.+)$", yaml_content, re.MULTILINE)
-        env_match = re.search(r"^requires\.env:\s*(.+)$", yaml_content, re.MULTILINE) \
-            or re.search(r"^\s+env:\s*(.+)$", yaml_content, re.MULTILINE)
-
-        if os_match or bins_match or env_match:
-            def _parse_list(raw: str) -> List[str]:
-                cleaned = re.sub(r'[\[\]"\']', "", raw)
-                return [x.strip() for x in re.split(r"[\s,]+", cleaned) if x.strip()]
-
-            requires = SkillRequires(
-                os=os_match.group(1).strip() if os_match else None,
-                bins=_parse_list(bins_match.group(1)) if bins_match else None,
-                env=_parse_list(env_match.group(1)) if env_match else None,
-            )
-
-        def _parse_list(raw: str) -> List[str]:
-            cleaned = re.sub(r'[\[\]"\']', "", raw)
-            return [x.strip() for x in re.split(r"[\s,]+", cleaned) if x.strip()]
+        req_os, req_bins, req_env = _parse_requires_block(yaml_content)
+        if req_os or req_bins or req_env:
+            requires = SkillRequires(os=req_os, bins=req_bins, env=req_env)
 
         def _parse_block_list(key: str, yaml_src: str) -> Optional[List[str]]:
             """Parse a YAML key that may have an inline value or a block list of '- item' entries."""
@@ -98,7 +238,7 @@ def parse_skill_file(content: str, file_path: str) -> Skill:
             )
             im = inline_pattern.search(yaml_src)
             if im:
-                return _parse_list(im.group(1).strip())
+                return _parse_inline_list(im.group(1).strip())
 
             return None
 
@@ -127,6 +267,15 @@ def parse_skill_file(content: str, file_path: str) -> Skill:
         if ws_items is not None:
             workflow_steps = ws_items
 
+    if not description:
+        description = _fallback_description(body)
+    if len(description) > MAX_SKILL_DESCRIPTION_LENGTH:
+        warnings.append(
+            f"description exceeds {MAX_SKILL_DESCRIPTION_LENGTH} chars; truncated"
+        )
+        description = description[: MAX_SKILL_DESCRIPTION_LENGTH - 1].rstrip() + "…"
+    warnings.extend(_validate_skill_name(name, file_path))
+
     return Skill(
         name=name,
         description=description,
@@ -138,6 +287,7 @@ def parse_skill_file(content: str, file_path: str) -> Skill:
         workspace_layout=workspace_layout,
         success_criteria=success_criteria,
         workflow_steps=workflow_steps,
+        warnings=warnings,
     )
 
 
@@ -166,32 +316,100 @@ def _parse_frontmatter_description(yaml_content: str) -> str:
     return ""
 
 
-def is_skill_eligible(skill: Skill) -> bool:
+_OS_ALIASES = {
+    "darwin": "darwin", "macos": "darwin", "mac": "darwin", "osx": "darwin",
+    "win32": "win32", "windows": "win32", "win": "win32",
+    "linux": "linux",
+}
+
+
+def _normalize_os_values(raw: str) -> List[str]:
+    """Map user-facing OS names (macos, windows, …) to sys.platform values."""
+    out: List[str] = []
+    for part in re.split(r"[\s,]+", (raw or "").strip().lower()):
+        if not part:
+            continue
+        if part in ("any", "all", "*"):
+            return []  # matches everything
+        out.append(_OS_ALIASES.get(part, part))
+    return out
+
+
+def skill_ineligibility_reason(skill: Skill) -> Optional[str]:
+    """Why a skill cannot run here, or None if eligible."""
     if not skill.requires:
-        return True
+        return None
     req = skill.requires
-    if req.os and sys.platform != req.os:
-        return False
-    if req.bins:
-        for b in req.bins:
-            if shutil.which(b) is None:
-                return False
-    if req.env:
-        for var in req.env:
-            if not os.environ.get(var):
-                return False
-    return True
+    if req.os:
+        wanted = _normalize_os_values(req.os)
+        if wanted and sys.platform not in wanted:
+            return f"requires os {req.os} (current: {sys.platform})"
+    for b in req.bins or []:
+        if shutil.which(b) is None:
+            return f"missing binary: {b}"
+    for var in req.env or []:
+        if not os.environ.get(var):
+            return f"missing env var: {var}"
+    return None
+
+
+def is_skill_eligible(skill: Skill) -> bool:
+    return skill_ineligibility_reason(skill) is None
 
 
 class SkillStore:
+    """Loads skills from directories.
+
+    Precedence: directories are loaded in the order added and a later
+    directory overrides an earlier one on name collision (openclaw semantics)
+    — callers must add lowest-precedence roots (e.g. bundled) first.
+    """
+
     def __init__(self):
         self.skills: Dict[str, Skill] = {}
         self.skill_dirs: List[str] = []
+        # name → reason for skills whose runtime requirements failed.
+        self.ineligible: Dict[str, str] = {}
+        # Human-readable loader diagnostics (spec violations, skipped files).
+        self.warnings: List[str] = []
+        self._seen_dirs: set[str] = set()
 
     def add_directory(self, d: str | Path):
         path = Path(d)
-        if path.exists():
-            self.skill_dirs.append(str(path))
+        if not path.exists():
+            return
+        try:
+            key = str(path.resolve())
+        except OSError:
+            key = str(path)
+        if key in self._seen_dirs:
+            return
+        self._seen_dirs.add(key)
+        self.skill_dirs.append(str(path))
+
+    def _load_skill_file(self, skill_file: Path):
+        try:
+            if skill_file.stat().st_size > MAX_SKILL_FILE_BYTES:
+                self.warnings.append(
+                    f"{skill_file}: skipped (exceeds {MAX_SKILL_FILE_BYTES // 1024}KB limit)"
+                )
+                return
+            content = skill_file.read_text("utf-8")
+        except (OSError, UnicodeDecodeError):
+            return
+        skill = parse_skill_file(content, str(skill_file))
+        if not skill.name.strip():
+            self.warnings.append(f"{skill_file}: skipped (empty skill name)")
+            return
+        for w in skill.warnings:
+            self.warnings.append(f"{skill_file}: {w}")
+        reason = skill_ineligibility_reason(skill)
+        if reason is not None:
+            self.ineligible[skill.name] = reason
+            return
+        self.skills[skill.name] = skill
+        # An eligible load supersedes a stale ineligible record for the name.
+        self.ineligible.pop(skill.name, None)
 
     async def load_all(self):
         for d in self.skill_dirs:
@@ -202,16 +420,10 @@ class SkillStore:
             # Directory itself is a skill (…/caveman/SKILL.md)
             self_skill = p / "SKILL.md"
             if self_skill.exists():
-                try:
-                    content = self_skill.read_text("utf-8")
-                    skill = parse_skill_file(content, str(self_skill))
-                    if is_skill_eligible(skill):
-                        self.skills[skill.name] = skill
-                except (OSError, UnicodeDecodeError):
-                    pass
+                self._load_skill_file(self_skill)
 
             try:
-                entries = list(p.iterdir())
+                entries = sorted(p.iterdir())
             except OSError:
                 continue
             for entry in entries:
@@ -221,16 +433,13 @@ class SkillStore:
                     if entry.is_dir():
                         skill_file = entry / "SKILL.md"
                         if skill_file.exists():
-                            content = skill_file.read_text("utf-8")
-                            skill = parse_skill_file(content, str(skill_file))
-                            if is_skill_eligible(skill):
-                                self.skills[skill.name] = skill
-                    elif entry.suffix == ".md":
-                        content = entry.read_text("utf-8")
-                        skill = parse_skill_file(content, str(entry))
-                        if is_skill_eligible(skill):
-                            self.skills[skill.name] = skill
-                except (OSError, UnicodeDecodeError):
+                            self._load_skill_file(skill_file)
+                    elif entry.suffix == ".md" and entry.name.lower() not in (
+                        "skill.md",  # already loaded by the dir-skill branch
+                        "readme.md", "agents.md", "claude.md",  # docs, not skills
+                    ):
+                        self._load_skill_file(entry)
+                except OSError:
                     continue
 
     def list(self) -> List[Skill]:
@@ -240,8 +449,31 @@ class SkillStore:
         return self.skills.get(name)
 
 
+def _list_skill_resources(skill: Skill) -> List[str]:
+    """Relative paths of files bundled with a dir-based skill (scripts/,
+    references/, assets/, …) so the agent can read or run them."""
+    if not skill.is_dir_skill:
+        return []
+    base = Path(skill.base_dir)
+    out: List[str] = []
+    try:
+        for path in sorted(base.rglob("*")):
+            if len(out) >= _MAX_RESOURCE_ENTRIES:
+                out.append("…")
+                break
+            if not path.is_file() or path.name == "SKILL.md":
+                continue
+            rel = path.relative_to(base)
+            if any(part.startswith(".") for part in rel.parts):
+                continue
+            out.append(str(rel))
+    except OSError:
+        return out
+    return out
+
+
 def create_skill_tools(store: SkillStore) -> List[Tool]:
-    
+
     class ListSkillsTool:
         name = "list_skills"
         description = (
@@ -253,16 +485,23 @@ def create_skill_tools(store: SkillStore) -> List[Tool]:
 
         async def execute(self, args: Dict[str, Any]) -> ToolResult:
             skills = store.list()
-            if not skills:
+            if not skills and not store.ineligible:
                 return ToolResult(success=True, output="No skills available.")
-            
+
             lines = []
             for s in skills:
                 line = f"- **{s.name}**: {s.description or '(no description)'}"
                 if s.allowed_tools:
                     line += f"\n  → Allowed tools: {', '.join(s.allowed_tools)}"
                 lines.append(line)
-            return ToolResult(success=True, output=f"Available skills ({len(skills)}):\n" + "\n".join(lines))
+            output = f"Available skills ({len(skills)}):\n" + "\n".join(lines)
+            if store.ineligible:
+                unavailable = "\n".join(
+                    f"- **{name}**: {reason}"
+                    for name, reason in sorted(store.ineligible.items())
+                )
+                output += f"\n\nUnavailable (requirements not met):\n{unavailable}"
+            return ToolResult(success=True, output=output)
 
     class UseSkillTool:
         name = "use_skill"
@@ -286,16 +525,31 @@ def create_skill_tools(store: SkillStore) -> List[Tool]:
                 hint = ""
                 if suggestions:
                     hint = " Did you mean: " + ", ".join(suggestions) + "?"
+                ineligible_note = ""
+                for iname, reason in store.ineligible.items():
+                    if _norm_skill_key(iname) == _norm_skill_key(name):
+                        ineligible_note = f' Skill "{iname}" exists but is unavailable: {reason}.'
+                        break
                 return ToolResult(
                     success=False,
                     output="",
                     error=(
-                        f'Skill "{name}" not found.{hint} '
+                        f'Skill "{name}" not found.{ineligible_note}{hint} '
                         f"Available: {', '.join(available) if available else 'none'}"
                     ),
                 )
 
             parts = [f"# Skill: {skill.name}"]
+            # Resources referenced by the skill body (scripts/…, references/…)
+            # resolve relative to this directory — without it the agent cannot
+            # locate them (Claude Code prepends the same line).
+            parts.append(f"Base directory for this skill: {skill.base_dir}")
+            resources = _list_skill_resources(skill)
+            if resources:
+                parts.append(
+                    "Bundled resources (relative to base directory): "
+                    + ", ".join(resources)
+                )
 
             if skill.forbidden_actions:
                 parts.append("\n## Forbidden Actions")

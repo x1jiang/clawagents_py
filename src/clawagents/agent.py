@@ -781,7 +781,10 @@ def create_claw_agent(
     skill_store = None
     base_skill_dirs = _to_list(skills) if skills is not None else _auto_discover_skills()
     _bundled = _get_bundled_skills_dir()
-    skill_dirs = (base_skill_dirs + [_bundled]) if (_bundled and os.path.isdir(_bundled)) else base_skill_dirs
+    # Bundled skills go FIRST: SkillStore gives later directories precedence on
+    # name collisions, so user/workspace skills must override bundled ones
+    # (openclaw/deepagents precedence order), not the other way around.
+    skill_dirs = ([_bundled] + base_skill_dirs) if (_bundled and os.path.isdir(_bundled)) else base_skill_dirs
     if skill_dirs:
         from clawagents.tools.skills import SkillStore, create_skill_tools
 
@@ -801,9 +804,15 @@ def create_claw_agent(
             asyncio.run(skill_store.load_all())
 
         if skills_exclude:
-            for _name in skills_exclude:
-                if _name:
-                    skill_store.skills.pop(str(_name), None)
+            from clawagents.tools.skills import _norm_skill_key
+
+            _excluded_keys = {_norm_skill_key(str(n)) for n in skills_exclude if n}
+            for _name in list(skill_store.skills):
+                if _norm_skill_key(_name) in _excluded_keys:
+                    skill_store.skills.pop(_name, None)
+            for _name in list(skill_store.ineligible):
+                if _norm_skill_key(_name) in _excluded_keys:
+                    skill_store.ineligible.pop(_name, None)
 
         loaded_skills = skill_store.list()
         if loaded_skills:
@@ -1343,8 +1352,25 @@ def _auto_discover_memory() -> list:
 
 
 def _auto_discover_skills() -> list:
-    """Auto-discover skill directories in common locations."""
+    """Auto-discover skill directories in common locations.
+
+    Returned lowest-precedence first (SkillStore gives later dirs precedence):
+    personal skill homes, then workspace dirs. Personal homes
+    (`~/.clawagents/skills`, `~/.agents/skills`) are opt-in via
+    ``CLAW_USER_SKILL_HOMES=1`` so library consumers and tests stay hermetic;
+    the VS Code extension resolves homes itself and passes them explicitly.
+    """
     found = []
+    if (os.environ.get("CLAW_USER_SKILL_HOMES") or "").strip() == "1":
+        from clawagents.paths import get_clawagents_home
+
+        home_candidates = [
+            str(get_clawagents_home(create=False) / "skills"),
+            os.path.expanduser("~/.agents/skills"),
+        ]
+        for path in home_candidates:
+            if os.path.isdir(path):
+                found.append(path)
     for name in _DEFAULT_SKILL_DIRS:
         path = os.path.join(os.getcwd(), name)
         if os.path.isdir(path):
