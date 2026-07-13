@@ -805,26 +805,12 @@ def create_claw_agent(
 
         loaded_skills = skill_store.list()
         if loaded_skills:
-            lines = [f"- **{s.name}**: {s.description or '(no description)'}" for s in loaded_skills]
-            skill_summaries = "## Available Skills\nUse the `use_skill` tool to load full instructions.\n" + "\n".join(lines)
-
-        # Skill prompt budget limits
-        MAX_SKILLS_PROMPT_CHARS = 4000
-        MAX_SKILLS_IN_PROMPT = 20
-
-        if skill_summaries:
-            skill_lines = [l for l in skill_summaries.split("\n") if l.startswith("- **")]
-            if len(skill_lines) > MAX_SKILLS_IN_PROMPT:
-                truncated = skill_lines[:MAX_SKILLS_IN_PROMPT]
-                skill_summaries = ("## Available Skills\nUse the `use_skill` tool to load full instructions.\n"
-                    + "\n".join(truncated)
-                    + f"\n\n({len(skill_lines) - MAX_SKILLS_IN_PROMPT} more skills available — use list_skills to see all)")
-            if len(skill_summaries) > MAX_SKILLS_PROMPT_CHARS:
-                skill_summaries = (skill_summaries[:MAX_SKILLS_PROMPT_CHARS]
-                    + "\n\n...(skill list truncated — use list_skills to see all)")
+            skill_summaries = _build_skill_catalog_prompt(loaded_skills)
 
         for skill_tool in create_skill_tools(skill_store):
-            if skill_tool.name == "use_skill":
+            # Both tools: thin catalog in-prompt; list_skills for overflow;
+            # use_skill loads one full body on demand (cost-effective).
+            if skill_tool.name in ("use_skill", "list_skills"):
                 registry.register(skill_tool)
 
     from clawagents.tools.skill_workshop import create_skill_workshop_tool
@@ -1075,6 +1061,41 @@ def _get_bundled_skills_dir() -> str:
 
 
 # Default locations for auto-discovery
+# Cost-effective skill prompt: short catalog only; full bodies via use_skill.
+MAX_SKILLS_IN_PROMPT = 20
+MAX_SKILLS_PROMPT_CHARS = 4000
+
+_SKILL_CATALOG_HEADER = (
+    "## Available Skills\n"
+    "Match the task to a skill below, then call `use_skill` once for full "
+    "instructions (do not load skills you will not follow). "
+    "Call `list_skills` only if this list was truncated or you need a skill "
+    "not shown.\n"
+)
+
+
+def _build_skill_catalog_prompt(loaded_skills: list) -> str:
+    """Build a bounded name/description catalog for the system prompt."""
+    lines = [
+        f"- **{s.name}**: {s.description or '(no description)'}"
+        for s in loaded_skills
+    ]
+    total = len(lines)
+    shown = lines[:MAX_SKILLS_IN_PROMPT]
+    text = _SKILL_CATALOG_HEADER + "\n".join(shown)
+    if total > MAX_SKILLS_IN_PROMPT:
+        text += (
+            f"\n\n({total - MAX_SKILLS_IN_PROMPT} more skills available — "
+            "use list_skills to see all)"
+        )
+    if len(text) > MAX_SKILLS_PROMPT_CHARS:
+        text = (
+            text[:MAX_SKILLS_PROMPT_CHARS]
+            + "\n\n...(skill list truncated — use list_skills to see all)"
+        )
+    return text
+
+
 _DEFAULT_MEMORY_FILES = ["AGENTS.md", "CLAWAGENTS.md", "CLAUDE.md"]
 _DEFAULT_SKILL_DIRS = ["skills", ".skills", "skill", ".skill", "Skills"]
 

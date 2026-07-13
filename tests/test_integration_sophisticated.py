@@ -790,6 +790,7 @@ class TestAutoDiscoveryWithFactory:
             assert "ls" in tool_names         # built-in
             assert "read_file" in tool_names  # built-in
             assert "use_skill" in tool_names  # auto-discovered skills
+            assert "list_skills" in tool_names  # overflow catalog tool
 
             # Verify hooks can be applied
             agent.block_tools("execute")

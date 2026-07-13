@@ -221,7 +221,11 @@ def create_skill_tools(store: SkillStore) -> List[Tool]:
     
     class ListSkillsTool:
         name = "list_skills"
-        description = "List all available skills the agent can use."
+        description = (
+            "List all available skill names and short descriptions. "
+            "Prefer the skills catalog already in the system prompt; call this "
+            "only when that catalog was truncated or you need a skill not shown."
+        )
         parameters: Dict[str, Dict[str, Any]] = {}
 
         async def execute(self, args: Dict[str, Any]) -> ToolResult:
@@ -239,7 +243,10 @@ def create_skill_tools(store: SkillStore) -> List[Tool]:
 
     class UseSkillTool:
         name = "use_skill"
-        description = "Load and read a specific skill to learn its instructions. Use list_skills first to see what's available."
+        description = (
+            "Load full instructions for one skill. Call only when that skill "
+            "matches the current task and you will follow its workflow."
+        )
         parameters = {
             "name": {"type": "string", "description": "Name of the skill to load", "required": True}
         }
