@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.12.0-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.12.1-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -17,13 +17,13 @@ Built by extracting and unifying the best architectural patterns from [OpenClaw]
 
 ## Apps & extensions
 
-This repo is the **Python framework** (`pip install clawagents`). Ready-made clients (all ship with Bedrock + the 6.12.0 agent stack):
+This repo is the **Python framework** (`pip install clawagents`). Ready-made clients (all ship with Bedrock + the 6.12.x agent stack):
 
 | Product | Latest | What it is | Link |
 |---------|--------|------------|------|
 | **ClawAgents Desktop** | **v0.2.4** | Native macOS app — project chats, file editor, SSH remotes, Settings (incl. AWS Bedrock), Developer ID signed + notarized | [Repo](https://github.com/x1jiang/clawagents-desktop) · [Download DMG](https://github.com/x1jiang/clawagents-desktop/releases/tag/v0.2.4) |
-| **ClawAgents for VS Code / Cursor** | **v1.0.9** | Editor extension — chat, tools, Bedrock provider UI, agent loop inside your IDE | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Release + VSIX](https://github.com/x1jiang/clawagents-vscode/releases/tag/v1.0.9) |
-| **Python package** | **v6.12.0** | This library — `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/6.12.0/) · [Release](https://github.com/x1jiang/clawagents_py/releases/tag/v6.12.0) |
+| **ClawAgents for VS Code / Cursor** | **v1.0.12** | Editor extension — chat, tools, Bedrock, GPT Effort selector | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Release + VSIX](https://github.com/x1jiang/clawagents-vscode/releases/tag/v1.0.12) |
+| **Python package** | **v6.12.1** | This library — `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/6.12.1/) · [Release](https://github.com/x1jiang/clawagents_py/releases/tag/v6.12.1) |
 
 ## Installation
 
@@ -35,7 +35,12 @@ pip install clawagents[bedrock]     # + Amazon Bedrock (Claude via IAM + Nova/Co
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 6.12.0** — Native Amazon Bedrock (July 2026).
+> **Version 6.12.1** — OpenAI `reasoning_effort` for GPT-5.5/5.6 and o-series (July 2026).
+
+### New In v6.12.1
+
+- **`reasoning_effort`** on `create_claw_agent` / OpenAI provider (`none`|`low`|`medium`|`high`|`xhigh`|`max`; UI aliases Light→low, Extra High→xhigh)
+- Chat Completions + tools on GPT-5.5/5.6 still force `none` (API limit) until Responses API
 
 ### New In v6.12.0
 

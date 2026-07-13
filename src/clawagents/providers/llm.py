@@ -502,12 +502,55 @@ def _chat_completions_needs_reasoning_none(model: str) -> bool:
     return m.startswith("gpt-5.5") or m.startswith("gpt-5.6")
 
 
+_REASONING_EFFORT_VALUES = frozenset({
+    "none", "minimal", "low", "medium", "high", "xhigh", "max",
+})
+
+
+def normalize_reasoning_effort(value: str | None) -> str | None:
+    """Return a valid effort string, or None to omit the parameter."""
+    if value is None:
+        return None
+    v = str(value).strip().lower()
+    if not v:
+        return None
+    # UI labels → API values
+    aliases = {
+        "light": "low",
+        "extra high": "xhigh",
+        "extra_high": "xhigh",
+        "extrahigh": "xhigh",
+    }
+    v = aliases.get(v, v)
+    return v if v in _REASONING_EFFORT_VALUES else None
+
+
+def model_supports_reasoning_effort(model: str) -> bool:
+    """Heuristic: models that accept ``reasoning_effort`` on Chat Completions."""
+    m = (model or "").strip().lower()
+    if not m:
+        return False
+    if m.startswith(("o1", "o3", "o4")):
+        return True
+    if m.startswith(("gpt-5.5", "gpt-5.6")):
+        return True
+    # Bare gpt-5 / gpt-5-codex family (not gpt-5-nano/micro as primary chat)
+    if m == "gpt-5" or m.startswith("gpt-5-"):
+        return True
+    return False
+
+
 def _apply_tool_reasoning_compat(
     kwargs: dict[str, Any],
     *,
     model: str,
     has_tools: bool,
+    preferred: str | None = None,
 ) -> None:
+    effort = normalize_reasoning_effort(preferred)
+    if effort:
+        kwargs["reasoning_effort"] = effort
+    # Chat Completions + tools on GPT-5.5/5.6 still requires none.
     if has_tools and _chat_completions_needs_reasoning_none(model):
         kwargs["reasoning_effort"] = "none"
 
@@ -601,6 +644,9 @@ class OpenAIProvider(LLMProvider):
         self.model = config.openai_model
         self._max_tokens = config.max_tokens
         self._temperature = _resolve_temperature(config.openai_model, config.temperature)
+        self._reasoning_effort = normalize_reasoning_effort(
+            getattr(config, "reasoning_effort", None) or None
+        )
 
     async def chat(
         self,
@@ -654,7 +700,10 @@ class OpenAIProvider(LLMProvider):
         if oai_tools:
             kwargs["tools"] = oai_tools
         _apply_tool_reasoning_compat(
-            kwargs, model=self.model, has_tools=bool(oai_tools),
+            kwargs,
+            model=self.model,
+            has_tools=bool(oai_tools),
+            preferred=self._reasoning_effort,
         )
         resp = await self.client.chat.completions.create(**kwargs)
         _prompt_tokens = (resp.usage.prompt_tokens or 0) if resp.usage else 0
@@ -727,7 +776,10 @@ class OpenAIProvider(LLMProvider):
                 if oai_tools:
                     kwargs["tools"] = oai_tools
                 _apply_tool_reasoning_compat(
-                    kwargs, model=self.model, has_tools=bool(oai_tools),
+                    kwargs,
+                    model=self.model,
+                    has_tools=bool(oai_tools),
+                    preferred=self._reasoning_effort,
                 )
                 stream = await self.client.chat.completions.create(**kwargs)
 

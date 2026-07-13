@@ -56,6 +56,10 @@ class EngineConfig(BaseSettings):
     bedrock_model: str = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
     max_tokens: int = 8192
     temperature: float = 0.0
+    # OpenAI reasoning effort for o-series / GPT-5.5+ (none|low|medium|high|xhigh|max).
+    # Empty = omit (provider default), except Chat Completions + tools on GPT-5.5/5.6
+    # which must force ``none`` until Responses API.
+    reasoning_effort: str = ""
     context_window: int = 1000000
     streaming: bool = True
     gateway_api_key: str = ""

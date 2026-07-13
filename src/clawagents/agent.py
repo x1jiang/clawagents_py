@@ -489,6 +489,7 @@ def create_claw_agent(
     context_window: Optional[int] = None,
     max_tokens: Optional[int] = None,
     temperature: Optional[float] = None,
+    reasoning_effort: Optional[str] = None,
     use_native_tools: bool = True,
     on_event: Optional[OnEvent] = None,
     trajectory: Optional[bool] = None,
@@ -534,6 +535,12 @@ def create_claw_agent(
         context_window:  Max context window in tokens (default: from CONTEXT_WINDOW env / 1000000).
         max_tokens:     Max output tokens per call (default: from MAX_TOKENS env / 8192).
         temperature:    Sampling temperature (default: from TEMPERATURE env / 0.0).
+        reasoning_effort:
+                        OpenAI reasoning effort for o-series / GPT-5.5+ models
+                        (``none``|``low``|``medium``|``high``|``xhigh``|``max``).
+                        UI aliases: Light→low, Extra High→xhigh. Empty = provider
+                        default. Chat Completions + tools on GPT-5.5/5.6 still
+                        force ``none`` until Responses API.
         trajectory:     Enable trajectory logging to .clawagents/trajectories/.
                         Records every turn for debugging and analysis.
                         Default: from CLAW_TRAJECTORY env / False.
@@ -647,7 +654,10 @@ def create_claw_agent(
         api_version = resolved_profile.api_version
 
     # ── Resolve model → LLMProvider ────────────────────────────────────
-    llm = _resolve_model(model, streaming, api_key, context_window, max_tokens, temperature, base_url, api_version)
+    llm = _resolve_model(
+        model, streaming, api_key, context_window, max_tokens, temperature,
+        base_url, api_version, reasoning_effort,
+    )
 
     # ── Resolve fallback providers ──────────────────────────────────────
     llm = _apply_fallback_providers(
@@ -985,13 +995,14 @@ def _resolve_model(
     temperature: Optional[float] = None,
     base_url: Optional[str] = None,
     api_version: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> LLMProvider:
     """Accept a model name string, an LLMProvider, or None (auto-detect)."""
     if isinstance(model, LLMProvider):
         return model
 
     from clawagents.config.config import load_config, get_default_model, is_bedrock_model_id
-    from clawagents.providers.llm import create_provider
+    from clawagents.providers.llm import create_provider, normalize_reasoning_effort
 
     config = load_config()
     config.streaming = streaming
@@ -1005,6 +1016,8 @@ def _resolve_model(
         config.openai_base_url = base_url
     if api_version is not None:
         config.openai_api_version = api_version
+    if reasoning_effort is not None:
+        config.reasoning_effort = normalize_reasoning_effort(reasoning_effort) or ""
 
     active_model = model if isinstance(model, str) and model else get_default_model(config)
 
