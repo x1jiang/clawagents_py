@@ -490,6 +490,8 @@ def create_claw_agent(
     max_tokens: Optional[int] = None,
     temperature: Optional[float] = None,
     reasoning_effort: Optional[str] = None,
+    wire_api: Optional[str] = None,
+    ssl_verify: Optional[bool] = None,
     use_native_tools: bool = True,
     on_event: Optional[OnEvent] = None,
     trajectory: Optional[bool] = None,
@@ -539,8 +541,12 @@ def create_claw_agent(
                         OpenAI reasoning effort for o-series / GPT-5.5+ models
                         (``none``|``low``|``medium``|``high``|``xhigh``|``max``).
                         UI aliases: Light→low, Extra High→xhigh. Empty = provider
-                        default. Chat Completions + tools on GPT-5.5/5.6 still
-                        force ``none`` until Responses API.
+                        default. On Responses API, effort is kept with tools.
+        wire_api:       OpenAI transport: ``auto`` | ``responses`` | ``chat_completions``.
+                        Use ``responses`` for Responses-only OpenAI-compatible
+                        proxies (e.g. Codex gateways that 404 ``/chat/completions``).
+        ssl_verify:     TLS verify for custom ``base_url`` hosts. Set ``False`` for
+                        corporate proxies with private CAs.
         trajectory:     Enable trajectory logging to .clawagents/trajectories/.
                         Records every turn for debugging and analysis.
                         Default: from CLAW_TRAJECTORY env / False.
@@ -656,7 +662,7 @@ def create_claw_agent(
     # ── Resolve model → LLMProvider ────────────────────────────────────
     llm = _resolve_model(
         model, streaming, api_key, context_window, max_tokens, temperature,
-        base_url, api_version, reasoning_effort,
+        base_url, api_version, reasoning_effort, wire_api, ssl_verify,
     )
 
     # ── Resolve fallback providers ──────────────────────────────────────
@@ -996,13 +1002,15 @@ def _resolve_model(
     base_url: Optional[str] = None,
     api_version: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
+    wire_api: Optional[str] = None,
+    ssl_verify: Optional[bool] = None,
 ) -> LLMProvider:
     """Accept a model name string, an LLMProvider, or None (auto-detect)."""
     if isinstance(model, LLMProvider):
         return model
 
     from clawagents.config.config import load_config, get_default_model, is_bedrock_model_id
-    from clawagents.providers.llm import create_provider, normalize_reasoning_effort
+    from clawagents.providers.llm import create_provider, normalize_reasoning_effort, _normalize_wire_api
 
     config = load_config()
     config.streaming = streaming
@@ -1018,6 +1026,10 @@ def _resolve_model(
         config.openai_api_version = api_version
     if reasoning_effort is not None:
         config.reasoning_effort = normalize_reasoning_effort(reasoning_effort) or ""
+    if wire_api is not None:
+        config.openai_wire_api = _normalize_wire_api(wire_api)
+    if ssl_verify is not None:
+        config.openai_ssl_verify = bool(ssl_verify)
 
     active_model = model if isinstance(model, str) and model else get_default_model(config)
 

@@ -23,16 +23,28 @@ def test_prefers_responses_for_gpt56_and_codex_on_official():
 
 
 def test_prefers_chat_completions_on_compatible_proxies():
-    assert not prefers_responses_api(
+    # Auto still uses Responses for GPT-5.5/5.6 on custom hosts (Responses-only
+    # corporate gateways). Force chat_completions when the proxy is chat-only.
+    assert prefers_responses_api(
         "gpt-5.6-luna", base_url="http://localhost:11434/v1",
     )
-    assert not prefers_responses_api(
+    assert prefers_responses_api(
         "gpt-5.6-luna", base_url="https://bag.example/api/v1",
     )
     assert prefers_responses_api(
         "gpt-5.6-luna", base_url="https://api.openai.com/v1",
     )
     assert not prefers_responses_api("gpt-5.6", api_type="azure")
+    assert not prefers_responses_api(
+        "gpt-5.6-luna",
+        base_url="http://localhost:11434/v1",
+        wire_api="chat_completions",
+    )
+    assert prefers_responses_api(
+        "gpt-4o",
+        base_url="https://proxy.example/v1",
+        wire_api="responses",
+    )
 
 
 def test_prefers_responses_for_reasoning_plus_tools():

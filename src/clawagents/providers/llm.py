@@ -539,14 +539,26 @@ def model_supports_reasoning_effort(model: str) -> bool:
     return False
 
 
+def _normalize_wire_api(value: str | None) -> str:
+    """Return ``auto``, ``responses``, or ``chat_completions``."""
+    v = (value or "auto").strip().lower().replace("-", "_")
+    if v in ("responses", "response"):
+        return "responses"
+    if v in ("chat", "chat_completions", "completions", "chatcompletions"):
+        return "chat_completions"
+    return "auto"
+
+
 def _responses_endpoint_likely(base_url: str | None, api_type: str = "") -> bool:
-    """True when the host is likely to speak ``/v1/responses``."""
+    """True when Responses is a reasonable default for this host.
+
+    Official OpenAI and unknown OpenAI-compatible gateways (corporate
+    Responses-only proxies) are allowed. Azure stays on Chat Completions
+    unless ``wire_api=responses`` forces it.
+    """
     if (api_type or "").lower() == "azure":
         return False
-    if not base_url:
-        return True
-    host = base_url.lower()
-    return "api.openai.com" in host
+    return True
 
 
 def prefers_responses_api(
@@ -556,8 +568,15 @@ def prefers_responses_api(
     api_type: str = "",
     has_tools: bool = False,
     reasoning_effort: str | None = None,
+    wire_api: str | None = None,
 ) -> bool:
-    """Pick Responses vs Chat Completions from model + endpoint capabilities."""
+    """Pick Responses vs Chat Completions from model + endpoint + wire_api."""
+    wire = _normalize_wire_api(wire_api)
+    if wire == "chat_completions":
+        return False
+    if wire == "responses":
+        return True
+    # auto
     if not _responses_endpoint_likely(base_url, api_type):
         return False
     m = (model or "").strip().lower()
@@ -810,22 +829,41 @@ class OpenAIProvider(LLMProvider):
         # first assignment branch and complain when the fallback assigns the
         # other concrete type.
         self.client: Any
+        self._http_client: Any = None
         api_type = (config.openai_api_type or "").lower()
         is_azure = api_type == "azure" or (api_version and base_url and "azure" in base_url.lower())
+        ssl_verify = bool(getattr(config, "openai_ssl_verify", True))
+        # Custom hosts with private CAs often need verify=False; keep verify
+        # for official OpenAI / empty base_url.
+        if base_url and "api.openai.com" not in base_url.lower() and not ssl_verify:
+            try:
+                import httpx
+                self._http_client = httpx.AsyncClient(verify=False, timeout=120.0)
+            except ImportError:
+                self._http_client = None
+
         if is_azure and api_version and base_url:
             try:
                 from openai import AsyncAzureOpenAI
-                self.client = AsyncAzureOpenAI(
-                    api_key=api_key,
-                    azure_endpoint=base_url,
-                    api_version=api_version,
-                )
+                azure_kwargs: dict[str, Any] = {
+                    "api_key": api_key,
+                    "azure_endpoint": base_url,
+                    "api_version": api_version,
+                }
+                if self._http_client is not None:
+                    azure_kwargs["http_client"] = self._http_client
+                self.client = AsyncAzureOpenAI(**azure_kwargs)
             except ImportError:
-                self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+                client_kwargs: dict[str, Any] = {"api_key": api_key, "base_url": base_url}
+                if self._http_client is not None:
+                    client_kwargs["http_client"] = self._http_client
+                self.client = AsyncOpenAI(**client_kwargs)
         else:
-            client_kwargs: dict[str, Any] = {"api_key": api_key}
+            client_kwargs = {"api_key": api_key}
             if base_url:
                 client_kwargs["base_url"] = base_url
+            if self._http_client is not None:
+                client_kwargs["http_client"] = self._http_client
             self.client = AsyncOpenAI(**client_kwargs)
 
         self.model = config.openai_model
@@ -836,11 +874,12 @@ class OpenAIProvider(LLMProvider):
         )
         self._base_url = base_url
         self._api_type = "azure" if is_azure else api_type
-        # Sticky fallback when Responses is missing on this endpoint.
+        self._wire_api = _normalize_wire_api(getattr(config, "openai_wire_api", None))
+        # Sticky fallback when Responses is missing — never when wire_api forces it.
         self._force_chat_completions = False
 
     def _should_use_responses(self, has_tools: bool) -> bool:
-        if self._force_chat_completions:
+        if self._force_chat_completions and self._wire_api != "responses":
             return False
         return prefers_responses_api(
             self.model,
@@ -848,6 +887,7 @@ class OpenAIProvider(LLMProvider):
             api_type=self._api_type,
             has_tools=has_tools,
             reasoning_effort=self._reasoning_effort,
+            wire_api=self._wire_api,
         )
 
     async def chat(
@@ -893,7 +933,10 @@ class OpenAIProvider(LLMProvider):
                     formatted, on_chunk, cancel_event, oai_tools,
                 )
             except Exception as exc:
-                if _is_responses_unsupported(exc):
+                if (
+                    _is_responses_unsupported(exc)
+                    and self._wire_api != "responses"
+                ):
                     logger.warning(
                         "  [openai] Responses API unavailable (%s) — "
                         "falling back to Chat Completions",
@@ -981,23 +1024,21 @@ class OpenAIProvider(LLMProvider):
         messages: list[dict[str, Any]],
         oai_tools: list[dict[str, Any]] | None = None,
     ) -> LLMResponse:
-        kwargs = self._responses_kwargs(messages, oai_tools, stream=False)
-        resp = await self.client.responses.create(**kwargs)
-        text, native_calls, total, prompt, cached = _parse_responses_result(resp)
-        return LLMResponse(
-            content=text,
-            model=self.model,
-            tokens_used=total,
-            prompt_tokens=prompt,
-            cache_read_tokens=cached,
-            tool_calls=native_calls,
+        # Some OpenAI-compatible gateways (Codex Responses proxies) ignore
+        # stream=false and return raw SSE text the SDK cannot parse. Always
+        # collect via the streaming path.
+        return await self._stream_with_retry_responses(
+            messages,
+            on_chunk=None,
+            cancel_event=None,
+            oai_tools=oai_tools,
         )
 
     async def _stream_with_retry_responses(
         self,
         messages: list[dict[str, Any]],
-        on_chunk: OnChunkCallback,
-        cancel_event: asyncio.Event | None,
+        on_chunk: OnChunkCallback = None,
+        cancel_event: asyncio.Event | None = None,
         oai_tools: list[dict[str, Any]] | None = None,
     ) -> LLMResponse:
         last_error: BaseException | None = None

@@ -41,6 +41,12 @@ class EngineConfig(BaseSettings):
     openai_base_url: str = ""
     openai_api_version: str = ""
     openai_api_type: str = ""
+    # OpenAI transport: auto | responses | chat_completions. Forces /v1/responses
+    # for Responses-only OpenAI-compatible proxies (Codex gateways, etc.).
+    openai_wire_api: str = "auto"
+    # TLS verification for custom OpenAI-compatible base URLs. Corporate
+    # MITM / private-CA endpoints often need False.
+    openai_ssl_verify: bool = True
     gemini_api_key: str = ""
     gemini_model: str = "gemini-3-flash-preview"
     anthropic_api_key: str = ""

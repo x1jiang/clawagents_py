@@ -35,7 +35,14 @@ pip install clawagents[bedrock]     # + Amazon Bedrock (Claude via IAM + Nova/Co
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 6.12.2** — OpenAI Responses API with auto model routing (July 2026).
+> **Version 6.12.3** — Responses-only compatible gateways + TLS/wire_api controls (July 2026).
+
+### New In v6.12.3
+
+- **`wire_api`** — `auto` | `responses` | `chat_completions` for OpenAI-compatible proxies (Codex Responses-only gateways that 404 `/chat/completions`).
+- **`ssl_verify`** — disable TLS verify for private-CA corporate endpoints.
+- **Auto Responses** — GPT-5.5/5.6/Codex prefer `/v1/responses` even on custom `base_url` (no longer limited to api.openai.com).
+- **SSE proxies** — non-stream Responses requests collect via streaming (gateways that ignore `stream=false`).
 
 ### New In v6.12.2
 
