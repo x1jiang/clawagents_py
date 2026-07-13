@@ -46,11 +46,9 @@ def parse_skill_file(content: str, file_path: str) -> Skill:
 
         name_match = re.search(r"^name:\s*(.+)$", yaml_content, re.MULTILINE)
         if name_match:
-            name = name_match.group(1).strip()
+            name = name_match.group(1).strip().strip("\"'")
 
-        desc_match = re.search(r'^description:\s*"?([^"]+)"?$', yaml_content, re.MULTILINE)
-        if desc_match:
-            description = desc_match.group(1).strip()
+        description = _parse_frontmatter_description(yaml_content)
 
         # Parse allowed-tools: space/comma-delimited string
         tools_match = re.search(r"^allowed-tools:\s*(.+)$", yaml_content, re.MULTILINE)
@@ -141,6 +139,31 @@ def parse_skill_file(content: str, file_path: str) -> Skill:
         success_criteria=success_criteria,
         workflow_steps=workflow_steps,
     )
+
+
+def _parse_frontmatter_description(yaml_content: str) -> str:
+    """Parse skill description (plain, quoted, or YAML block scalar)."""
+    block = re.search(
+        r"^description:\s*[|>]-?\s*\n((?:[ \t]+.*\n?)+)",
+        yaml_content,
+        re.MULTILINE,
+    )
+    if block:
+        lines = [ln.strip() for ln in block.group(1).splitlines() if ln.strip()]
+        return " ".join(lines).strip()
+
+    quoted = re.search(r'^description:\s*"(.*)"\s*$', yaml_content, re.MULTILINE)
+    if quoted:
+        return quoted.group(1).strip()
+
+    single = re.search(r"^description:\s*'(.*)'\s*$", yaml_content, re.MULTILINE)
+    if single:
+        return single.group(1).strip()
+
+    plain = re.search(r"^description:\s*(.+)$", yaml_content, re.MULTILINE)
+    if plain:
+        return plain.group(1).strip().strip("\"'")
+    return ""
 
 
 def is_skill_eligible(skill: Skill) -> bool:
@@ -244,20 +267,33 @@ def create_skill_tools(store: SkillStore) -> List[Tool]:
     class UseSkillTool:
         name = "use_skill"
         description = (
-            "Load full instructions for one skill. Call only when that skill "
-            "matches the current task and you will follow its workflow."
+            "Load full instructions for one skill by name. Call this early when "
+            "a listed skill matches the user's task (project setup, cohort/SQL "
+            "workflows, document formats, etc.) — do not reinvent that workflow. "
+            "Names are matched case-insensitively; hyphens/underscores are equivalent."
         )
         parameters = {
             "name": {"type": "string", "description": "Name of the skill to load", "required": True}
         }
 
         async def execute(self, args: Dict[str, Any]) -> ToolResult:
-            name = str(args.get("name", ""))
-            skill = store.get(name)
+            name = str(args.get("name", "")).strip()
+            skill = resolve_skill(store, name)
 
             if not skill:
-                available = ", ".join([s.name for s in store.list()])
-                return ToolResult(success=False, output="", error=f"Skill \"{name}\" not found. Available: {available or 'none'}")
+                available = sorted(s.name for s in store.list())
+                suggestions = suggest_skills(store, name, limit=5)
+                hint = ""
+                if suggestions:
+                    hint = " Did you mean: " + ", ".join(suggestions) + "?"
+                return ToolResult(
+                    success=False,
+                    output="",
+                    error=(
+                        f'Skill "{name}" not found.{hint} '
+                        f"Available: {', '.join(available) if available else 'none'}"
+                    ),
+                )
 
             parts = [f"# Skill: {skill.name}"]
 
@@ -283,3 +319,41 @@ def create_skill_tools(store: SkillStore) -> List[Tool]:
             return ToolResult(success=True, output="\n".join(parts))
 
     return [ListSkillsTool(), UseSkillTool()]
+
+
+def _norm_skill_key(name: str) -> str:
+    return re.sub(r"[\s\-]+", "_", (name or "").strip().lower())
+
+
+def resolve_skill(store: SkillStore, name: str) -> Optional[Skill]:
+    """Resolve a skill by exact, case-insensitive, or hyphen/underscore-normalized name."""
+    raw = (name or "").strip()
+    if not raw:
+        return None
+    hit = store.get(raw)
+    if hit:
+        return hit
+    skills = store.list()
+    lower_map = {s.name.lower(): s for s in skills}
+    if raw.lower() in lower_map:
+        return lower_map[raw.lower()]
+    norm_map = {_norm_skill_key(s.name): s for s in skills}
+    return norm_map.get(_norm_skill_key(raw))
+
+
+def suggest_skills(store: SkillStore, name: str, limit: int = 5) -> List[str]:
+    """Close name matches for use_skill typos / near-misses."""
+    import difflib
+
+    raw = (name or "").strip()
+    if not raw:
+        return []
+    names = [s.name for s in store.list()]
+    if not names:
+        return []
+    direct = difflib.get_close_matches(raw, names, n=limit, cutoff=0.45)
+    if direct:
+        return direct
+    norm_names = {_norm_skill_key(n): n for n in names}
+    soft = difflib.get_close_matches(_norm_skill_key(raw), list(norm_names), n=limit, cutoff=0.45)
+    return [norm_names[k] for k in soft]

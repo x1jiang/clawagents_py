@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Optional, Sequence
 
 from clawagents.prompts.cache_align import normalize_stable_prefix
 from clawagents.providers.llm import LLMMessage
 
 PROMPT_CACHE_BOUNDARY = "__CACHE_BOUNDARY__"
+INJECTION_BEGIN = "<!--clawagents:injection-->"
+INJECTION_END = "<!--/clawagents:injection-->"
+
+_INJECTION_BLOCK_RE = re.compile(
+    re.escape(INJECTION_BEGIN) + r"[\s\S]*?" + re.escape(INJECTION_END) + r"\n?",
+    re.MULTILINE,
+)
 
 
 def build_system_prompt(
@@ -43,34 +51,41 @@ def build_prompt_injection(
     return "\n\n".join(parts) if parts else None
 
 
+def strip_prompt_injection(content: str) -> str:
+    """Remove a previously upserted clawagents injection block."""
+    if not content:
+        return content
+    return _INJECTION_BLOCK_RE.sub("", content)
+
+
 def append_prompt_injection(
     messages: Sequence[Any],
     injection: Optional[str],
 ) -> Sequence[Any]:
+    """Upsert memory/skills injection into the system message.
+
+    Replaces any prior ``<!--clawagents:injection-->`` block so per-turn skill
+    ranking / reloaded rules do not accumulate copies.
+    """
     if not injection:
         return messages
 
+    block = f"{INJECTION_BEGIN}\n{injection}\n{INJECTION_END}"
     result = list(messages)
     for index, message in enumerate(result):
         role = message.get("role") if isinstance(message, dict) else getattr(message, "role", None)
-        if role == "system":
-            content = message.get("content", "") if isinstance(message, dict) else getattr(message, "content", "")
-            # Idempotent: before_llm hooks run every loop round, so without
-            # this check the injection accumulated one copy per round —
-            # wasting tokens and churning the prompt-prefix cache.
-            if isinstance(content, str) and injection in content:
-                return messages
-            # Prefer appending after the cache boundary when present so the
-            # static prefix (instructions + tools) stays byte-stable.
-            if isinstance(content, str) and PROMPT_CACHE_BOUNDARY in content:
-                prefix, _, suffix = content.partition(PROMPT_CACHE_BOUNDARY)
-                new_content = f"{prefix}{PROMPT_CACHE_BOUNDARY}\n{injection}\n{suffix}".rstrip() + "\n"
-            else:
-                new_content = f"{content}\n\n{injection}"
-            result[index] = LLMMessage(
-                role="system",
-                content=new_content,
-            )
-            return result
+        if role != "system":
+            continue
+        content = message.get("content", "") if isinstance(message, dict) else getattr(message, "content", "")
+        if not isinstance(content, str):
+            content = str(content or "")
+        content = strip_prompt_injection(content)
+        if PROMPT_CACHE_BOUNDARY in content:
+            prefix, _, suffix = content.partition(PROMPT_CACHE_BOUNDARY)
+            new_content = f"{prefix}{PROMPT_CACHE_BOUNDARY}\n{block}\n{suffix.lstrip()}".rstrip() + "\n"
+        else:
+            new_content = f"{content.rstrip()}\n\n{block}"
+        result[index] = LLMMessage(role="system", content=new_content)
+        return result
 
     return messages

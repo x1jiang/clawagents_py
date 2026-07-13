@@ -1,4 +1,5 @@
 import os
+import re
 import asyncio
 from pathlib import Path
 from typing import Callable, Optional, List, Dict, Any, Union
@@ -777,6 +778,7 @@ def create_claw_agent(
 
     # ── Auto-discover skills from default locations ─────────────────────
     skill_summaries: Optional[str] = None
+    skill_store = None
     base_skill_dirs = _to_list(skills) if skills is not None else _auto_discover_skills()
     _bundled = _get_bundled_skills_dir()
     skill_dirs = (base_skill_dirs + [_bundled]) if (_bundled and os.path.isdir(_bundled)) else base_skill_dirs
@@ -805,6 +807,7 @@ def create_claw_agent(
 
         loaded_skills = skill_store.list()
         if loaded_skills:
+            # Initial catalog (no user turn yet); before_llm re-ranks each round.
             skill_summaries = _build_skill_catalog_prompt(
                 loaded_skills,
                 context_window=context_window,
@@ -854,6 +857,8 @@ def create_claw_agent(
     composed_before_llm = _compose_before_llm(
         memory_paths=memory_paths,
         skill_summaries=skill_summaries,
+        skill_store=skill_store,
+        context_window=context_window,
     )
 
     # ── Custom mode (instruction + tool gate + permission) ────────────
@@ -1078,8 +1083,10 @@ MAX_SKILLS_PROMPT_CHARS = SKILL_LISTING_BUDGET_FLOOR_CHARS
 
 _SKILL_CATALOG_HEADER = (
     "## Available Skills\n"
-    "Match the task to a skill below, then call `use_skill` once for full "
-    "instructions (do not load skills you will not follow). "
+    "If any skill below matches the user's task, call `use_skill` with that "
+    "skill's exact name **before** improvising a multi-step workflow "
+    "(project startup, cohort/SQL extraction, document formats, etc.). "
+    "Load at most one skill unless a skill explicitly chains another. "
     "Call `list_skills` only if this list was truncated or you need a skill "
     "not shown.\n"
 )
@@ -1137,21 +1144,109 @@ def _format_skill_line(name: str, description: str, desc_cap: int) -> str:
     return f"- **{name}**"
 
 
+def _latest_user_text(messages: list) -> str:
+    """Best-effort extract of the latest user turn for skill ranking."""
+    for message in reversed(messages or []):
+        role = message.get("role") if isinstance(message, dict) else getattr(message, "role", None)
+        if role != "user":
+            continue
+        content = message.get("content", "") if isinstance(message, dict) else getattr(message, "content", "")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for part in content:
+                if isinstance(part, str):
+                    parts.append(part)
+                elif isinstance(part, dict) and part.get("type") == "text":
+                    parts.append(str(part.get("text") or ""))
+            return "\n".join(p for p in parts if p)
+    return ""
+
+
+def _skill_relevance_score(skill: Any, query: str) -> float:
+    """Lightweight lexical score for ranking skills against the user turn."""
+    if not query:
+        return 0.0
+    q = query.lower()
+    name = str(getattr(skill, "name", "") or "")
+    desc = str(getattr(skill, "description", "") or "")
+    path = str(getattr(skill, "path", "") or "")
+    name_l = name.lower()
+    desc_l = desc.lower()
+    path_l = path.lower()
+    score = 0.0
+
+    tokens = set(re.findall(r"[a-z0-9]{3,}", q))
+    stop = {
+        "the", "and", "for", "with", "from", "that", "this", "your", "have",
+        "please", "using", "into", "based", "update", "first", "then", "when",
+    }
+    tokens -= stop
+
+    name_tokens = re.findall(r"[a-z0-9]+", name_l.replace("_", " ").replace("-", " "))
+    name_phrase = " ".join(name_tokens)
+    if name_l and name_l in q:
+        score += 80.0
+    elif name_phrase and name_phrase in q:
+        score += 70.0
+
+    # Filename / folder stem matches (e.g. new_project_starting_instruction.md)
+    path_obj = Path(path) if path else None
+    stem = ""
+    if path_obj is not None:
+        if path_obj.name.lower() == "skill.md":
+            stem = path_obj.parent.name.lower()
+        else:
+            stem = path_obj.stem.lower()
+    if stem and len(stem) >= 4 and stem not in {"skill", "readme", "skills"}:
+        stem_phrase = stem.replace("_", " ").replace("-", " ")
+        q_compact = q.replace(" ", "_").replace("-", "_")
+        if stem in q_compact:
+            score += 60.0
+        elif stem_phrase and stem_phrase in q:
+            score += 50.0
+        elif any(tok in stem for tok in tokens if len(tok) >= 5):
+            score += 8.0
+
+    for tok in tokens:
+        if tok in name_l:
+            score += 6.0
+        if tok in desc_l:
+            score += 2.5
+        if tok in path_l:
+            score += 1.5
+    return score
+
+
+def _rank_skills_for_query(loaded_skills: list, query: str | None) -> list:
+    if not loaded_skills:
+        return []
+    if not (query or "").strip():
+        return sorted(loaded_skills, key=lambda s: str(getattr(s, "name", "")).lower())
+    scored = [(_skill_relevance_score(s, query or ""), s) for s in loaded_skills]
+    scored.sort(key=lambda pair: (-pair[0], str(getattr(pair[1], "name", "")).lower()))
+    return [s for _, s in scored]
+
+
 def _build_skill_catalog_prompt(
     loaded_skills: list,
     *,
     context_window: int | None = None,
+    query: str | None = None,
 ) -> str:
     """Build a bounded name/description catalog (Claude/Codex-style).
 
     Strategy (cost-effective):
-    1. Always keep skill *names* when possible.
-    2. Shorten descriptions first (per-skill cap, then global shorten steps).
-    3. Only omit skills after descriptions are exhausted; point to list_skills.
+    1. Rank skills against the current user turn when a query is provided.
+    2. Always keep skill *names* when possible.
+    3. Shorten descriptions first (per-skill cap, then global shorten steps).
+    4. Only omit skills after descriptions are exhausted; point to list_skills.
     """
     if not loaded_skills:
         return ""
 
+    ranked = _rank_skills_for_query(loaded_skills, query)
     max_desc = SKILL_LISTING_MAX_DESC_CHARS
     env_desc = (os.environ.get("CLAW_SKILL_LISTING_MAX_DESC_CHARS") or "").strip()
     if env_desc.isdigit():
@@ -1160,16 +1255,45 @@ def _build_skill_catalog_prompt(
     budget = skill_listing_budget_chars(context_window)
     footer_full = "\n\n({n} more skills available — use list_skills to see all)"
     # Reserve space for a worst-case overflow footer.
-    reserve = len(footer_full.format(n=len(loaded_skills))) + 8
+    reserve = len(footer_full.format(n=len(ranked))) + 8
     body_budget = max(200, budget - len(_SKILL_CATALOG_HEADER) - reserve)
 
     entries = [
         (str(getattr(s, "name", "") or "skill"), str(getattr(s, "description", "") or ""))
-        for s in loaded_skills
+        for s in ranked
     ]
     entries = [(n, d) for n, d in entries if n.strip()]
     if not entries:
         return ""
+
+    recommended_lines: list[str] = []
+    if query and query.strip():
+        top = []
+        for skill in ranked[:5]:
+            score = _skill_relevance_score(skill, query)
+            if score < 8.0:
+                continue
+            top.append(
+                (
+                    str(getattr(skill, "name", "") or ""),
+                    str(getattr(skill, "description", "") or ""),
+                    score,
+                )
+            )
+        if top:
+            recommended_lines.append("### Recommended for this turn")
+            for name, desc, _score in top[:3]:
+                recommended_lines.append(
+                    _format_skill_line(name, desc, min(max_desc, 180))
+                )
+            recommended_lines.append(
+                "Call `use_skill` with one of these names before freestyling."
+            )
+            recommended_lines.append("")
+
+    recommended_block = "\n".join(recommended_lines)
+    header = _SKILL_CATALOG_HEADER + (recommended_block + "\n" if recommended_block else "")
+    body_budget = max(200, budget - len(header) - reserve)
 
     # Try progressively shorter descriptions until everything fits, else pack
     # as many name(+desc) lines as fit under body_budget.
@@ -1197,7 +1321,7 @@ def _build_skill_catalog_prompt(
         if omitted == 0:
             break
 
-    text = _SKILL_CATALOG_HEADER + "\n".join(shown)
+    text = header + "\n".join(shown)
     if omitted:
         text += f"\n\n({omitted} more skills available — use list_skills to see all)"
     if len(text) > budget:
@@ -1276,10 +1400,13 @@ def _apply_fallback_providers(
 def _compose_before_llm(
     memory_paths: list,
     skill_summaries: Optional[str],
+    skill_store: Any = None,
+    context_window: Optional[int] = None,
 ) -> Optional[BeforeLLMHook]:
     """Compose memory/rules + skill injection into one before_llm hook.
 
     Reloads rule files every LLM round so always-on rules survive compaction.
+    Re-ranks the skill catalog against the latest user turn when a store is set.
     """
     from clawagents.prompts import append_prompt_injection, build_prompt_injection
 
@@ -1294,12 +1421,23 @@ def _compose_before_llm(
                 from clawagents.memory.loader import load_memory_files
 
                 memory_content = load_memory_files(memory_paths)
-        if not memory_content and not skill_summaries:
+
+        summaries = skill_summaries
+        if skill_store is not None:
+            loaded = skill_store.list()
+            if loaded:
+                summaries = _build_skill_catalog_prompt(
+                    loaded,
+                    context_window=context_window,
+                    query=_latest_user_text(messages),
+                )
+
+        if not memory_content and not summaries:
             return messages
-        injection = build_prompt_injection(memory_content, skill_summaries)
+        injection = build_prompt_injection(memory_content, summaries)
         return list(append_prompt_injection(messages, injection))
 
     # Always return a hook when we have paths or skills so rounds re-read disk.
-    if memory_paths or skill_summaries:
+    if memory_paths or skill_summaries or skill_store is not None:
         return hook
     return None

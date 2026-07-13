@@ -1,5 +1,7 @@
 from clawagents.providers.llm import LLMMessage
 from clawagents.prompts import (
+    INJECTION_BEGIN,
+    INJECTION_END,
     PROMPT_CACHE_BOUNDARY,
     append_prompt_injection,
     build_prompt_injection,
@@ -41,11 +43,10 @@ def test_append_prompt_injection_updates_system_message_without_mutating_origina
     updated = append_prompt_injection(messages, injection)
 
     assert messages[0].content == "base"
-    assert updated[0].content == (
-        "base\n\n"
-        "## Agent Memory\nremember this\n\n"
-        "## Available Skills\n- **review**: Review code"
-    )
+    assert INJECTION_BEGIN in updated[0].content
+    assert "## Agent Memory\nremember this" in updated[0].content
+    assert "## Available Skills\n- **review**: Review code" in updated[0].content
+    assert INJECTION_END in updated[0].content
     assert updated[1] is messages[1]
 
 
@@ -69,7 +70,8 @@ def test_append_prompt_injection_accepts_dict_messages_for_legacy_hooks():
 
     updated = append_prompt_injection(messages, "legacy injection")
 
-    assert updated[0].content == "base\n\nlegacy injection"
+    assert INJECTION_BEGIN in updated[0].content
+    assert "legacy injection" in updated[0].content
     assert messages[0]["content"] == "base"
 
 
