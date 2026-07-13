@@ -11,18 +11,19 @@
 
 ---
 
-ClawAgents is a **production-ready agentic framework** that gives LLMs the ability to read, write, and execute code — with built-in planning, memory, sandboxing, and a gateway server. It supports **OpenAI GPT-5**, **Google Gemini**, and **Anthropic Claude** out of the box, with a pluggable provider architecture for any LLM.
+ClawAgents is a **production-ready agentic framework** that gives LLMs the ability to read, write, and execute code — with built-in planning, memory, sandboxing, and a gateway server. It supports **OpenAI**, **Google Gemini**, **Anthropic Claude**, and **Amazon Bedrock** (native IAM / Converse) out of the box, with a pluggable provider architecture for any LLM.
 
 Built by extracting and unifying the best architectural patterns from [OpenClaw](https://github.com/anthropics/openclaw) (~5,800 files) and [DeepAgents](https://github.com/langchain-ai/deepagents) (~1,400 LOC core), ClawAgents delivers **the same power at a fraction of the complexity**.
 
 ## Apps & extensions
 
-This repo is the **Python framework** (`pip install clawagents`). Ready-made clients:
+This repo is the **Python framework** (`pip install clawagents`). Ready-made clients (all ship with Bedrock + the 6.12.0 agent stack):
 
-| Product | What it is | Link |
-|---------|------------|------|
-| **ClawAgents Desktop** | Native macOS app — project chats, file editor, SSH remotes, embedded gateway | [x1jiang/clawagents-desktop](https://github.com/x1jiang/clawagents-desktop) · [Download DMG (v0.2.2)](https://github.com/x1jiang/clawagents-desktop/releases/tag/v0.2.2) |
-| **ClawAgents for VS Code / Cursor** | Editor extension — chat, tools, and agent loop inside your IDE | [x1jiang/clawagents-vscode](https://github.com/x1jiang/clawagents-vscode) · [v1.0.7](https://github.com/x1jiang/clawagents-vscode/releases/tag/v1.0.7) |
+| Product | Latest | What it is | Link |
+|---------|--------|------------|------|
+| **ClawAgents Desktop** | **v0.2.4** | Native macOS app — project chats, file editor, SSH remotes, Settings (incl. AWS Bedrock), Developer ID signed + notarized | [Repo](https://github.com/x1jiang/clawagents-desktop) · [Download DMG](https://github.com/x1jiang/clawagents-desktop/releases/tag/v0.2.4) |
+| **ClawAgents for VS Code / Cursor** | **v1.0.8** | Editor extension — chat, tools, Bedrock provider UI, agent loop inside your IDE | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Release + VSIX](https://github.com/x1jiang/clawagents-vscode/releases/tag/v1.0.8) |
+| **Python package** | **v6.12.0** | This library — `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/6.12.0/) · [Release](https://github.com/x1jiang/clawagents_py/releases/tag/v6.12.0) |
 
 ## Installation
 
