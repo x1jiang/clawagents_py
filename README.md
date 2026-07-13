@@ -220,7 +220,7 @@ ClawAgents loads `.env` from **the directory you run the command from** (your cu
 **Three ways to configure** (in priority order, highest → lowest):
 
 1. **`create_claw_agent()` parameters** — explicit values passed to the factory always win.
-2. **`.env` file values** — loaded with `override=True`, so they take precedence over any pre-existing shell env vars. This is intentional: it prevents the "stale `OPENAI_API_KEY` exported from `~/.zshrc` silently shadows the fresh key in `.env`" bug class.
+2. **`.env` file values** — by default loaded with `override=True`, so they take precedence over any pre-existing shell env vars. This is intentional for CLI use: it prevents a stale `OPENAI_API_KEY` from `~/.zshrc` silently shadowing the fresh key in `.env`. Hosts that inject keys (e.g. the VS Code extension SecretStorage) set `CLAWAGENTS_DOTENV_OVERRIDE=0` so the injected key wins; keys marked in `CLAW_KEY_SOURCES` as SecretStorage are also protected even when override is on.
 3. **Shell environment variables** — used as a fallback when no `.env` is found, or for keys the `.env` doesn't define.
 
 **Where ClawAgents looks for `.env`** (first match wins):
@@ -1539,6 +1539,7 @@ All environment variables are **optional**. They serve as defaults when the corr
 | Variable | Default | Required? | Description |
 |:---|:---|:---:|:---|
 | `CLAWAGENTS_ENV_FILE` | *(unset)* | No | Explicit path to a `.env` file. Overrides default `cwd/.env` discovery. Useful for CI, Docker, or multi-project setups |
+| `CLAWAGENTS_DOTENV_OVERRIDE` | `1` | No | When `0`/`false`, workspace `.env` does not overwrite pre-set provider secrets (used by the VS Code sidecar so SecretStorage wins) |
 
 **Provider & Model** — set at least one API key (or `OPENAI_BASE_URL` for local models)
 

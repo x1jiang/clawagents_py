@@ -78,3 +78,42 @@ def test_load_config_includes_advisor_env():
         assert config.advisor_model == "gpt-5.4"
         assert config.advisor_api_key == "advisor-key"
         assert config.advisor_max_calls == 7
+
+
+def test_dotenv_override_disabled_preserves_spawn_key(tmp_path, monkeypatch):
+    """VS Code SecretStorage key must not be clobbered by workspace .env."""
+    import clawagents.config.config as cfg
+
+    env_path = tmp_path / ".env"
+    env_path.write_text("OPENAI_API_KEY=from-dotenv\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CLAWAGENTS_DOTENV_OVERRIDE", "0")
+    monkeypatch.setenv("OPENAI_API_KEY", "from-secret-storage")
+    monkeypatch.delenv("CLAWAGENTS_ENV_FILE", raising=False)
+
+    cfg._loaded = False
+    cfg.env_file = None
+    cfg._discover_env_file()
+    assert os.environ["OPENAI_API_KEY"] == "from-secret-storage"
+
+
+def test_dotenv_protects_secretstorage_provenance(tmp_path, monkeypatch):
+    """Even with override=True, CLAW_KEY_SOURCES=SecretStorage keys are restored."""
+    import json
+    import clawagents.config.config as cfg
+
+    env_path = tmp_path / ".env"
+    env_path.write_text("OPENAI_API_KEY=from-dotenv\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CLAWAGENTS_DOTENV_OVERRIDE", "1")
+    monkeypatch.setenv("OPENAI_API_KEY", "from-secret-storage")
+    monkeypatch.setenv(
+        "CLAW_KEY_SOURCES",
+        json.dumps({"openai": "VS Code SecretStorage"}),
+    )
+    monkeypatch.delenv("CLAWAGENTS_ENV_FILE", raising=False)
+
+    cfg._loaded = False
+    cfg.env_file = None
+    cfg._discover_env_file()
+    assert os.environ["OPENAI_API_KEY"] == "from-secret-storage"

@@ -5,6 +5,74 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 _loaded = False
 env_file = None
 
+# Provider secrets the host (VS Code SecretStorage, CI) may inject before
+# clawagents loads. ``load_dotenv(override=True)`` must not clobber these when
+# the host opts out or marks them as SecretStorage-sourced.
+_PROVIDER_SECRET_KEYS = (
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "BEDROCK_API_KEY",
+    "TAVILY_API_KEY",
+    "ADVISOR_API_KEY",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+)
+
+
+def _dotenv_override_enabled() -> bool:
+    """Whether ``.env`` may overwrite pre-existing ``os.environ`` values.
+
+    Default True preserves CLI behavior (``.env`` beats a stale shell export).
+    VS Code / hosts that inject SecretStorage keys set
+    ``CLAWAGENTS_DOTENV_OVERRIDE=0`` so the injected key wins.
+    """
+    raw = (os.environ.get("CLAWAGENTS_DOTENV_OVERRIDE") or "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def _secret_keys_to_protect() -> list[str]:
+    """Keys already set that must survive ``load_dotenv``.
+
+    - When override is disabled: protect every provider secret already in env.
+    - When override is enabled: still protect keys whose ``CLAW_KEY_SOURCES``
+      provenance is VS Code SecretStorage (sidecar injects that JSON).
+    """
+    protect: list[str] = []
+    if not _dotenv_override_enabled():
+        protect.extend(k for k in _PROVIDER_SECRET_KEYS if os.environ.get(k))
+        return protect
+
+    raw = os.environ.get("CLAW_KEY_SOURCES") or ""
+    if not raw.strip():
+        return protect
+    try:
+        import json
+
+        sources = json.loads(raw)
+    except Exception:  # noqa: BLE001
+        return protect
+    if not isinstance(sources, dict):
+        return protect
+    # Map provider id → env var names (same as the VS Code sidecar).
+    provider_vars = {
+        "openai": ["OPENAI_API_KEY"],
+        "anthropic": ["ANTHROPIC_API_KEY"],
+        "gemini": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        "bedrock": ["BEDROCK_API_KEY"],
+        "tavily": ["TAVILY_API_KEY"],
+        "aws": ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"],
+    }
+    for prov, vars_ in provider_vars.items():
+        src = str(sources.get(prov) or "")
+        if "SecretStorage" in src:
+            for v in vars_:
+                if os.environ.get(v):
+                    protect.append(v)
+    return protect
+
 
 def _discover_env_file():
     """Discover .env file lazily on first access."""
@@ -27,7 +95,11 @@ def _discover_env_file():
 
     from dotenv import load_dotenv
     if env_file:
-        load_dotenv(env_file, override=True)
+        protected = {k: os.environ[k] for k in _secret_keys_to_protect()}
+        load_dotenv(env_file, override=_dotenv_override_enabled())
+        # Host-injected secrets always win over workspace .env.
+        for key, value in protected.items():
+            os.environ[key] = value
 
 
 class EngineConfig(BaseSettings):
