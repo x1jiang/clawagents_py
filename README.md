@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.12.1-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.12.11-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -22,20 +22,52 @@ This repo is the **Python framework** (`pip install clawagents`). Ready-made cli
 | Product | Latest | What it is | Link |
 |---------|--------|------------|------|
 | **ClawAgents Desktop** | **v0.2.4** | Native macOS app — project chats, file editor, SSH remotes, Settings (incl. AWS Bedrock), Developer ID signed + notarized | [Repo](https://github.com/x1jiang/clawagents-desktop) · [Download DMG](https://github.com/x1jiang/clawagents-desktop/releases/tag/v0.2.4) |
-| **ClawAgents for VS Code / Cursor** | **v1.0.12** | Editor extension — chat, tools, Bedrock, GPT Effort selector | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Release + VSIX](https://github.com/x1jiang/clawagents-vscode/releases/tag/v1.0.12) |
-| **Python package** | **v6.12.1** | This library — `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/6.12.1/) · [Release](https://github.com/x1jiang/clawagents_py/releases/tag/v6.12.1) |
+| **ClawAgents for VS Code / Cursor** | **v1.0.30** | Editor extension — chat, tools, Bedrock, skills homes, Effort / Wire API | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Release + VSIX](https://github.com/x1jiang/clawagents-vscode/releases/tag/v1.0.30) |
+| **Python package** | **v6.12.11** | This library — `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/6.12.11/) · [Release](https://github.com/x1jiang/clawagents_py/releases/tag/v6.12.11) |
+| **TypeScript package** | **v6.12.11** | Node/TS sibling — `npm install git+https://github.com/x1jiang/clawagents.git` | [Repo](https://github.com/x1jiang/clawagents) |
 
 ## Installation
 
 ```bash
-pip install clawagents              # Core (OpenAI only)
-pip install clawagents[gemini]      # + Google Gemini support
-pip install clawagents[anthropic]   # + Anthropic Claude support
-pip install clawagents[bedrock]     # + Amazon Bedrock (Claude via IAM + Nova/Converse)
-pip install clawagents[all]         # All providers + tiktoken
+pip install -U clawagents              # Core (OpenAI only)
+pip install -U 'clawagents[gemini]'    # + Google Gemini support
+pip install -U 'clawagents[anthropic]' # + Anthropic Claude support
+pip install -U 'clawagents[bedrock]'   # + Amazon Bedrock (Claude via IAM + Nova/Converse)
+pip install -U 'clawagents[all]'       # All providers + tiktoken
 ```
 
-> **Version 6.12.3** — Responses-only compatible gateways + TLS/wire_api controls (July 2026).
+> **Version 6.12.11** — Skill loader + ACP hardening docs release (July 2026). Cumulative with 6.12.4–6.12.10.
+
+### New In v6.12.11
+
+- **Docs** — README aligned with the current skill loader, ACP schema fixes, and VS Code **1.0.30** companion.
+
+### New In v6.12.10
+
+- **`disable-model-invocation`** — skills with `disable-model-invocation: true` stay out of the model catalog and refuse `use_skill` (user-invocation only).
+- **ACP tool_call schema** — required `title` / `kind`; tool content wrapped for spec-strict clients.
+
+### New In v6.12.9
+
+- **Skill loader** — bundled dirs load first (user/workspace override); safer `requires` parsing; ineligibility reasons; resource disclosure in `use_skill`; size caps and frontmatter fallbacks.
+
+### New In v6.12.8
+
+- **Per-turn skill ranking** — catalog re-ordered against the latest user message with a Recommended section.
+- **Stronger `use_skill`** — fuzzy / case-insensitive names; better YAML descriptions; injection upsert (no duplicate catalogs).
+
+### New In v6.12.7
+
+- **Dynamic skill-catalog budget** — ~1.5% of context (floor 4k / ceiling 16k chars); description-first truncation; `CLAW_SKILL_LISTING_*` overrides.
+
+### New In v6.12.6
+
+- **`list_skills` registered** alongside `use_skill` for overflow catalog discovery.
+
+### New In v6.12.5 / v6.12.4
+
+- **`CLAWAGENTS_SKIP_DOTENV`** — long-lived hosts (VS Code sidecar) skip mid-process `.env` reloads.
+- **Host API keys** — workspace `.env` no longer clobbers SecretStorage / spawn-injected keys (`CLAWAGENTS_DOTENV_OVERRIDE=0`).
 
 ### New In v6.12.3
 
