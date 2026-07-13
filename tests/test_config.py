@@ -112,8 +112,26 @@ def test_dotenv_protects_secretstorage_provenance(tmp_path, monkeypatch):
         json.dumps({"openai": "VS Code SecretStorage"}),
     )
     monkeypatch.delenv("CLAWAGENTS_ENV_FILE", raising=False)
+    monkeypatch.delenv("CLAWAGENTS_SKIP_DOTENV", raising=False)
 
     cfg._loaded = False
     cfg.env_file = None
     cfg._discover_env_file()
+    assert os.environ["OPENAI_API_KEY"] == "from-secret-storage"
+
+
+def test_skip_dotenv_ignores_workspace_env(tmp_path, monkeypatch):
+    import clawagents.config.config as cfg
+
+    env_path = tmp_path / ".env"
+    env_path.write_text("OPENAI_API_KEY=from-dotenv\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CLAWAGENTS_SKIP_DOTENV", "1")
+    monkeypatch.setenv("OPENAI_API_KEY", "from-secret-storage")
+    monkeypatch.delenv("CLAWAGENTS_ENV_FILE", raising=False)
+
+    cfg._loaded = False
+    cfg.env_file = None
+    cfg._discover_env_file()
+    assert cfg.env_file is None
     assert os.environ["OPENAI_API_KEY"] == "from-secret-storage"

@@ -1540,6 +1540,7 @@ All environment variables are **optional**. They serve as defaults when the corr
 |:---|:---|:---:|:---|
 | `CLAWAGENTS_ENV_FILE` | *(unset)* | No | Explicit path to a `.env` file. Overrides default `cwd/.env` discovery. Useful for CI, Docker, or multi-project setups |
 | `CLAWAGENTS_DOTENV_OVERRIDE` | `1` | No | When `0`/`false`, workspace `.env` does not overwrite pre-set provider secrets (used by the VS Code sidecar so SecretStorage wins) |
+| `CLAWAGENTS_SKIP_DOTENV` | *(unset)* | No | When `1`/`true`, skip discovering/loading workspace `.env` entirely (long-lived hosts that already injected secrets) |
 
 **Provider & Model** — set at least one API key (or `OPENAI_BASE_URL` for local models)
 

@@ -74,12 +74,24 @@ def _secret_keys_to_protect() -> list[str]:
     return protect
 
 
+def _skip_dotenv() -> bool:
+    """Hosts (VS Code sidecar) can disable ``.env`` loading entirely."""
+    raw = (os.environ.get("CLAWAGENTS_SKIP_DOTENV") or "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
 def _discover_env_file():
     """Discover .env file lazily on first access."""
     global _loaded, env_file
     if _loaded:
         return
     _loaded = True
+
+    # Long-lived hosts inject secrets via the process environment and must not
+    # re-load workspace .env mid-process (override would clobber UI keys).
+    if _skip_dotenv():
+        env_file = None
+        return
 
     cwd = Path.cwd()
     _explicit = os.environ.get("CLAWAGENTS_ENV_FILE")
