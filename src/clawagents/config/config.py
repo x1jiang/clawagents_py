@@ -45,6 +45,15 @@ class EngineConfig(BaseSettings):
     gemini_model: str = "gemini-3-flash-preview"
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-sonnet-4-5"
+    # Native Amazon Bedrock (IAM / instance role — no Anthropic API key).
+    # Used when model IDs look like Bedrock (anthropic.claude-…:0, us.anthropic.…,
+    # amazon.nova-…) or when PROVIDER=bedrock / profile=bedrock.
+    aws_region: str = ""
+    aws_profile: str = ""
+    aws_access_key_id: str = ""
+    aws_secret_access_key: str = ""
+    aws_session_token: str = ""
+    bedrock_model: str = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
     max_tokens: int = 8192
     temperature: float = 0.0
     context_window: int = 1000000
@@ -75,8 +84,52 @@ def is_anthropic_model(model: str) -> bool:
     return model.lower().startswith("claude") or model.lower().startswith("anthropic")
 
 
+def is_bedrock_model_id(model: str) -> bool:
+    """True for Amazon Bedrock model / inference-profile IDs.
+
+    Examples:
+      - bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0  (explicit prefix)
+      - anthropic.claude-3-5-sonnet-20241022-v2:0
+      - us.anthropic.claude-sonnet-4-5-20250929-v1:0
+      - amazon.nova-pro-v1:0
+      - openai.gpt-oss-120b-1:0
+    """
+    lower = (model or "").lower().strip()
+    if not lower:
+        return False
+    if lower.startswith("bedrock/"):
+        return True
+    # Cross-region / global inference profiles
+    if lower.startswith(("us.", "eu.", "apac.", "global.")):
+        return True
+    # Foundation model IDs: provider.model-name-version
+    for prefix in (
+        "anthropic.",
+        "amazon.",
+        "meta.",
+        "cohere.",
+        "mistral.",
+        "ai21.",
+        "deepseek.",
+        "openai.",  # Bedrock GPT-OSS
+        "qwen.",
+    ):
+        if lower.startswith(prefix):
+            return True
+    return False
+
+
+def strip_bedrock_prefix(model: str) -> str:
+    lower = (model or "").strip()
+    if lower.lower().startswith("bedrock/"):
+        return lower[len("bedrock/") :]
+    return lower
+
+
 def get_default_model(config: EngineConfig) -> str:
     hint = os.getenv("PROVIDER", "").lower()
+    if hint == "bedrock" or hint == "aws":
+        return config.bedrock_model or "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
     if hint == "gemini" and config.gemini_api_key:
         return config.gemini_model
     if hint == "anthropic" and config.anthropic_api_key:
@@ -89,4 +142,6 @@ def get_default_model(config: EngineConfig) -> str:
         return config.gemini_model
     if config.anthropic_api_key:
         return config.anthropic_model
+    if config.aws_region or os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION"):
+        return config.bedrock_model or "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
     return config.openai_model

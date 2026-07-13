@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "clawagents"
-version = "6.11.2"
+version = "6.12.0"
 description = "Lean, full-stack agentic AI framework with PTRL (Prompt-Time Reinforcement Learning)"
 readme = "README.md"
 license = "MIT"
@@ -33,6 +33,7 @@ dependencies = [
 [project.optional-dependencies]
 gemini = ["google-genai>=0.1.0"]
 anthropic = ["anthropic>=0.40.0"]
+bedrock = ["anthropic>=0.40.0", "boto3>=1.34.0"]
 accurate-tokens = ["tiktoken>=0.5.0"]
 media = ["Pillow>=10.0"]
 # Optional MCP (Model Context Protocol) client. Required only when wiring
@@ -56,6 +57,7 @@ acp = ["agent-client-protocol>=0.1.0"]
 all = [
     "google-genai>=0.1.0",
     "anthropic>=0.40.0",
+    "boto3>=1.34.0",
     "tiktoken>=0.5.0",
     "Pillow>=10.0",
     "mcp>=1.0.0",
@@ -72,6 +74,7 @@ dev = [
     "tiktoken>=0.5.0",
     "google-genai>=0.1.0",
     "anthropic>=0.40.0",
+    "boto3>=1.34.0",
     "mcp>=1.0.0",
 ]
 
@@ -85,6 +88,10 @@ clawagents = "clawagents.__main__:main"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Pin the async-fixture loop scope: pytest-asyncio warns on every run while
+# unset and will change its default in a future release. "function" matches
+# the current implicit behavior (a fresh loop per test).
+asyncio_default_fixture_loop_scope = "function"
 markers = ["benchmark: performance benchmark tests (deselect with -m 'not benchmark')"]
 # Make the in-tree `src/clawagents` win over any globally-installed `clawagents`
 # package. Without this, `pytest` may import a stale wheel from site-packages and

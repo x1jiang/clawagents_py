@@ -224,7 +224,13 @@ def _tool_observation(result: ToolResult) -> str | list[dict[str, Any]]:
 # keys first so e.g. "gpt-5.4-medium" resolves to the "gpt-5.4" profile
 # rather than falling back to "gpt-5".
 _MODEL_PROFILES: dict[str, dict[str, int | float]] = {
-    # ── OpenAI — GPT-5 family (400K context) ───────────────────────────
+    # ── OpenAI — GPT-5.6 (~1.05M context) ──────────────────────────────
+    "gpt-5.6-sol": {"max_input_tokens": 1_050_000, "budget_ratio": 0.85},
+    "gpt-5.6-terra": {"max_input_tokens": 1_050_000, "budget_ratio": 0.85},
+    "gpt-5.6-luna": {"max_input_tokens": 1_050_000, "budget_ratio": 0.85},
+    "gpt-5.6": {"max_input_tokens": 1_050_000, "budget_ratio": 0.85},
+    # ── OpenAI — GPT-5.5 / 5.4 family (400K context) ───────────────────
+    "gpt-5.5": {"max_input_tokens": 400_000, "budget_ratio": 0.85},
     "gpt-5.4-mini": {"max_input_tokens": 400_000, "budget_ratio": 0.85},
     "gpt-5.4-nano": {"max_input_tokens": 400_000, "budget_ratio": 0.85},
     "gpt-5.4": {"max_input_tokens": 400_000, "budget_ratio": 0.85},
@@ -255,6 +261,8 @@ _MODEL_PROFILES: dict[str, dict[str, int | float]] = {
     "o1-mini": {"max_input_tokens": 128_000, "budget_ratio": 0.80},
     "o1": {"max_input_tokens": 200_000, "budget_ratio": 0.80},
     # ── Google — Gemini 3.x (1M–2M context) ────────────────────────────
+    "gemini-3.5-flash": {"max_input_tokens": 1_000_000, "budget_ratio": 0.90},
+    "gemini-3.5": {"max_input_tokens": 1_000_000, "budget_ratio": 0.90},
     "gemini-3.1-pro": {"max_input_tokens": 2_000_000, "budget_ratio": 0.90},
     "gemini-3.1-flash": {"max_input_tokens": 1_000_000, "budget_ratio": 0.90},
     "gemini-3.1": {"max_input_tokens": 1_000_000, "budget_ratio": 0.90},
@@ -2616,7 +2624,10 @@ async def run_agent_graph(
                             state.result = obs
                             state.status = "done"
                             emit("final_content", {"content": state.result})
-                            _emit_typed("assistant_message", {"content": state.result})
+                            _emit_typed("assistant_message", {
+                                "content": state.result,
+                                "thinking": _thinking_content,
+                            })
                             break
                         messages.append(LLMMessage(
                             role="user",
@@ -2648,7 +2659,10 @@ async def run_agent_graph(
                 state.result = _sanitize_assistant_text(response.content)
                 state.status = "done"
                 emit("final_content", {"content": state.result})
-                _emit_typed("assistant_message", {"content": state.result})
+                _emit_typed("assistant_message", {
+                    "content": state.result,
+                    "thinking": _thinking_content,
+                })
                 if not _final_assistant_appended:
                     messages.append(LLMMessage(role="assistant", content=response.content, thinking=_thinking_content))
                 break
@@ -2897,7 +2911,10 @@ async def run_agent_graph(
             # calls) on the typed stream. Skipped in text-tool mode where
             # ``response.content`` is the raw JSON tool call itself.
             if use_native_tools and response.content and response.content.strip():
-                _emit_typed("assistant_message", {"content": response.content})
+                _emit_typed("assistant_message", {
+                    "content": response.content,
+                    "thinking": _thinking_content,
+                })
 
             # Session: write assistant message with tool calls
             if session_writer:

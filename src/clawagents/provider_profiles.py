@@ -39,6 +39,22 @@ BUILTIN_PROVIDER_PROFILES: dict[str, ProviderProfile] = {
     "gemini": ProviderProfile("gemini", "gemini", "gemini-3-flash-preview"),
     "anthropic": ProviderProfile("anthropic", "anthropic", "claude-sonnet-4-5"),
     "ollama": ProviderProfile("ollama", "openai", "llama3.1", "http://localhost:11434/v1", "ollama"),
+    # Native Amazon Bedrock (IAM / instance role — HIPAA-friendly Claude path).
+    # Requires: pip install 'clawagents[bedrock]' + AWS credentials.
+    "bedrock": ProviderProfile(
+        "bedrock",
+        "bedrock",
+        "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    ),
+    # OpenAI-compatible Bedrock gateway (LiteLLM / Bedrock Access Gateway).
+    # Callers must pass base_url; api_key defaults to the gateway placeholder.
+    "bedrock-gateway": ProviderProfile(
+        "bedrock-gateway",
+        "openai",
+        "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "",
+        "bedrock",
+    ),
 }
 
 

@@ -37,6 +37,7 @@ from clawagents import (
     function_tool,
     # 3
     AssistantDeltaEvent,
+    AssistantTextEvent,
     FinalOutputEvent,
     GuardrailTrippedEvent,
     StreamEvent,
@@ -301,6 +302,16 @@ class TestStreamEvents:
         ev = stream_event_from_kind("assistant_delta", {"delta": "ab"})
         assert isinstance(ev, AssistantDeltaEvent)
         assert ev.delta == "ab"
+
+    def test_assistant_message_thinking_mapping(self):
+        ev = stream_event_from_kind(
+            "assistant_message",
+            {"content": "Answer", "thinking": "reason"},
+        )
+        assert isinstance(ev, AssistantTextEvent)
+        assert ev.content == "Answer"
+        assert ev.thinking == "reason"
+        assert ev.data["thinking"] == "reason"
 
 
 # ── #4  Composable RetryPolicy ────────────────────────────────────────────

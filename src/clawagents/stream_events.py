@@ -32,6 +32,7 @@ class TurnStartedEvent(StreamEvent):
 @dataclass
 class AssistantTextEvent(StreamEvent):
     content: str = ""
+    thinking: str | None = None
     kind: str = "assistant_message"
 
 

@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.11.2-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.12.0-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -22,7 +22,7 @@ This repo is the **Python framework** (`pip install clawagents`). Ready-made cli
 | Product | What it is | Link |
 |---------|------------|------|
 | **ClawAgents Desktop** | Native macOS app — project chats, file editor, SSH remotes, embedded gateway | [x1jiang/clawagents-desktop](https://github.com/x1jiang/clawagents-desktop) · [Download DMG (v0.2.2)](https://github.com/x1jiang/clawagents-desktop/releases/tag/v0.2.2) |
-| **ClawAgents for VS Code / Cursor** | Editor extension — chat, tools, and agent loop inside your IDE | [x1jiang/clawagents-vscode](https://github.com/x1jiang/clawagents-vscode) |
+| **ClawAgents for VS Code / Cursor** | Editor extension — chat, tools, and agent loop inside your IDE | [x1jiang/clawagents-vscode](https://github.com/x1jiang/clawagents-vscode) · [v1.0.7](https://github.com/x1jiang/clawagents-vscode/releases/tag/v1.0.7) |
 
 ## Installation
 
@@ -30,10 +30,18 @@ This repo is the **Python framework** (`pip install clawagents`). Ready-made cli
 pip install clawagents              # Core (OpenAI only)
 pip install clawagents[gemini]      # + Google Gemini support
 pip install clawagents[anthropic]   # + Anthropic Claude support
+pip install clawagents[bedrock]     # + Amazon Bedrock (Claude via IAM + Nova/Converse)
 pip install clawagents[all]         # All providers + tiktoken
 ```
 
-> **Version 6.11.2** — Tavily `web_search` (July 2026).
+> **Version 6.12.0** — Native Amazon Bedrock (July 2026).
+
+### New In v6.12.0
+
+- **Native AWS Bedrock** — Claude via `AsyncAnthropicBedrock` (IAM / HIPAA path); Nova and other models via Converse API. `pip install 'clawagents[bedrock]'`.
+- **Model routing** — Bedrock IDs (`us.anthropic.…`, `amazon.nova-…`, `bedrock/…`) use native providers when `base_url` is unset; OpenAI-compatible BAG/LiteLLM still works with `base_url`.
+- **Profiles** — `profile="bedrock"` (native) and `profile="bedrock-gateway"` (proxy).
+- **Config** — `AWS_REGION` / `AWS_PROFILE` / access keys + `BEDROCK_MODEL` / `PROVIDER=bedrock`.
 
 ### New In v6.11.2
 
@@ -242,7 +250,7 @@ See the [`examples/`](examples/) directory for ready-to-run scripts:
 | [`03_azure.py`](examples/03_azure.py) | Azure OpenAI |
 | [`04_local_ollama.py`](examples/04_local_ollama.py) | Ollama (local) |
 | [`05_local_vllm.py`](examples/05_local_vllm.py) | vLLM (local) |
-| [`06_bedrock.py`](examples/06_bedrock.py) | AWS Bedrock (via gateway) |
+| [`06_bedrock.py`](examples/06_bedrock.py) | AWS Bedrock native IAM + gateway |
 | [`07_with_custom_tools.py`](examples/07_with_custom_tools.py) | Custom tools |
 | [`08_compare_samples.py`](examples/08_compare_samples.py) | Multi-sample comparison |
 
@@ -384,24 +392,42 @@ OPENAI_BASE_URL=https://myresource.openai.azure.com/
 OPENAI_API_VERSION=2024-12-01-preview
 ```
 
-### 9. AWS Bedrock (via OpenAI-compatible gateway)
+### 9. Amazon Bedrock (native IAM — Claude / HIPAA)
 
-Use [Bedrock Access Gateway](https://github.com/aws-samples/bedrock-access-gateway) or [LiteLLM proxy](https://docs.litellm.ai/docs/proxy/quick_start) to expose Bedrock models as an OpenAI-compatible API:
+Install the optional extra, then use a Bedrock model ID. Auth uses the standard AWS credential chain (env keys, shared credentials, instance/task role) — no Anthropic API key:
+
+```bash
+pip install 'clawagents[bedrock]'
+```
+
+```python
+# Claude on Bedrock (AsyncAnthropicBedrock)
+agent = create_claw_agent("us.anthropic.claude-sonnet-4-5-20250929-v1:0")
+# or: create_claw_agent(profile="bedrock")
+
+# Amazon Nova / other non-Claude models (Converse API)
+agent = create_claw_agent("amazon.nova-pro-v1:0")
+```
+
+```env
+PROVIDER=bedrock
+AWS_REGION=us-east-1
+# Optional overrides:
+# AWS_PROFILE=...
+# AWS_ACCESS_KEY_ID=...
+# AWS_SECRET_ACCESS_KEY=...
+# BEDROCK_MODEL=us.anthropic.claude-sonnet-4-5-20250929-v1:0
+```
+
+If you prefer an OpenAI-compatible proxy ([Bedrock Access Gateway](https://github.com/aws-samples/bedrock-access-gateway) / [LiteLLM](https://docs.litellm.ai/docs/proxy/quick_start)), set `base_url` — routing stays on the OpenAI client:
 
 ```python
 agent = create_claw_agent(
-    "anthropic.claude-3-sonnet-20240229-v1:0",
+    "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
     base_url="http://localhost:8080/v1",
-    api_key="bedrock",           # gateway handles AWS auth
+    api_key="bedrock",
 )
-```
-
-Or via `.env`:
-
-```env
-OPENAI_API_KEY=bedrock
-OPENAI_MODEL=anthropic.claude-3-sonnet-20240229-v1:0
-OPENAI_BASE_URL=http://localhost:8080/v1
+# or: create_claw_agent(profile="bedrock-gateway", base_url="http://localhost:8080/v1")
 ```
 
 ### 10. Local Models (Ollama / vLLM / LM Studio)
@@ -1500,15 +1526,19 @@ All environment variables are **optional**. They serve as defaults when the corr
 
 | Variable | Default | Required? | Description |
 |:---|:---|:---:|:---|
-| `PROVIDER` | auto-detect | No | Hint: `"openai"`, `"gemini"`, or `"anthropic"`. Auto-detected from which API key is set |
+| `PROVIDER` | auto-detect | No | Hint: `"openai"`, `"gemini"`, `"anthropic"`, or `"bedrock"` / `"aws"`. Auto-detected from keys / AWS region |
 | `OPENAI_API_KEY` | — | **Yes** *(for OpenAI/Azure)* | OpenAI or Azure API key. **Not needed for local models** — when `OPENAI_BASE_URL` is set, a placeholder is used automatically |
 | `OPENAI_MODEL` | `gpt-5-nano` | No | Model name, Azure deployment name, or local model ID (e.g. `llama3.1`) |
 | `OPENAI_BASE_URL` | *(unset)* | No | Custom endpoint for OpenAI-compatible APIs: Azure, Bedrock gateway, Ollama, vLLM, LM Studio. Omit to use `api.openai.com` |
 | `OPENAI_API_VERSION` | *(unset)* | No | **Azure only.** API version string (e.g. `2024-12-01-preview`). Ignored by all other providers |
 | `GEMINI_API_KEY` | — | **Yes** *(for Gemini)* | Google Gemini API key |
 | `GEMINI_MODEL` | `gemini-3-flash-preview` | No | Gemini model name |
-| `ANTHROPIC_API_KEY` | — | **Yes** *(for Anthropic)* | Anthropic API key |
+| `ANTHROPIC_API_KEY` | — | **Yes** *(for Anthropic)* | Anthropic API key (not used for native Bedrock) |
 | `ANTHROPIC_MODEL` | `claude-sonnet-4-5` | No | Anthropic model name (e.g. `claude-sonnet-4-5`, `claude-opus-4`) |
+| `AWS_REGION` / `AWS_DEFAULT_REGION` | `us-east-1` | **Yes** *(for native Bedrock)* | Region for Bedrock Runtime / AsyncAnthropicBedrock |
+| `AWS_PROFILE` | — | No | Shared-credentials profile for native Bedrock |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` | — | No | Explicit keys (prefer IAM role / profile in production) |
+| `BEDROCK_MODEL` | `us.anthropic.claude-sonnet-4-5-20250929-v1:0` | No | Default Bedrock model when `PROVIDER=bedrock` |
 | `TAVILY_API_KEY` | — | **Yes** *(for `web_search`)* | Tavily API key for the built-in `web_search` tool |
 
 **LLM Tuning**
@@ -1607,6 +1637,12 @@ parity sweep.
 ---
 
 ## Changelog
+
+### v6.12.0 — Native Amazon Bedrock (July 2026)
+
+- `BedrockProvider` (Claude / `AsyncAnthropicBedrock`) and `BedrockConverseProvider` (Nova, Llama, …)
+- Optional extra `clawagents[bedrock]` (`anthropic` + `boto3`)
+- Gateway path unchanged when `openai_base_url` / `base_url` is set
 
 ### v6.11.2 — Tavily `web_search` (July 2026)
 

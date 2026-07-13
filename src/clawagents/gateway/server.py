@@ -173,14 +173,22 @@ def create_app() -> tuple:
 
             return await agent.invoke(task, on_event=on_event)
 
-        asyncio.create_task(_run())
+        run_task = asyncio.create_task(_run())
 
         async def _stream():
-            while True:
-                msg = await event_queue.get()
-                if msg is None:
-                    break
-                yield msg
+            try:
+                while True:
+                    msg = await event_queue.get()
+                    if msg is None:
+                        break
+                    yield msg
+            finally:
+                # Client disconnected (or aborted) before the turn finished:
+                # stop the agent instead of letting it run to completion in the
+                # background. The agent loop converts the resulting
+                # CancelledError into a clean terminal state.
+                if not run_task.done():
+                    run_task.cancel()
 
         return StreamingResponse(
             _stream(),

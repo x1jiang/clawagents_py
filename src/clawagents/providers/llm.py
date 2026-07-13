@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import random
 from abc import ABC, abstractmethod
 from typing import Any, AsyncIterator, Callable, Coroutine, Literal, TypeVar
@@ -1764,6 +1765,205 @@ _OLLAMA_PREFIXES: tuple[str, ...] = (
 _OLLAMA_DEFAULT_BASE_URL = "http://localhost:11434/v1"
 
 
+def _aws_region(config: EngineConfig) -> str:
+    return (
+        (config.aws_region or "").strip()
+        or os.environ.get("AWS_REGION", "").strip()
+        or os.environ.get("AWS_DEFAULT_REGION", "").strip()
+        or "us-east-1"
+    )
+
+
+def _bedrock_client_kwargs(config: EngineConfig) -> dict[str, Any]:
+    """Kwargs for ``AsyncAnthropicBedrock`` / boto3 session."""
+    kwargs: dict[str, Any] = {"aws_region": _aws_region(config)}
+    if (config.aws_profile or "").strip():
+        kwargs["aws_profile"] = config.aws_profile.strip()
+    if (config.aws_access_key_id or "").strip():
+        kwargs["aws_access_key"] = config.aws_access_key_id.strip()
+    if (config.aws_secret_access_key or "").strip():
+        kwargs["aws_secret_key"] = config.aws_secret_access_key.strip()
+    if (config.aws_session_token or "").strip():
+        kwargs["aws_session_token"] = config.aws_session_token.strip()
+    return kwargs
+
+
+def _is_bedrock_claude_model(model_name: str) -> bool:
+    lower = model_name.lower()
+    return "anthropic." in lower or lower.startswith("claude")
+
+
+class BedrockProvider(AnthropicProvider):
+    """Claude on Amazon Bedrock via ``AsyncAnthropicBedrock`` (Messages API).
+
+    Auth uses the standard AWS credential chain (env keys, shared credentials,
+    instance/task role) — suitable for HIPAA workloads on AWS. Requires
+    ``pip install 'clawagents[bedrock]'``.
+    """
+
+    name = "bedrock"
+
+    def __init__(self, config: EngineConfig):
+        if not _HAS_ANTHROPIC:
+            raise ImportError(
+                "anthropic package not installed. Install with: pip install 'clawagents[bedrock]'"
+            )
+        try:
+            bedrock_cls = getattr(_anthropic_mod, "AsyncAnthropicBedrock", None)
+        except Exception:  # noqa: BLE001
+            bedrock_cls = None
+        if bedrock_cls is None:
+            raise ImportError(
+                "AsyncAnthropicBedrock is unavailable. Upgrade anthropic "
+                "(pip install 'clawagents[bedrock]') — boto3 is also required."
+            )
+        # Do not call AnthropicProvider.__init__ (that builds AsyncAnthropic).
+        self.client = bedrock_cls(**_bedrock_client_kwargs(config))
+        self.model = (
+            (config.bedrock_model or "").strip()
+            or (config.anthropic_model or "").strip()
+            or "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+        )
+        self._max_tokens = config.max_tokens
+        self._temperature = config.temperature
+
+
+class BedrockConverseProvider(LLMProvider):
+    """Non-Claude Bedrock models (Nova, Llama, GPT-OSS, …) via Converse API.
+
+    Text chat + tools. Requires ``boto3`` (``pip install 'clawagents[bedrock]'``).
+    """
+
+    name = "bedrock-converse"
+
+    def __init__(self, config: EngineConfig):
+        try:
+            import boto3  # type: ignore
+        except ImportError as exc:
+            raise ImportError(
+                "boto3 is required for Amazon Nova / non-Claude Bedrock models. "
+                "Install with: pip install 'clawagents[bedrock]'"
+            ) from exc
+        region = _aws_region(config)
+        session_kwargs: dict[str, Any] = {}
+        if (config.aws_profile or "").strip():
+            session_kwargs["profile_name"] = config.aws_profile.strip()
+        if (config.aws_access_key_id or "").strip():
+            session_kwargs["aws_access_key_id"] = config.aws_access_key_id.strip()
+        if (config.aws_secret_access_key or "").strip():
+            session_kwargs["aws_secret_access_key"] = config.aws_secret_access_key.strip()
+        if (config.aws_session_token or "").strip():
+            session_kwargs["aws_session_token"] = config.aws_session_token.strip()
+        session = boto3.Session(**session_kwargs) if session_kwargs else boto3.Session()
+        self._client = session.client("bedrock-runtime", region_name=region)
+        self.model = (
+            (config.bedrock_model or "").strip()
+            or "amazon.nova-pro-v1:0"
+        )
+        self._max_tokens = config.max_tokens
+        self._temperature = config.temperature
+
+    async def chat(
+        self,
+        messages: list[LLMMessage],
+        on_chunk: OnChunkCallback = None,
+        cancel_event: asyncio.Event | None = None,
+        tools: list[NativeToolSchema] | None = None,
+    ) -> LLMResponse:
+        system_parts: list[str] = []
+        converse_messages: list[dict[str, Any]] = []
+        for m in messages:
+            if m.role == "system":
+                system_parts.append(m.content if isinstance(m.content, str) else str(m.content))
+                continue
+            role = "assistant" if m.role == "assistant" else "user"
+            text = m.content if isinstance(m.content, str) else str(m.content)
+            if m.role == "tool":
+                text = f"[tool {m.tool_call_id or ''}] {text}"
+                role = "user"
+            converse_messages.append(
+                {"role": role, "content": [{"text": text or ""}]}
+            )
+
+        kwargs: dict[str, Any] = {
+            "modelId": self.model,
+            "messages": converse_messages,
+            "inferenceConfig": {
+                "maxTokens": self._max_tokens,
+                "temperature": float(self._temperature or 0),
+            },
+        }
+        if system_parts:
+            kwargs["system"] = [{"text": "\n".join(system_parts)}]
+        if tools:
+            # Best-effort tool schemas for Converse toolConfig.
+            tool_specs = []
+            for s in tools:
+                props = {
+                    k: {
+                        "type": v.get("type", "string"),
+                        "description": v.get("description", ""),
+                    }
+                    for k, v in s.parameters.items()
+                }
+                required = [k for k, v in s.parameters.items() if v.get("required")]
+                tool_specs.append(
+                    {
+                        "toolSpec": {
+                            "name": s.name,
+                            "description": s.description or s.name,
+                            "inputSchema": {
+                                "json": {
+                                    "type": "object",
+                                    "properties": props,
+                                    "required": required,
+                                }
+                            },
+                        }
+                    }
+                )
+            kwargs["toolConfig"] = {"tools": tool_specs}
+
+        loop = asyncio.get_running_loop()
+
+        def _call() -> dict[str, Any]:
+            return self._client.converse(**kwargs)
+
+        raw = await loop.run_in_executor(None, _call)
+        output = (raw or {}).get("output") or {}
+        message = output.get("message") or {}
+        content_blocks = message.get("content") or []
+        texts: list[str] = []
+        tool_calls: list[NativeToolCall] = []
+        for block in content_blocks:
+            if not isinstance(block, dict):
+                continue
+            if "text" in block and block["text"]:
+                texts.append(str(block["text"]))
+            tool_use = block.get("toolUse")
+            if isinstance(tool_use, dict):
+                tool_calls.append(
+                    NativeToolCall(
+                        tool_name=str(tool_use.get("name") or ""),
+                        args=tool_use.get("input") or {},
+                        tool_call_id=str(tool_use.get("toolUseId") or ""),
+                    )
+                )
+        content = "".join(texts)
+        if on_chunk and content:
+            await on_chunk(content)
+        usage = (raw or {}).get("usage") or {}
+        tokens = int(usage.get("totalTokens") or 0) or (
+            int(usage.get("inputTokens") or 0) + int(usage.get("outputTokens") or 0)
+        )
+        return LLMResponse(
+            content=content,
+            model=self.model,
+            tokens_used=tokens,
+            tool_calls=tool_calls or None,
+        )
+
+
 def _looks_like_ollama(model_name: str) -> bool:
     """Return True if *model_name* looks like an Ollama/local model tag.
 
@@ -1780,6 +1980,8 @@ def create_provider(model_name: str, config: EngineConfig) -> LLMProvider:
     can safely reuse one ``EngineConfig`` across providers (e.g. main +
     advisor) or in concurrent flows without cross-talk.
     """
+    from clawagents.config.config import is_bedrock_model_id, strip_bedrock_prefix
+
     config = config.model_copy()
     lower = model_name.lower()
     if lower.startswith("gemini"):
@@ -1789,7 +1991,33 @@ def create_provider(model_name: str, config: EngineConfig) -> LLMProvider:
             )
         config.gemini_model = model_name
         return GeminiProvider(config)
+
+    # ── Amazon Bedrock (native IAM) ─────────────────────────────────────
+    # Prefer OpenAI-compatible gateway when openai_base_url is set (BAG / LiteLLM).
+    # Otherwise route Bedrock model IDs to AsyncAnthropicBedrock (Claude) or
+    # Converse (Nova / Llama / GPT-OSS / …).
+    explicit_bedrock = lower.startswith("bedrock/")
+    bedrock_id = is_bedrock_model_id(model_name)
+    if (explicit_bedrock or bedrock_id) and not config.openai_base_url:
+        model_id = strip_bedrock_prefix(model_name)
+        config.bedrock_model = model_id
+        if _is_bedrock_claude_model(model_id):
+            config.anthropic_model = model_id
+            return BedrockProvider(config)
+        return BedrockConverseProvider(config)
+
     if lower.startswith("claude") or lower.startswith("anthropic"):
+        # Bedrock Access Gateway / LiteLLM / other OpenAI-compatible proxies set
+        # openai_base_url and speak the OpenAI protocol — do not send those
+        # requests to Anthropic's native API (model IDs look like
+        # anthropic.claude-… or us.anthropic.claude-…).
+        if config.openai_base_url:
+            if not config.openai_api_key:
+                config.openai_api_key = "bedrock"
+            config.openai_model = model_name
+            return OpenAIProvider(config)
+        # Plain "claude-sonnet-4-5" (no Bedrock ID shape) → Anthropic API.
+        # Fully-qualified Bedrock IDs without base_url already handled above.
         config.anthropic_model = model_name
         return AnthropicProvider(config)
     if _looks_like_ollama(model_name):

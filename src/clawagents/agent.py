@@ -588,7 +588,11 @@ def create_claw_agent(
         # Local model (Ollama / vLLM / LM Studio)
         agent = create_claw_agent("llama3.1", base_url="http://localhost:11434/v1")
 
-        # AWS Bedrock via gateway
+        # AWS Bedrock native (IAM / HIPAA) — Claude on Bedrock
+        agent = create_claw_agent("us.anthropic.claude-sonnet-4-5-20250929-v1:0")
+        # or: create_claw_agent(profile="bedrock")
+
+        # AWS Bedrock via OpenAI-compatible gateway (BAG / LiteLLM)
         agent = create_claw_agent("anthropic.claude-v3",
             base_url="http://localhost:8080/v1", api_key="bedrock")
 
@@ -986,7 +990,7 @@ def _resolve_model(
     if isinstance(model, LLMProvider):
         return model
 
-    from clawagents.config.config import load_config, get_default_model
+    from clawagents.config.config import load_config, get_default_model, is_bedrock_model_id
     from clawagents.providers.llm import create_provider
 
     config = load_config()
@@ -1013,9 +1017,18 @@ def _resolve_model(
         lower = active_model.lower()
         if lower.startswith("gemini"):
             config.gemini_api_key = api_key
-        elif lower.startswith("claude") or lower.startswith("anthropic"):
+        elif is_bedrock_model_id(active_model) and not config.openai_base_url:
+            # Native Bedrock uses the AWS credential chain (IAM / profile /
+            # env keys) — do not stash a placeholder in anthropic_api_key.
+            pass
+        elif (
+            (lower.startswith("claude") or lower.startswith("anthropic"))
+            and not config.openai_base_url
+        ):
             config.anthropic_api_key = api_key
         else:
+            # OpenAI, Ollama, Bedrock gateway, Azure, and other OpenAI-compatible
+            # endpoints (including anthropic.* model IDs with a custom base_url).
             config.openai_api_key = api_key
 
     provider = create_provider(active_model, config)
