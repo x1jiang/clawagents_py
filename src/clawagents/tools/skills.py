@@ -370,6 +370,112 @@ def is_skill_eligible(skill: Skill) -> bool:
     return skill_ineligibility_reason(skill) is None
 
 
+# ── Load-time content inspection (supply-chain hardening) ───────────────────
+# Auto-discovered skills are injected into the model prompt without a human
+# in the loop, so an attacker who lands a SKILL.md in a scanned directory can
+# smuggle instructions the operator never sees. Two documented vectors:
+#   * invisible-Unicode smuggling (Unicode Tags block, bidi overrides,
+#     zero-width chars) — the "Rules File Backdoor" / Trojan Source pattern;
+#   * remote-exec one-liners in the instruction body (ClawHub / VirusTotal).
+# This is defense-in-depth, NEVER a trust decision — scanners are evadable.
+# On a high-signal hit the skill is *quarantined* (kept for diagnostics, kept
+# out of the model-facing catalog, refused by use_skill) rather than deleted.
+
+# Unicode Tags block: invisible chars models still read — the prime smuggling
+# vector, ~zero legitimate use in prose.
+_TAG_CHARS_RE = re.compile(r"[\U000E0000-\U000E007F]")
+# Bidirectional overrides / isolates (Trojan Source): reorder rendered text.
+_BIDI_OVERRIDE_RE = re.compile(r"[‪-‮⁦-⁩]")
+# Zero-width / soft-hyphen / BOM: stripped as hygiene + warned, but common
+# enough (emoji ZWJ, stray BOM) that they don't quarantine on their own.
+_ZERO_WIDTH_RE = re.compile(r"[​-‍⁠﻿­]")
+# C0/C1 control chars except tab/newline/carriage-return.
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]")
+
+# High-signal remote-execution signatures. Tuned for precision: these are
+# unambiguous in an auto-loaded instruction file. Lower-signal mentions
+# (bare ``rm -rf`` / ``subprocess.`` / ``eval(``) are intentionally NOT here
+# — they appear in legitimate skill instructions and belong to the stricter
+# authoring-time gate (skills/workshop/scanner.py), not the load gate.
+_DANGEROUS_LOAD_PATTERNS: List[tuple] = [
+    (
+        re.compile(
+            r"\b(?:curl|wget|fetch)\b[^\n|]{0,400}\|\s*(?:sudo\s+)?(?:ba|z|k|a)?sh\b",
+            re.IGNORECASE,
+        ),
+        "pipes a network download straight into a shell",
+    ),
+    (
+        re.compile(r"\b(?:iex|invoke-expression)\s*[\(\"']", re.IGNORECASE),
+        "PowerShell Invoke-Expression of dynamic content",
+    ),
+    (
+        re.compile(r"new-object\s+net\.webclient", re.IGNORECASE),
+        "PowerShell remote download via Net.WebClient",
+    ),
+    (
+        re.compile(
+            r"base64\s+(?:-d|--decode|-D)\b[^\n]{0,200}\|\s*(?:ba)?sh", re.IGNORECASE
+        ),
+        "base64-decodes content and pipes it to a shell",
+    ),
+    (
+        re.compile(
+            r"\|\s*base64\s+(?:-d|--decode|-D)\b[^\n]{0,80}\|\s*(?:python|node|perl|ruby)",
+            re.IGNORECASE,
+        ),
+        "base64-decodes content and pipes it to an interpreter",
+    ),
+]
+
+
+def _strip_invisible(text: str) -> tuple[str, int]:
+    """Remove zero-width / soft-hyphen / BOM / control chars. Returns
+    (cleaned, removed_count). Tab/newline/CR are preserved."""
+    if not text:
+        return text, 0
+    removed = len(_ZERO_WIDTH_RE.findall(text)) + len(_CONTROL_RE.findall(text))
+    if removed:
+        text = _CONTROL_RE.sub("", _ZERO_WIDTH_RE.sub("", text))
+    return text, removed
+
+
+def scan_skill_content(name: str, description: str, body: str) -> list[str]:
+    """High-signal findings that quarantine a skill at load time.
+
+    Covers the always-injected metadata (name+description) and the body.
+    Returns human-readable reasons; empty means the skill passed.
+    """
+    findings: list[str] = []
+    for label, text in (("name", name), ("description", description), ("body", body)):
+        if _TAG_CHARS_RE.search(text or ""):
+            findings.append(f"invisible Unicode Tag characters in {label}")
+        if _BIDI_OVERRIDE_RE.search(text or ""):
+            findings.append(f"bidirectional-override characters in {label}")
+    for pattern, why in _DANGEROUS_LOAD_PATTERNS:
+        if pattern.search(body or ""):
+            findings.append(why)
+    # De-dupe while preserving order.
+    seen: set[str] = set()
+    out: list[str] = []
+    for f in findings:
+        if f not in seen:
+            seen.add(f)
+            out.append(f)
+    return out
+
+
+def _skill_scan_enabled() -> bool:
+    """Load-time quarantine is on unless CLAW_SKILL_SCAN=off (invisible-char
+    stripping still runs regardless — it is pure hygiene)."""
+    return (os.environ.get("CLAW_SKILL_SCAN") or "").strip().lower() not in (
+        "off",
+        "0",
+        "false",
+        "no",
+    )
+
+
 class SkillStore:
     """Loads skills from directories.
 
@@ -383,6 +489,9 @@ class SkillStore:
         self.skill_dirs: List[str] = []
         # name → reason for skills whose runtime requirements failed.
         self.ineligible: Dict[str, str] = {}
+        # name → reason for skills that failed the load-time content scan
+        # (invisible-Unicode / remote-exec). Kept out of the model catalog.
+        self.quarantined: Dict[str, str] = {}
         # Human-readable loader diagnostics (spec violations, skipped files).
         self.warnings: List[str] = []
         self._seen_dirs: set[str] = set()
@@ -414,15 +523,53 @@ class SkillStore:
         if not skill.name.strip():
             self.warnings.append(f"{skill_file}: skipped (empty skill name)")
             return
+
+        # ── Trust boundary: inspect content before it can reach the prompt ──
+        # 1. Scan the *raw* text (before stripping) so smuggled instructions
+        #    can't be hidden from the scanner by the same chars we'd remove.
+        findings = scan_skill_content(skill.name, skill.description, skill.content)
+        # 2. Strip invisible/zero-width/control chars from everything that gets
+        #    injected — pure hygiene, always on.
+        skill.name, n_name = _strip_invisible(skill.name)
+        skill.description, n_desc = _strip_invisible(skill.description)
+        skill.content, n_body = _strip_invisible(skill.content)
+        if not skill.name.strip():
+            self.warnings.append(f"{skill_file}: skipped (skill name empty after sanitize)")
+            return
+        if n_name or n_desc or n_body:
+            self.warnings.append(
+                f"{skill_file}: stripped {n_name + n_desc + n_body} invisible/control "
+                f"char(s) from skill text"
+            )
+
         for w in skill.warnings:
             self.warnings.append(f"{skill_file}: {w}")
+
+        if findings and _skill_scan_enabled():
+            reason = "; ".join(findings)
+            self.quarantined[skill.name] = reason
+            self.warnings.append(
+                f"{skill_file}: QUARANTINED (content scan) — {reason}. "
+                f"Set CLAW_SKILL_SCAN=off to load anyway after review."
+            )
+            # A quarantined load must not leave the name usable.
+            self.skills.pop(skill.name, None)
+            return
+        if findings:
+            # Scan disabled by env: load but surface the findings loudly.
+            self.warnings.append(
+                f"{skill_file}: content-scan findings ignored (CLAW_SKILL_SCAN=off) — "
+                + "; ".join(findings)
+            )
+
         reason = skill_ineligibility_reason(skill)
         if reason is not None:
             self.ineligible[skill.name] = reason
             return
         self.skills[skill.name] = skill
-        # An eligible load supersedes a stale ineligible record for the name.
+        # A clean load supersedes stale ineligible/quarantine records.
         self.ineligible.pop(skill.name, None)
+        self.quarantined.pop(skill.name, None)
 
     async def load_all(self):
         for d in self.skill_dirs:
@@ -503,7 +650,7 @@ def create_skill_tools(store: SkillStore) -> List[Tool]:
 
         async def execute(self, args: Dict[str, Any]) -> ToolResult:
             skills = store.list()
-            if not skills and not store.ineligible:
+            if not skills and not store.ineligible and not store.quarantined:
                 return ToolResult(success=True, output="No skills available.")
 
             lines = []
@@ -519,6 +666,15 @@ def create_skill_tools(store: SkillStore) -> List[Tool]:
                     for name, reason in sorted(store.ineligible.items())
                 )
                 output += f"\n\nUnavailable (requirements not met):\n{unavailable}"
+            if store.quarantined:
+                blocked = "\n".join(
+                    f"- **{name}**: {reason}"
+                    for name, reason in sorted(store.quarantined.items())
+                )
+                output += (
+                    "\n\nQuarantined (failed security content scan — not loaded):\n"
+                    + blocked
+                )
             return ToolResult(success=True, output=output)
 
     class UseSkillTool:
@@ -553,16 +709,24 @@ def create_skill_tools(store: SkillStore) -> List[Tool]:
                 hint = ""
                 if suggestions:
                     hint = " Did you mean: " + ", ".join(suggestions) + "?"
-                ineligible_note = ""
-                for iname, reason in store.ineligible.items():
-                    if _norm_skill_key(iname) == _norm_skill_key(name):
-                        ineligible_note = f' Skill "{iname}" exists but is unavailable: {reason}.'
+                note = ""
+                for qname, reason in store.quarantined.items():
+                    if _norm_skill_key(qname) == _norm_skill_key(name):
+                        note = (
+                            f' Skill "{qname}" was QUARANTINED by the content '
+                            f"scanner and cannot be loaded: {reason}."
+                        )
                         break
+                if not note:
+                    for iname, reason in store.ineligible.items():
+                        if _norm_skill_key(iname) == _norm_skill_key(name):
+                            note = f' Skill "{iname}" exists but is unavailable: {reason}.'
+                            break
                 return ToolResult(
                     success=False,
                     output="",
                     error=(
-                        f'Skill "{name}" not found.{ineligible_note}{hint} '
+                        f'Skill "{name}" not found.{note}{hint} '
                         f"Available: {', '.join(available) if available else 'none'}"
                     ),
                 )
