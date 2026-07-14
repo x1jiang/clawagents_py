@@ -1913,6 +1913,8 @@ async def run_agent_graph(
     trajectory: bool = False,
     rethink: bool = False,
     learn: bool = False,
+    atlas: bool = False,
+    atlas_config: Optional[Any] = None,
     preview_chars: int = 120,
     response_chars: int = 500,
     timeout_s: float = 0,
@@ -2050,6 +2052,9 @@ async def run_agent_graph(
         active_hooks.append(hooks)
     if agent_hooks is not None and agent_hooks is not hooks:
         active_hooks.append(agent_hooks)
+    # Expose hooks to nested tools (e.g. task → on_subagent_start/end).
+    run_context._metadata["hooks"] = active_hooks
+    run_context._metadata["agent_name"] = agent_name or "ClawAgent"
 
     async def _fire_hook(method_name: str, *args: Any) -> None:
         for h in active_hooks:
@@ -2077,11 +2082,32 @@ async def run_agent_graph(
     failure_tracker = _FailureTracker(threshold=adaptive_threshold) if rethink else None
     _compaction_savings: list[float] = []
 
-    # Trajectory recorder (opt-in; learn implies trajectory)
+    # Trajectory recorder (opt-in; learn/atlas imply trajectory)
     recorder = None
-    if trajectory or learn:
+    if trajectory or learn or atlas:
         from clawagents.trajectory.recorder import TrajectoryRecorder
         recorder = TrajectoryRecorder(task=task, response_chars=response_chars)
+
+    # ATLAS failure-taxonomy supervision (parent runs only; optional extra)
+    atlas_adapter = None
+    if atlas and not getattr(run_context, "skip_memory", False) and getattr(run_context, "depth", 0) == 0:
+        try:
+            from clawagents.atlas import AtlasAdapter
+
+            atlas_adapter = AtlasAdapter.maybe_create(atlas=True, atlas_config=atlas_config)
+            if atlas_adapter is not None:
+                atlas_adapter.start(task, session_id=getattr(recorder, "run_id", None))
+                emit("context", {"message": "ATLAS: session started"})
+        except ImportError as atlas_err:
+            raise ImportError(str(atlas_err)) from atlas_err
+        except Exception as atlas_err:
+            emit("warn", {"message": f"ATLAS start failed: {atlas_err}"})
+            if atlas_adapter is not None:
+                try:
+                    atlas_adapter.abort()
+                except Exception:
+                    pass
+            atlas_adapter = None
 
     # Feature: Session Persistence — save session as append-only JSONL
     session_writer = None
@@ -2137,6 +2163,16 @@ async def run_agent_graph(
         if preamble:
             dynamic_parts.append(preamble)
             emit("context", {"message": "PTRL: injected lessons from past runs"})
+
+    # ATLAS standing protocol (taxonomy itself is NOT dumped into ordinary context).
+    if atlas_adapter is not None:
+        try:
+            protocol = atlas_adapter.protocol_for_system()
+            if protocol:
+                dynamic_parts.append(protocol)
+                emit("context", {"message": "ATLAS: injected runtime protocol"})
+        except Exception as atlas_err:
+            emit("warn", {"message": f"ATLAS protocol inject failed: {atlas_err}"})
 
     # Dynamic context packs (after cache boundary) — local only.
     if not getattr(run_context, "skip_memory", False):
@@ -2616,6 +2652,44 @@ async def run_agent_graph(
             else:
                 tool_calls = registry.parse_tool_calls(response.content)
 
+            # ── ATLAS: harvest pending reflection before tools / completion ──
+            if (
+                atlas_adapter is not None
+                and atlas_adapter.run is not None
+                and atlas_adapter.run.pending is not None
+            ):
+                messages.append(LLMMessage(
+                    role="assistant",
+                    content=response.content or "",
+                    thinking=_thinking_content,
+                ))
+                try:
+                    _atlas_action = atlas_adapter.process_assistant_text(
+                        messages, response.content or "",
+                    )
+                except Exception as atlas_err:
+                    emit("warn", {"message": f"ATLAS harvest failed: {atlas_err}"})
+                    _atlas_action = None
+                if _atlas_action is not None:
+                    if _atlas_action.raise_error:
+                        state.status = "error"
+                        state.result = _atlas_action.raise_error
+                        break
+                    if _atlas_action.inject:
+                        messages.append(LLMMessage(role="user", content=_atlas_action.inject))
+                        continue
+                    if _atlas_action.allow_done:
+                        state.result = _sanitize_assistant_text(
+                            getattr(atlas_adapter.run, "_proposed_final", None)
+                            or response.content
+                        )
+                        state.status = "done"
+                        emit("final_content", {"content": state.result})
+                        break
+                    # Harvest consumed; do not execute tools from a reflection turn.
+                    if tool_calls:
+                        continue
+
             if not tool_calls:
                 # Check if the response is a truncated JSON tool call (hit max_tokens)
                 if not use_native_tools and _looks_like_truncated_json(response.content):
@@ -2694,6 +2768,30 @@ async def run_agent_graph(
                     # If advisor injected guidance, let the LLM process it
                     last_msg = messages[-1] if messages else None
                     if last_msg and isinstance(last_msg.content, str) and last_msg.content.startswith("[Advisor Guidance]"):
+                        continue
+
+                # ── ATLAS final submission gate (after advisor) ──
+                if (
+                    atlas_adapter is not None
+                    and atlas_adapter.run is not None
+                    and atlas_adapter.run.final_gate_allowed is None
+                ):
+                    if not _final_assistant_appended:
+                        messages.append(LLMMessage(
+                            role="assistant",
+                            content=response.content,
+                            thinking=_thinking_content,
+                        ))
+                        _final_assistant_appended = True
+                    atlas_adapter.run._proposed_final = response.content  # type: ignore[attr-defined]
+                    try:
+                        _atlas_gate = atlas_adapter.begin_final_gate(messages)
+                    except Exception as atlas_err:
+                        emit("warn", {"message": f"ATLAS final gate failed: {atlas_err}"})
+                        _atlas_gate = None
+                    if _atlas_gate is not None and _atlas_gate.inject:
+                        messages.append(LLMMessage(role="user", content=_atlas_gate.inject))
+                        emit("context", {"message": "ATLAS: final submission gate"})
                         continue
 
                 if recorder:
@@ -3184,6 +3282,16 @@ async def run_agent_graph(
                         str(tool_result.output)[:2000] if tool_result.output else "",
                         tool_result.error if not tool_result.success else None,
                     )
+                    if not tool_result.success:
+                        await _fire_hook(
+                            "on_tool_failure",
+                            call.tool_name,
+                            native_tc_id,
+                            tool_result.error or str(tool_result.output)[:500],
+                        )
+
+                if atlas_adapter is not None:
+                    atlas_adapter.note_tool_call()
 
                 # External post_tool_use hook
                 if ext_hook_runner:
@@ -3324,8 +3432,33 @@ async def run_agent_graph(
                         LLMMessage(role="user", content=user_content)
                     )
 
+                # ── ATLAS advisory checkpoint (tool failure / subagent stop) ──
+                _atlas_skip_rethink = False
+                if atlas_adapter is not None:
+                    try:
+                        if not tool_result.success:
+                            _aa = atlas_adapter.on_tool_failure(
+                                messages,
+                                tool_name=call.tool_name,
+                                error=tool_result.error,
+                            )
+                        elif call.tool_name == "task":
+                            _aa = atlas_adapter.on_subagent_end(
+                                messages, name=call.tool_name,
+                            )
+                        else:
+                            _aa = None
+                        if _aa is not None and _aa.inject:
+                            messages.append(LLMMessage(role="user", content=_aa.inject))
+                            emit("context", {"message": f"ATLAS: checkpoint ({call.tool_name})"})
+                            _atlas_skip_rethink = _aa.skip_rethink or atlas_adapter.consume_skip_rethink()
+                    except Exception as atlas_err:
+                        emit("warn", {"message": f"ATLAS checkpoint failed: {atlas_err}"})
+
                 # ── Rethink injection on consecutive failures ──
-                if failure_tracker:
+                # When ATLAS already injected a reflection prompt this round,
+                # skip the second rethink nudge (plan coexistence rule).
+                if failure_tracker and not _atlas_skip_rethink:
                     # Feature F: update threshold dynamically based on progress
                     try:
                         from clawagents.trajectory.verifier import compute_adaptive_rethink_threshold
@@ -3499,6 +3632,17 @@ async def run_agent_graph(
                             str(_r.output)[:2000] if _r.output else "",
                             _r.error if not _r.success else None,
                         )
+                        if not _r.success:
+                            await _fire_hook(
+                                "on_tool_failure",
+                                _c.tool_name,
+                                _cid,
+                                _r.error or str(_r.output)[:500],
+                            )
+
+                if atlas_adapter is not None:
+                    for _ in approved_calls:
+                        atlas_adapter.note_tool_call()
 
                 # External post_tool_use hook (parallel) — parity with the
                 # single-call path so result-rewriting policy hooks apply.
@@ -3697,8 +3841,39 @@ async def run_agent_graph(
                         )
                     )
 
+                # ── ATLAS advisory checkpoint (parallel batch) ──
+                _atlas_skip_rethink = False
+                if atlas_adapter is not None:
+                    try:
+                        _failed = next(
+                            ((_c, _r) for _c, _r in zip(approved_calls, results) if not _r.success),
+                            None,
+                        )
+                        _aa = None
+                        if _failed is not None:
+                            _aa = atlas_adapter.on_tool_failure(
+                                messages,
+                                tool_name=_failed[0].tool_name,
+                                error=_failed[1].error,
+                            )
+                        else:
+                            _task_done = next(
+                                (_c for _c in approved_calls if _c.tool_name == "task"),
+                                None,
+                            )
+                            if _task_done is not None:
+                                _aa = atlas_adapter.on_subagent_end(
+                                    messages, name="task",
+                                )
+                        if _aa is not None and _aa.inject:
+                            messages.append(LLMMessage(role="user", content=_aa.inject))
+                            emit("context", {"message": "ATLAS: checkpoint (parallel)"})
+                            _atlas_skip_rethink = _aa.skip_rethink or atlas_adapter.consume_skip_rethink()
+                    except Exception as atlas_err:
+                        emit("warn", {"message": f"ATLAS checkpoint failed: {atlas_err}"})
+
                 # ── Rethink injection on consecutive failures (parallel) ──
-                if failure_tracker:
+                if failure_tracker and not _atlas_skip_rethink:
                     # Feature F: update threshold dynamically
                     try:
                         from clawagents.trajectory.verifier import compute_adaptive_rethink_threshold
@@ -3780,6 +3955,25 @@ async def run_agent_graph(
         run_summary = recorder.finalize(outcome)
         state.trajectory_file = run_summary.trajectory_file
         emit("context", {"message": f"trajectory saved to {run_summary.trajectory_file}"})
+
+    # ── ATLAS: record_trace + end_session (triggers generation/refinement) ──
+    if atlas_adapter is not None:
+        try:
+            meta = {
+                "outcome": state.status,
+                "tool_calls": state.tool_calls,
+                "iterations": state.iterations,
+            }
+            if run_summary is not None:
+                meta["trajectory_file"] = run_summary.trajectory_file
+            atlas_adapter.finalize(messages, metadata=meta)
+            emit("context", {"message": "ATLAS: trace recorded / session ended"})
+        except Exception as atlas_err:
+            emit("warn", {"message": f"ATLAS finalize failed: {atlas_err}"})
+            try:
+                atlas_adapter.abort()
+            except Exception:
+                pass
 
     # ── Feature G: LLM-as-Judge verification ──
     if learn and recorder and run_summary:

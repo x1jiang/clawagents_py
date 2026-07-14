@@ -41,6 +41,27 @@ EXCLUDED_STATE_KEYS: frozenset[str] = frozenset({
 _credential_proxy_env_lock = asyncio.Lock()
 
 
+async def _fire_parent_hook(
+    run_context: Optional[RunContext],
+    method_name: str,
+    *args: Any,
+) -> None:
+    """Fire RunHooks stored on the parent run_context (best-effort)."""
+    if run_context is None:
+        return
+    hooks = run_context._metadata.get("hooks") or []
+    for h in hooks:
+        fn = getattr(h, method_name, None)
+        if fn is None:
+            continue
+        try:
+            result = fn(run_context, *args)
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception:
+            pass
+
+
 @dataclass
 class SubAgentSpec:
     """Specification for a named sub-agent with its own configuration.
@@ -247,31 +268,60 @@ class TaskTool:
             )
             run_kwargs["run_context"] = child_ctx
 
-            if proxy_env_overrides:
-                # Hold the lock across env mutate -> run -> env restore to
-                # serialise concurrent subagent runs that share os.environ.
-                async with _credential_proxy_env_lock:
-                    _old_env: Dict[str, Optional[str]] = {}
-                    for k, v in proxy_env_overrides.items():
-                        _old_env[k] = os.environ.get(k)
-                        os.environ[k] = v
-                    try:
-                        state = await run_agent_graph(**run_kwargs)
-                    finally:
-                        for k, orig in _old_env.items():
-                            if orig is None:
-                                os.environ.pop(k, None)
-                            else:
-                                os.environ[k] = orig
-                        if proxy is not None:
-                            proxy.stop()
-            else:
-                # No proxy → no env mutation → no race → no lock needed.
-                state = await run_agent_graph(**run_kwargs)
-                if proxy is not None:
-                    # Defensive: shouldn't happen (we only build proxy when
-                    # there are overrides), but keep the cleanup symmetric.
-                    proxy.stop()
+            parent_name = "ClawAgent"
+            child_label = spec.name if spec else "subagent"
+            if run_context is not None:
+                parent_name = str(
+                    run_context._metadata.get("agent_name") or parent_name
+                )
+            await _fire_parent_hook(
+                run_context,
+                "on_subagent_start",
+                parent_name,
+                child_label,
+                description,
+            )
+
+            state = None
+            try:
+                if proxy_env_overrides:
+                    # Hold the lock across env mutate -> run -> env restore to
+                    # serialise concurrent subagent runs that share os.environ.
+                    async with _credential_proxy_env_lock:
+                        _old_env: Dict[str, Optional[str]] = {}
+                        for k, v in proxy_env_overrides.items():
+                            _old_env[k] = os.environ.get(k)
+                            os.environ[k] = v
+                        try:
+                            state = await run_agent_graph(**run_kwargs)
+                        finally:
+                            for k, orig in _old_env.items():
+                                if orig is None:
+                                    os.environ.pop(k, None)
+                                else:
+                                    os.environ[k] = orig
+                            if proxy is not None:
+                                proxy.stop()
+                else:
+                    # No proxy → no env mutation → no race → no lock needed.
+                    state = await run_agent_graph(**run_kwargs)
+                    if proxy is not None:
+                        # Defensive: shouldn't happen (we only build proxy when
+                        # there are overrides), but keep the cleanup symmetric.
+                        proxy.stop()
+            finally:
+                await _fire_parent_hook(
+                    run_context,
+                    "on_subagent_end",
+                    parent_name,
+                    child_label,
+                    None if state is None else state.result,
+                )
+
+            if state is None:
+                return ToolResult(
+                    success=False, output="", error="Sub-agent failed to start",
+                )
 
             if state.status == "error":
                 return ToolResult(

@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.12.13-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.13.0-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -22,8 +22,8 @@ This repo is the **Python framework** (`pip install clawagents`). Ready-made cli
 | Product | Latest | What it is | Link |
 |---------|--------|------------|------|
 | **ClawAgents Desktop** | **v0.2.4** | Native macOS app — project chats, file editor, SSH remotes, Settings (incl. AWS Bedrock), Developer ID signed + notarized | [Repo](https://github.com/x1jiang/clawagents-desktop) · [Download DMG](https://github.com/x1jiang/clawagents-desktop/releases/tag/v0.2.4) |
-| **ClawAgents for VS Code / Cursor** | **v1.0.32** | Editor extension — chat, tools, Bedrock, image/PDF/DOCX attach, Effort / Wire API | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Release + VSIX](https://github.com/x1jiang/clawagents-vscode/releases/tag/v1.0.32) |
-| **Python package** | **v6.12.13** | This library — `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/6.12.13/) · [Release](https://github.com/x1jiang/clawagents_py/releases/tag/v6.12.13) |
+| **ClawAgents for VS Code / Cursor** | **v1.0.35** | Editor extension — chat, tools, Bedrock, ATLAS opt-in, Effort / Wire API | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Release + VSIX](https://github.com/x1jiang/clawagents-vscode/releases/tag/v1.0.35) |
+| **Python package** | **v6.13.0** | This library — `pip install -U 'clawagents[bedrock]'` · ATLAS: `clawagents[atlas]` | [PyPI](https://pypi.org/project/clawagents/6.13.0/) · [Release](https://github.com/x1jiang/clawagents_py/releases/tag/v6.13.0) |
 | **TypeScript package** | **v6.12.13** | Node/TS sibling — `npm install git+https://github.com/x1jiang/clawagents.git` | [Repo](https://github.com/x1jiang/clawagents) |
 
 ## Installation
@@ -33,10 +33,17 @@ pip install -U clawagents              # Core (OpenAI only)
 pip install -U 'clawagents[gemini]'    # + Google Gemini support
 pip install -U 'clawagents[anthropic]' # + Anthropic Claude support
 pip install -U 'clawagents[bedrock]'   # + Amazon Bedrock (Claude via IAM + Nova/Converse)
+pip install -U 'clawagents[atlas]'     # + ATLAS failure-taxonomy runtime
 pip install -U 'clawagents[all]'       # All providers + tiktoken
 ```
 
-> **Version 6.12.13** — Skill use complete, relevant, and contained (July 2026). Cumulative with 6.12.4–6.12.12.
+> **Version 6.13.0** — ATLAS adaptive failure-taxonomy integration (July 2026).
+
+### New In v6.13.0
+
+- **ATLAS harness** — optional `atlas=True` / `CLAW_ATLAS=1` supervision layer: runtime protocol, tool-failure / subagent checkpoints, blocking final gate, redacted `record_trace` + taxonomy learning via `atlas_runtime`.
+- **Extra** — `pip install 'clawagents[atlas]'` (ATLAS from GitHub).
+- **Companion** — VS Code **1.0.35** Settings checkbox for ATLAS.
 
 ### New In v6.12.13
 
@@ -339,6 +346,8 @@ TEMPERATURE=0                      # Model-specific overrides apply (see below)
 CLAW_TRAJECTORY=1                  # Enable trajectory logging + scoring
 CLAW_RETHINK=1                     # Enable consecutive-failure detection
 CLAW_LEARN=1                       # Enable PTRL (lessons from past runs)
+CLAW_ATLAS=1                       # Enable ATLAS failure-taxonomy supervision
+# CLAW_ATLAS_CONFIG=atlas.json     # Optional path (default: ./atlas.json if present)
 ```
 
 <details>
@@ -1403,10 +1412,40 @@ All parameters are **optional** — zero-config usage (`create_claw_agent()`) wo
 | `trajectory` | `bool \| None` | env `CLAW_TRAJECTORY` / `False` | No | Enable trajectory logging. Records every turn as NDJSON to `.clawagents/trajectories/` and scores each run |
 | `rethink` | `bool \| None` | env `CLAW_RETHINK` / `False` | No | Enable consecutive-failure detection. Injects a "rethink" prompt with adaptive threshold after repeated tool failures |
 | `learn` | `bool \| None` | env `CLAW_LEARN` / `False` | No | Enable Prompt-Time Reinforcement Learning. Includes: post-run self-analysis, pre-run lesson injection, LLM-as-Judge verification (Feature G), and thinking token preservation (Feature H). Implies `trajectory=True` |
+| `atlas` | `bool \| None` | env `CLAW_ATLAS` / `False` | No | Enable [ATLAS](https://github.com/multi-agent-systems-failure-taxonomy/ATLAS) adaptive failure-taxonomy supervision. Requires `pip install 'clawagents[atlas]'`. Implies `trajectory=True` |
+| `atlas_config` | `str \| Path \| None` | env `CLAW_ATLAS_CONFIG` / `./atlas.json` | No | Path to `atlas.json` (`trace_output`, `atlas_model`, gate/learning knobs). Defaults under `.clawagents/atlas-program` when omitted |
 | `preview_chars` | `int \| None` | env `CLAW_PREVIEW_CHARS` / `120` | No | Max chars for tool-output previews in trajectory logs |
 | `response_chars` | `int \| None` | env `CLAW_RESPONSE_CHARS` / `500` | No | Max chars for LLM response text in trajectory records |
 
 > **Priority:** Explicit parameter > environment variable > default value. You never need to set both.
+
+### ATLAS failure-taxonomy (optional)
+
+ATLAS is a diagnostic feedback layer (not a task solver). When enabled, ClawAgents:
+
+1. Starts an ATLAS session and injects the runtime protocol (not the full taxonomy) into the system prompt
+2. Reflects at tool failures and subagent stops (Observe → Correlate → Map → Decide)
+3. Blocks completion until the final ATLAS gate allows submit (or repair budget exhausts — default policy `release`)
+4. Records a redacted trajectory and calls `end_session` so taxonomy generation/refinement can run
+
+```bash
+pip install 'clawagents[atlas]'
+```
+
+```json
+// atlas.json
+{
+  "version": 1,
+  "trace_output": "./.clawagents/atlas-program",
+  "atlas_model": "gpt-5"
+}
+```
+
+```python
+agent = create_claw_agent(atlas=True, atlas_config="atlas.json")
+```
+
+`atlas_model` is used for ATLAS learning/judging calls and is separate from your task-solving model — set the matching provider API key in the environment. Validate with `atlas-doctor --config atlas.json`. See `examples/atlas_basic/`.
 
 ### Hooks & Access Control
 
@@ -1626,6 +1665,8 @@ All environment variables are **optional**. They serve as defaults when the corr
 | `CLAW_TRAJECTORY` | `0` | No | Enable trajectory logging. Records every turn + scores each run to `.clawagents/trajectories/` |
 | `CLAW_RETHINK` | `0` | No | Enable consecutive-failure detection + adaptive rethink injection |
 | `CLAW_LEARN` | `0` | No | Enable full PTRL: lesson extraction, injection, LLM-as-Judge, and thinking token preservation. Implies `CLAW_TRAJECTORY=1` |
+| `CLAW_ATLAS` | `0` | No | Enable ATLAS failure-taxonomy supervision. Requires `pip install 'clawagents[atlas]'`. Implies trajectory logging |
+| `CLAW_ATLAS_CONFIG` | _(empty)_ | No | Path to `atlas.json` (falls back to `./atlas.json` when present) |
 | `CLAW_PREVIEW_CHARS` | `120` | No | Max chars for tool-output previews in trajectory logs |
 | `CLAW_RESPONSE_CHARS` | `500` | No | Max chars for LLM response text in trajectory records |
 

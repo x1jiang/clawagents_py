@@ -80,6 +80,8 @@ class ClawAgent:
         trajectory: bool = False,
         rethink: bool = False,
         learn: bool = False,
+        atlas: bool = False,
+        atlas_config: Optional[Any] = None,
         max_iterations: int = 200,
         preview_chars: int = 120,
         response_chars: int = 500,
@@ -115,6 +117,8 @@ class ClawAgent:
             trajectory: Whether to log full trajectory data
             rethink: Enables logic to backtrack on consecutive execution failures
             learn: Whether to use post-trajectory reflection to extract permanent lessons
+            atlas: Enable ATLAS failure-taxonomy supervision (optional ``clawagents[atlas]``)
+            atlas_config: Path to ``atlas.json`` (or None to auto-discover)
             max_iterations: Maximum loop turns before returning early
             preview_chars: Number of characters to log in console output for tool results
             response_chars: Number of characters to log from LLM free-text response
@@ -138,6 +142,8 @@ class ClawAgent:
         self.trajectory = trajectory
         self.rethink = rethink
         self.learn = learn
+        self.atlas = atlas
+        self.atlas_config = atlas_config
         self.max_iterations = max_iterations
         self.preview_chars = preview_chars
         self.response_chars = response_chars
@@ -254,6 +260,8 @@ class ClawAgent:
             trajectory=self.trajectory,
             rethink=self.rethink,
             learn=self.learn,
+            atlas=self.atlas,
+            atlas_config=self.atlas_config,
             preview_chars=self.preview_chars,
             response_chars=self.response_chars,
             timeout_s=timeout_s,
@@ -548,6 +556,8 @@ def create_claw_agent(
     trajectory: Optional[bool] = None,
     rethink: Optional[bool] = None,
     learn: Optional[bool] = None,
+    atlas: Optional[bool] = None,
+    atlas_config: Optional[Any] = None,
     max_iterations: Optional[int] = None,
     preview_chars: Optional[int] = None,
     response_chars: Optional[int] = None,
@@ -612,6 +622,14 @@ def create_claw_agent(
                         over time — without model fine-tuning.
                         Automatically enables trajectory when True.
                         Default: from CLAW_LEARN env / False.
+        atlas:          Enable ATLAS adaptive failure-taxonomy supervision.
+                        Requires ``pip install 'clawagents[atlas]'``. Reflects at
+                        tool-failure / subagent boundaries and blocks completion
+                        until the final ATLAS gate passes (or repair budget
+                        exhausts). Automatically enables trajectory when True.
+                        Default: from CLAW_ATLAS env / False.
+        atlas_config:   Path to ``atlas.json``. Default: ``CLAW_ATLAS_CONFIG`` or
+                        ``./atlas.json`` when present.
         max_iterations: Max tool rounds before the agent stops.
                         Default: from MAX_ITERATIONS env / 200.
         preview_chars:  Max chars for tool-output previews in trajectory logs.
@@ -677,7 +695,11 @@ def create_claw_agent(
         rethink = os.environ.get("CLAW_RETHINK", "").lower() in ("1", "true", "yes")
     if learn is None:
         learn = os.environ.get("CLAW_LEARN", "").lower() in ("1", "true", "yes")
-    if learn:
+    if atlas is None:
+        atlas = os.environ.get("CLAW_ATLAS", "").lower() in ("1", "true", "yes")
+    if atlas_config is None:
+        atlas_config = os.environ.get("CLAW_ATLAS_CONFIG") or None
+    if learn or atlas:
         trajectory = True
     if max_iterations is None:
         raw = os.environ.get("MAX_ITERATIONS", "")
@@ -963,7 +985,8 @@ def create_claw_agent(
         streaming=streaming, use_native_tools=use_native_tools,
         context_window=context_window, on_event=on_event,
         before_llm=composed_before_llm, trajectory=trajectory,
-        rethink=rethink, learn=learn, max_iterations=max_iterations,
+        rethink=rethink, learn=learn, atlas=bool(atlas),
+        atlas_config=atlas_config, max_iterations=max_iterations,
         preview_chars=preview_chars, response_chars=response_chars,
         advisor_llm=resolved_advisor_llm, advisor_max_calls=resolved_advisor_max_calls,
         handoffs=handoffs, name=name,
