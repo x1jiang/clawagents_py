@@ -1402,6 +1402,11 @@ def _content_key_text(content: Any) -> str:
                 json.dumps(p, sort_keys=True, default=str).encode("utf-8")
             ).hexdigest()[:8]
             parts.append(f"[image attachment #{digest}]")
+        elif p.get("type") in ("file", "document"):
+            digest = hashlib.sha1(
+                json.dumps(p, sort_keys=True, default=str).encode("utf-8")
+            ).hexdigest()[:8]
+            parts.append(f"[file attachment #{digest}]")
     return "\n".join(parts)
 
 
@@ -1931,6 +1936,7 @@ async def run_agent_graph(
     approval_handler: Any = None,
     require_approval_tools: Optional[list[str]] = None,
     image_blocks: Optional[list[dict]] = None,
+    file_blocks: Optional[list[dict]] = None,
 ) -> AgentState:
     """Single ReAct loop: LLM → tools → LLM → tools → ... → final answer."""
     if features is not None:
@@ -2183,12 +2189,15 @@ async def run_agent_graph(
         tool_description=tool_desc,
         lesson_preamble=lesson_preamble,
     )
-    # Attach images (if any) to the first user message as content blocks so a
-    # vision model sees pixels. ``current_task`` stays the plain string, so
-    # compaction/events/session paths that expect text are unaffected.
-    if image_blocks:
-        first_user_content: Any = ([{"type": "text", "text": task}] if task else []) + list(
-            image_blocks
+    # Attach images/files (if any) to the first user message as content
+    # blocks so the model sees pixels/documents. ``current_task`` stays the
+    # plain string, so compaction/events/session paths that expect text are
+    # unaffected.
+    if image_blocks or file_blocks:
+        first_user_content: Any = (
+            ([{"type": "text", "text": task}] if task else [])
+            + list(image_blocks or [])
+            + list(file_blocks or [])
         )
     else:
         first_user_content = task

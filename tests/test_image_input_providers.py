@@ -115,6 +115,62 @@ def test_converse_blocks_drop_unsupported_and_invalid():
     assert all(_PNG_B64 not in b.get("text", "") for b in blocks)
 
 
+# ── OpenAI Chat Completions: canonical parts pass through verbatim ─────────
+
+
+def test_openai_chat_messages_pass_list_content_through():
+    from clawagents.providers.llm import LLMMessage, _openai_chat_messages
+
+    content = [
+        {"type": "text", "text": "look"},
+        {"type": "image_url", "image_url": {"url": _DATA_URL}},
+        {
+            "type": "file",
+            "file": {"filename": "r.pdf", "file_data": "data:application/pdf;base64,AAAA"},
+        },
+    ]
+    formatted = _openai_chat_messages(
+        [
+            LLMMessage(role="system", content="sys"),
+            LLMMessage(role="user", content=content),
+        ]
+    )
+    assert formatted[0] == {"role": "system", "content": "sys"}
+    # Chat Completions accepts the canonical shapes natively — the list must
+    # arrive verbatim, not stringified or filtered.
+    assert formatted[1]["content"] is content
+
+
+def test_openai_chat_messages_strip_cache_boundary_from_strings_only():
+    from clawagents.providers.llm import LLMMessage, _openai_chat_messages
+
+    formatted = _openai_chat_messages(
+        [LLMMessage(role="system", content="static__CACHE_BOUNDARY__dynamic")]
+    )
+    assert "__CACHE_BOUNDARY__" not in formatted[0]["content"]
+
+
+# ── Gemini: sanitizer must not strip inline_data (image/PDF) parts ─────────
+
+
+def test_gemini_sanitize_keeps_inline_data_parts():
+    from clawagents.providers.llm import _sanitize_gemini_contents
+
+    contents = [
+        {
+            "role": "user",
+            "parts": [
+                {"text": "hi"},
+                {"inline_data": {"mime_type": "application/pdf", "data": b"%PDF"}},
+            ],
+        },
+    ]
+    out = _sanitize_gemini_contents(contents)
+    assert out
+    inline = [p for p in out[0]["parts"] if "inline_data" in p]
+    assert inline and inline[0]["inline_data"]["mime_type"] == "application/pdf"
+
+
 # ── Compaction text view: bounded placeholders, stable distinct keys ───────
 
 

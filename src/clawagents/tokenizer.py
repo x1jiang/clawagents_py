@@ -117,7 +117,15 @@ def count_tokens_content(
         # was active — leading to overflow on requests we thought fit.
         text = "\n".join(p.get("text", "") for p in content)
         image_count = sum(1 for p in content if p.get("type") == "image_url")
-        base = count_tokens(text, model) + image_count * 500
+        # PDFs cost roughly page-count × ~2-3k tokens; base64 length / 32 is a
+        # coarse per-byte proxy so file parts register on the budget instead
+        # of counting as zero (which under-counts straight into overflow).
+        file_b64_len = sum(
+            len(((p.get("file") or {}).get("file_data")) or "")
+            for p in content
+            if p.get("type") == "file"
+        )
+        base = count_tokens(text, model) + image_count * 500 + file_b64_len // 32
     return math.ceil(base * multiplier)
 
 

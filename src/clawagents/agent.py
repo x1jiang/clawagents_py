@@ -176,6 +176,7 @@ class ClawAgent:
         on_stream_event: Optional[Callable[[StreamEvent], None]] = None,
         handoffs: Optional[list[Handoff]] = None,
         images: Optional[list[dict]] = None,
+        files: Optional[list[dict]] = None,
     ) -> AgentState:
         """Start the ReAct agent loop for ``task``.
 
@@ -187,6 +188,11 @@ class ClawAgent:
         model sees pixels, not a path. Each item is ``{"data": <base64 or
         data-URL>, "media_type": "image/png"}``; images are sanitized
         (resized/recompressed to provider limits) before sending.
+
+        ``files`` attaches documents the same way. Each item is
+        ``{"data": <base64 or data-URL>, "media_type": "application/pdf",
+        "name": "report.pdf"}``. PDFs reach the model natively; DOCX is
+        text-extracted; anything else degrades to a short text note.
         """
         image_blocks: Optional[list[dict]] = None
         if images:
@@ -203,6 +209,24 @@ class ClawAgent:
                     )
                     if data:
                         image_blocks.append(build_user_image_block(data, media_type))
+
+        file_blocks: Optional[list[dict]] = None
+        if files:
+            from clawagents.media.documents import build_user_file_block
+
+            file_blocks = []
+            for f in files:
+                if not isinstance(f, dict):
+                    continue
+                data = f.get("data") or f.get("url") or ""
+                media_type = (
+                    f.get("media_type") or f.get("mime_type") or "application/pdf"
+                )
+                fname = f.get("name") or f.get("filename") or None
+                if data:
+                    file_blocks.append(
+                        build_user_file_block(data, media_type, name=fname)
+                    )
 
         if run_context is None:
             run_context = RunContext(context=user_context)
@@ -260,6 +284,7 @@ class ClawAgent:
             approval_handler=self.approval_handler,
             require_approval_tools=self.require_approval_tools,
             image_blocks=image_blocks,
+            file_blocks=file_blocks,
         )
 
     # ── Convenience hook methods ──────────────────────────────────────

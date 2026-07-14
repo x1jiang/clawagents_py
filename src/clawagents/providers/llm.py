@@ -692,6 +692,19 @@ def _content_to_responses_parts(content: list[Any], role: str) -> list[dict[str,
             url = ((p.get("image_url") or {}).get("url")) or ""
             if isinstance(url, str) and url:
                 parts.append({"type": "input_image", "image_url": url})
+        elif ptype == "input_file" and role != "assistant":
+            parts.append(p)
+        elif ptype == "file" and role != "assistant":
+            f = p.get("file") or {}
+            fd = f.get("file_data") or ""
+            if isinstance(fd, str) and fd:
+                parts.append(
+                    {
+                        "type": "input_file",
+                        "filename": f.get("filename") or "attachment",
+                        "file_data": fd,
+                    }
+                )
     return parts
 
 
@@ -848,6 +861,39 @@ def _sanitize_openai_tool_pairs(formatted: list[dict[str, Any]]) -> list[dict[st
     return final
 
 
+def _openai_chat_messages(messages: list[LLMMessage]) -> list[dict[str, Any]]:
+    """Format LLMMessages for the OpenAI wire (Chat Completions directly;
+    the Responses path converts further via ``_messages_to_responses_input``).
+
+    Multimodal user content — the canonical ``text`` / ``image_url`` /
+    ``file`` parts — passes through verbatim: Chat Completions accepts those
+    shapes natively. The ``__CACHE_BOUNDARY__`` marker is an Anthropic-only
+    prompt-cache hint; strip it here so OpenAI never receives the stray
+    internal token at the tail of its system prompt.
+    """
+    formatted: list[dict[str, Any]] = []
+    for m in messages:
+        if m.role == "tool" and m.tool_call_id:
+            formatted.append(
+                {"role": "tool", "tool_call_id": m.tool_call_id, "content": m.content}
+            )
+        elif m.role == "assistant" and m.tool_calls_meta:
+            formatted.append({
+                "role": "assistant",
+                "content": m.content or None,
+                "tool_calls": [
+                    {"id": tc["id"], "type": "function", "function": {"name": tc["name"], "arguments": json.dumps(tc["args"])}}
+                    for tc in m.tool_calls_meta
+                ],
+            })
+        else:
+            content = m.content
+            if isinstance(content, str) and "__CACHE_BOUNDARY__" in content:
+                content = content.replace("__CACHE_BOUNDARY__", "").strip()
+            formatted.append({"role": m.role, "content": content})
+    return formatted
+
+
 class OpenAIProvider(LLMProvider):
     name = "openai"
 
@@ -929,28 +975,7 @@ class OpenAIProvider(LLMProvider):
         cancel_event: asyncio.Event | None = None,
         tools: list[NativeToolSchema] | None = None,
     ) -> LLMResponse:
-        formatted: list[dict[str, Any]] = []
-        for m in messages:
-            if m.role == "tool" and m.tool_call_id:
-                formatted.append({"role": "tool", "tool_call_id": m.tool_call_id, "content": m.content})
-            elif m.role == "assistant" and m.tool_calls_meta:
-                formatted.append({
-                    "role": "assistant",
-                    "content": m.content or None,
-                    "tool_calls": [
-                        {"id": tc["id"], "type": "function", "function": {"name": tc["name"], "arguments": json.dumps(tc["args"])}}
-                        for tc in m.tool_calls_meta
-                    ],
-                })
-            else:
-                content = m.content
-                # The ``__CACHE_BOUNDARY__`` marker is an Anthropic-only prompt
-                # cache hint; strip it here so OpenAI never receives the stray
-                # internal token at the tail of its system prompt.
-                if isinstance(content, str) and "__CACHE_BOUNDARY__" in content:
-                    content = content.replace("__CACHE_BOUNDARY__", "").strip()
-                formatted.append({"role": m.role, "content": content})
-        formatted = _sanitize_openai_tool_pairs(formatted)
+        formatted = _sanitize_openai_tool_pairs(_openai_chat_messages(messages))
         oai_tools = _to_openai_tools(tools) if tools else None
 
         if self._should_use_responses(bool(oai_tools)):
@@ -1690,6 +1715,39 @@ def _flatten_gemini_tool_history(
     return flat
 
 
+def _gemini_part_from_block(part: Any) -> dict[str, Any] | None:
+    """Convert one canonical content part into a Gemini ``parts`` entry.
+
+    ``text`` → ``{"text"}``; data-URL ``image_url``/``file`` parts →
+    ``{"inline_data"}`` with decoded bytes (Gemini accepts image and PDF
+    mime types inline). Returns ``None`` for unconvertible parts so callers
+    drop them instead of sending an invalid entry.
+    """
+    if not isinstance(part, dict):
+        return None
+    ptype = part.get("type")
+    if ptype == "text":
+        return {"text": part.get("text", "")}
+    if ptype == "image_url":
+        url = ((part.get("image_url") or {}).get("url")) or ""
+    elif ptype == "file":
+        url = ((part.get("file") or {}).get("file_data")) or ""
+    else:
+        return None
+    if isinstance(url, str) and url.startswith("data:") and ";base64," in url:
+        import base64
+        import binascii
+
+        header, b64_str = url[5:].split(";base64,", 1)
+        mime = header.split(";", 1)[0].strip() or "application/octet-stream"
+        try:
+            decoded = base64.b64decode(b64_str)
+        except (binascii.Error, ValueError):
+            return None
+        return {"inline_data": {"mime_type": mime, "data": decoded}}
+    return None
+
+
 class GeminiProvider(LLMProvider):
     name = "gemini"
 
@@ -1755,20 +1813,9 @@ class GeminiProvider(LLMProvider):
                 elif isinstance(m.content, list):
                     parts2: list[dict[str, Any]] = []
                     for part in m.content:
-                        if part.get("type") == "text":
-                            parts2.append({"text": part.get("text", "")})
-                        elif part.get("type") == "image_url":
-                            import base64
-                            import binascii
-
-                            url = ((part.get("image_url") or {}).get("url")) or ""
-                            if url.startswith("data:") and ";base64," in url:
-                                mime, b64_str = url[5:].split(";base64,", 1)
-                                try:
-                                    decoded = base64.b64decode(b64_str)
-                                except (binascii.Error, ValueError):
-                                    continue
-                                parts2.append({"inline_data": {"mime_type": mime, "data": decoded}})
+                        converted = _gemini_part_from_block(part)
+                        if converted is not None:
+                            parts2.append(converted)
                     if parts2:
                         user_contents.append({"role": role_name, "parts": parts2})
 
@@ -2048,14 +2095,21 @@ def _anthropic_message_content(content: Any) -> Any:
     """
     if not isinstance(content, list):
         return content
-    if not any(isinstance(p, dict) and p.get("type") == "image_url" for p in content):
+    if not any(
+        isinstance(p, dict) and p.get("type") in ("image_url", "file") for p in content
+    ):
         return content
+    from clawagents.media.documents import file_part_to_anthropic_block
     from clawagents.media.images import image_url_to_anthropic_block
 
     converted: list[Any] = []
     for part in content:
         if isinstance(part, dict) and part.get("type") == "image_url":
             block = image_url_to_anthropic_block(part)
+            if block is not None:
+                converted.append(block)
+        elif isinstance(part, dict) and part.get("type") == "file":
+            block = file_part_to_anthropic_block(part)
             if block is not None:
                 converted.append(block)
         else:
@@ -2453,7 +2507,40 @@ def _converse_content_blocks(content: Any) -> list[dict[str, Any]]:
             except (_binascii.Error, ValueError):
                 continue
             blocks.append({"image": {"format": fmt, "source": {"bytes": raw}}})
+        elif ptype == "file":
+            f = part.get("file") or {}
+            fd = f.get("file_data") or ""
+            if not (isinstance(fd, str) and fd.startswith("data:") and ";base64," in fd):
+                continue
+            header, b64 = fd[5:].split(";base64,", 1)
+            mime = header.split(";", 1)[0].strip().lower()
+            if mime != "application/pdf":
+                continue
+            try:
+                raw = _b64.b64decode(b64, validate=True)
+            except (_binascii.Error, ValueError):
+                continue
+            blocks.append(
+                {
+                    "document": {
+                        "format": "pdf",
+                        "name": _converse_doc_name(f.get("filename")),
+                        "source": {"bytes": raw},
+                    }
+                }
+            )
     return blocks or [{"text": ""}]
+
+
+def _converse_doc_name(name: Any) -> str:
+    """Sanitize a filename into a Converse document name (ASCII alphanumerics,
+    single spaces, hyphens, parentheses, brackets — per the Converse API)."""
+    cleaned = "".join(
+        c if ((c.isalnum() and c.isascii()) or c in " -()[]") else "-"
+        for c in str(name or "")
+    )
+    cleaned = " ".join(cleaned.split())
+    return cleaned[:60] or "document"
 
 
 class BedrockConverseProvider(LLMProvider):
