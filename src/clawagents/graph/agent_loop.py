@@ -57,6 +57,10 @@ from clawagents.stream_events import (
 from clawagents.context.carryover import get_compaction_carryover
 from clawagents.handoffs import Handoff, HandoffInputData
 from clawagents.prompts import build_system_prompt
+from clawagents.tokenizer import (
+    count_messages_tokens as _count_messages_tokens,
+    count_tokens_content,
+)
 from clawagents.tracing import handoff_span
 
 logger = logging.getLogger(__name__)
@@ -174,11 +178,13 @@ def _create_content_preview(content: str, head_lines: int = 5, tail_lines: int =
                 + f"\n... [{len(content) - _PREVIEW_MAX_CHARS} chars truncated] ...\n"
                 + content[-half:])
 
-    head = "\n".join(f"{i + 1}: {l}" for i, l in enumerate(lines[:head_lines]))
+    head = "\n".join(
+        f"{i + 1}: {line}" for i, line in enumerate(lines[:head_lines])
+    )
     total = len(lines)
     tail = "\n".join(
-        f"{total - tail_lines + i + 1}: {l}"
-        for i, l in enumerate(lines[-tail_lines:])
+        f"{total - tail_lines + i + 1}: {line}"
+        for i, line in enumerate(lines[-tail_lines:])
     )
     omitted = total - head_lines - tail_lines
     return f"{head}\n... [{omitted} lines truncated] ...\n{tail}"
@@ -588,8 +594,6 @@ Keep working until the task is fully complete.
 
 # ─── Adaptive Token Estimation (learned from deepagents) ──────────────────
 # Now uses tiktoken for accurate BPE counting (with fallback to heuristic).
-
-from clawagents.tokenizer import count_tokens_content, count_messages_tokens as _count_messages_tokens
 
 # Keep _CHARS_PER_TOKEN for the Tier-3 preflight char-budget calculation only
 _CHARS_PER_TOKEN = 4
@@ -2668,8 +2672,11 @@ async def run_agent_graph(
                         messages, response.content or "",
                     )
                 except Exception as atlas_err:
-                    emit("warn", {"message": f"ATLAS harvest failed: {atlas_err}"})
-                    _atlas_action = None
+                    message = f"ATLAS harvest failed: {atlas_err}"
+                    emit("error", {"phase": "atlas", "message": message})
+                    state.status = "error"
+                    state.result = message
+                    break
                 if _atlas_action is not None:
                     if _atlas_action.raise_error:
                         state.status = "error"
@@ -2719,7 +2726,7 @@ async def run_agent_graph(
 
                         def _run_async(coro: Any) -> Any:
                             try:
-                                loop = asyncio.get_running_loop()
+                                asyncio.get_running_loop()
                             except RuntimeError:
                                 return asyncio.run(coro)
                             import concurrent.futures
@@ -2787,8 +2794,11 @@ async def run_agent_graph(
                     try:
                         _atlas_gate = atlas_adapter.begin_final_gate(messages)
                     except Exception as atlas_err:
-                        emit("warn", {"message": f"ATLAS final gate failed: {atlas_err}"})
-                        _atlas_gate = None
+                        message = f"ATLAS final gate failed: {atlas_err}"
+                        emit("error", {"phase": "atlas", "message": message})
+                        state.status = "error"
+                        state.result = message
+                        break
                     if _atlas_gate is not None and _atlas_gate.inject:
                         messages.append(LLMMessage(role="user", content=_atlas_gate.inject))
                         emit("context", {"message": "ATLAS: final submission gate"})

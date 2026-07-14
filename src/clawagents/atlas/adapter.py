@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 
 from clawagents.atlas._runtime import require_atlas_runtime
 from clawagents.atlas.config import resolve_atlas_config
 from clawagents.atlas.gates import (
     FinalGateOutcome,
-    HarvestOutcome,
     evaluate_final_gate,
     harvest_pending,
     make_pending,

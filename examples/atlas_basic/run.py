@@ -2,6 +2,7 @@
 
 Prereqs:
   pip install -e '.[atlas]'
+  pip install 'atlas-skill @ git+https://github.com/multi-agent-systems-failure-taxonomy/ATLAS.git@3a917f3e0b993e3bfd77f652b013193aed167964'
   export OPENAI_API_KEY=...   # task model
   # atlas_model in atlas.json also needs a provider key for learning calls
 

@@ -10,7 +10,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from clawagents.providers.llm import LLMMessage
+from clawagents.graph.agent_loop import run_agent_graph
+from clawagents.providers.llm import LLMMessage, LLMProvider, LLMResponse
 
 
 # ── Stub atlas_runtime / finding before importing clawagents.atlas ──────
@@ -42,6 +43,20 @@ _SESSIONS: list[_FakeSession] = []
 _RECORDED: list[Any] = []
 _ENDED: list[Any] = []
 _REFLECTIONS: list[Any] = []
+
+
+class _ScriptedLLM(LLMProvider):
+    name = "atlas-test"
+
+    def __init__(self, responses: list[str]) -> None:
+        self._responses = responses
+        self._index = 0
+
+    async def chat(self, messages, on_chunk=None, cancel_event=None, tools=None):
+        index = min(self._index, len(self._responses) - 1)
+        self._index += 1
+        content = self._responses[index]
+        return LLMResponse(content=content, model=self.name, tokens_used=1)
 
 
 def _install_atlas_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -338,3 +353,47 @@ def test_resolve_config_defaults(atlas_stubs, tmp_path, monkeypatch):
     assert "atlas-program" in str(cfg["trace_output"])
     assert cfg["gate_exhaustion_policy"] == "release"
     assert cfg["dashboard"] is False
+
+
+@pytest.mark.asyncio
+async def test_final_gate_exception_fails_closed(atlas_stubs, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    from clawagents.atlas.adapter import AtlasAdapter
+
+    def fail_gate(self, messages):
+        raise RuntimeError("gate unavailable")
+
+    monkeypatch.setattr(AtlasAdapter, "begin_final_gate", fail_gate)
+    state = await run_agent_graph(
+        "task",
+        _ScriptedLLM(["proposed answer"]),
+        atlas=True,
+        streaming=False,
+        max_iterations=2,
+    )
+
+    assert state.status == "error"
+    assert "ATLAS final gate failed" in str(state.result)
+    assert "gate unavailable" in str(state.result)
+
+
+@pytest.mark.asyncio
+async def test_harvest_exception_fails_closed(atlas_stubs, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    from clawagents.atlas.adapter import AtlasAdapter
+
+    def fail_harvest(self, messages, text):
+        raise RuntimeError("harvest unavailable")
+
+    monkeypatch.setattr(AtlasAdapter, "process_assistant_text", fail_harvest)
+    state = await run_agent_graph(
+        "task",
+        _ScriptedLLM(["proposed answer", "ATLAS reflection"]),
+        atlas=True,
+        streaming=False,
+        max_iterations=3,
+    )
+
+    assert state.status == "error"
+    assert "ATLAS harvest failed" in str(state.result)
+    assert "harvest unavailable" in str(state.result)

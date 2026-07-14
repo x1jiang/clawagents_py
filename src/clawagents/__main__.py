@@ -254,7 +254,9 @@ def cmd_doctor():
             _check(
                 "ATLAS package",
                 False,
-                "missing — pip install 'atlas-skill @ git+https://github.com/multi-agent-systems-failure-taxonomy/ATLAS.git'",
+                "missing — pip install 'atlas-skill @ git+https://github.com/"
+                "multi-agent-systems-failure-taxonomy/"
+                "ATLAS.git@3a917f3e0b993e3bfd77f652b013193aed167964'",
             )
             issues += 1
         atlas_cfg = os.getenv("CLAW_ATLAS_CONFIG") or (
@@ -554,7 +556,7 @@ def cmd_serve(port: int):
         gateway_api_key = os.getenv("GATEWAY_API_KEY", "")
         auth_status = "enabled" if gateway_api_key else "disabled (set GATEWAY_API_KEY to enable)"
         sys.stderr.write(f"   Auth: {auth_status}\n")
-        sys.stderr.write(f"   Endpoints: POST /chat | POST /chat/stream | WS /ws | GET /queue | GET /health\n\n")
+        sys.stderr.write("   Endpoints: POST /chat | POST /chat/stream | WS /ws | GET /queue | GET /health\n\n")
         asyncio.run(_run())
     else:
         sys.stderr.write(f"{banner} | gateway on port {port}\n")

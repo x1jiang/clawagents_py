@@ -5,7 +5,8 @@ from __future__ import annotations
 _INSTALL_HINT = (
     "ATLAS support requires the atlas-skill package. Install with: "
     "pip install 'atlas-skill @ "
-    "git+https://github.com/multi-agent-systems-failure-taxonomy/ATLAS.git'"
+    "git+https://github.com/multi-agent-systems-failure-taxonomy/"
+    "ATLAS.git@3a917f3e0b993e3bfd77f652b013193aed167964'"
 )
 
 

@@ -36,7 +36,7 @@ pip install -U 'clawagents[bedrock]'   # + Amazon Bedrock (Claude via IAM + Nova
 pip install -U 'clawagents[all]'       # All providers + tiktoken
 # ATLAS (optional; install clawagents first, then ATLAS from GitHub — PyPI
 # cannot vendor that direct URL):
-pip install 'atlas-skill @ git+https://github.com/multi-agent-systems-failure-taxonomy/ATLAS.git'
+pip install 'atlas-skill @ git+https://github.com/multi-agent-systems-failure-taxonomy/ATLAS.git@3a917f3e0b993e3bfd77f652b013193aed167964'
 ```
 
 > **Version 6.13.0** — ATLAS adaptive failure-taxonomy integration (July 2026).
@@ -44,7 +44,7 @@ pip install 'atlas-skill @ git+https://github.com/multi-agent-systems-failure-ta
 ### New In v6.13.0
 
 - **ATLAS harness** — optional `atlas=True` / `CLAW_ATLAS=1` supervision layer: runtime protocol, tool-failure / subagent checkpoints, blocking final gate, redacted `record_trace` + taxonomy learning via `atlas_runtime`.
-- **Install ATLAS runtime** — `pip install 'atlas-skill @ git+https://github.com/multi-agent-systems-failure-taxonomy/ATLAS.git'` (marker extra `clawagents[atlas]` is a no-op on PyPI).
+- **Install ATLAS runtime** — `pip install 'atlas-skill @ git+https://github.com/multi-agent-systems-failure-taxonomy/ATLAS.git@3a917f3e0b993e3bfd77f652b013193aed167964'` (marker extra `clawagents[atlas]` is a no-op on PyPI).
 - **Companion** — VS Code **1.0.35** Settings checkbox for ATLAS.
 
 ### New In v6.12.13
@@ -1432,7 +1432,7 @@ ATLAS is a diagnostic feedback layer (not a task solver). When enabled, ClawAgen
 
 ```bash
 pip install -U clawagents
-pip install 'atlas-skill @ git+https://github.com/multi-agent-systems-failure-taxonomy/ATLAS.git'
+pip install 'atlas-skill @ git+https://github.com/multi-agent-systems-failure-taxonomy/ATLAS.git@3a917f3e0b993e3bfd77f652b013193aed167964'
 ```
 
 ```json
