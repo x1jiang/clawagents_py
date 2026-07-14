@@ -254,7 +254,7 @@ def cmd_doctor():
             _check(
                 "ATLAS package",
                 False,
-                "missing — pip install 'clawagents[atlas]'",
+                "missing — pip install 'atlas-skill @ git+https://github.com/multi-agent-systems-failure-taxonomy/ATLAS.git'",
             )
             issues += 1
         atlas_cfg = os.getenv("CLAW_ATLAS_CONFIG") or (

@@ -117,7 +117,7 @@ class ClawAgent:
             trajectory: Whether to log full trajectory data
             rethink: Enables logic to backtrack on consecutive execution failures
             learn: Whether to use post-trajectory reflection to extract permanent lessons
-            atlas: Enable ATLAS failure-taxonomy supervision (optional ``clawagents[atlas]``)
+            atlas: Enable ATLAS failure-taxonomy supervision (requires ``atlas-skill``)
             atlas_config: Path to ``atlas.json`` (or None to auto-discover)
             max_iterations: Maximum loop turns before returning early
             preview_chars: Number of characters to log in console output for tool results
@@ -623,7 +623,7 @@ def create_claw_agent(
                         Automatically enables trajectory when True.
                         Default: from CLAW_LEARN env / False.
         atlas:          Enable ATLAS adaptive failure-taxonomy supervision.
-                        Requires ``pip install 'clawagents[atlas]'``. Reflects at
+                        Requires ``atlas-skill`` from GitHub. Reflects at
                         tool-failure / subagent boundaries and blocks completion
                         until the final ATLAS gate passes (or repair budget
                         exhausts). Automatically enables trajectory when True.

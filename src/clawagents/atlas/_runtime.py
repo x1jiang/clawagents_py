@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 _INSTALL_HINT = (
-    "ATLAS support requires the optional extra. Install with: "
-    "pip install 'clawagents[atlas]'"
+    "ATLAS support requires the atlas-skill package. Install with: "
+    "pip install 'atlas-skill @ "
+    "git+https://github.com/multi-agent-systems-failure-taxonomy/ATLAS.git'"
 )
 
 

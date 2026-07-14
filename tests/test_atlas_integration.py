@@ -186,7 +186,7 @@ def test_missing_package_raises_actionable_error(monkeypatch):
 
     from clawagents.atlas._runtime import require_atlas_runtime
 
-    with pytest.raises(ImportError, match="clawagents\\[atlas\\]"):
+    with pytest.raises(ImportError, match="atlas-skill"):
         require_atlas_runtime()
 
 

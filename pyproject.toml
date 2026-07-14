@@ -55,10 +55,11 @@ rl = ["trl>=0.7.0"]
 # Agent Communication Protocol adapter.
 acp = ["agent-client-protocol>=0.1.0"]
 # ATLAS adaptive failure-taxonomy runtime (optional harness integration).
-# Install with: pip install 'clawagents[atlas]'
-atlas = [
-    "atlas-skill @ git+https://github.com/multi-agent-systems-failure-taxonomy/ATLAS.git",
-]
+# Marker extra only — PyPI forbids direct URL deps. After installing clawagents,
+# also install ATLAS from GitHub:
+#   pip install 'atlas-skill @ git+https://github.com/multi-agent-systems-failure-taxonomy/ATLAS.git'
+# Or: pip install 'clawagents[atlas]' && the git install above.
+atlas = []
 all = [
     "google-genai>=0.1.0",
     "anthropic>=0.40.0",

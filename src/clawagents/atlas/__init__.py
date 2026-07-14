@@ -1,6 +1,6 @@
 """ATLAS adaptive failure-taxonomy integration for ClawAgents.
 
-Optional dependency: ``pip install 'clawagents[atlas]'``.
+Optional dependency: install ``atlas-skill`` from the ATLAS GitHub repo.
 
 Enable with ``create_claw_agent(atlas=True)`` or ``CLAW_ATLAS=1`` and an
 ``atlas.json`` (or ``CLAW_ATLAS_CONFIG``) in the project.
