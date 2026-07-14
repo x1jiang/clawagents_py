@@ -46,6 +46,7 @@ async def test_top_level_call_passes_depth_check_and_invokes_run_agent_graph():
         new=fake_run_agent_graph,
     ):
         ctx = RunContext()  # depth=0
+        ctx.activate_skill("restricted", ["task", "read_file"], "abc123")
         result = await tool.execute(
             {"description": "do a thing"},
             run_context=ctx,
@@ -55,6 +56,10 @@ async def test_top_level_call_passes_depth_check_and_invokes_run_agent_graph():
     child_ctx = captured["run_context"]
     assert child_ctx.depth == 1
     assert child_ctx.skip_memory is True
+    assert child_ctx.active_skill_name == "restricted"
+    assert child_ctx.active_skill_content_hash == "abc123"
+    assert child_ctx.active_skills == {"restricted": "abc123"}
+    assert child_ctx.active_skill_allowed_tools == frozenset({"task", "read_file"})
 
 
 @pytest.mark.asyncio

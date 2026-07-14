@@ -16,7 +16,7 @@ Hermes-derived guardrails:
 
 import asyncio
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from clawagents.providers.llm import LLMProvider
@@ -222,6 +222,28 @@ class TaskTool:
                 depth=parent_depth + 1,
                 skip_memory=True,
                 iteration_budget=_IterBudget(max(1, int(effective_max_iter))),
+                # Delegation is not a capability escape hatch: when a skill
+                # allows the task tool, its tool boundary follows the child.
+                active_skill_name=(
+                    run_context.active_skill_name
+                    if run_context is not None
+                    else None
+                ),
+                active_skill_content_hash=(
+                    run_context.active_skill_content_hash
+                    if run_context is not None
+                    else None
+                ),
+                active_skills=(
+                    dict(run_context.active_skills)
+                    if run_context is not None
+                    else {}
+                ),
+                active_skill_allowed_tools=(
+                    run_context.active_skill_allowed_tools
+                    if run_context is not None
+                    else None
+                ),
             )
             run_kwargs["run_context"] = child_ctx
 

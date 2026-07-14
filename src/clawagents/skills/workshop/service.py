@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from clawagents.skills.workshop.scanner import scan_proposal_content
-from clawagents.skills.workshop.store import SkillWorkshopStore
+from clawagents.skills.workshop.store import ProposalValidationError, SkillWorkshopStore
 from clawagents.skills.workshop.types import SkillProposalRecord
 
 
@@ -24,16 +24,19 @@ class SkillWorkshopService:
     ) -> dict[str, Any]:
         pairs = [(f["path"], f["content"]) for f in (support_files or [])]
         findings = scan_proposal_content(name, description, body, pairs)
-        rec = self.store.create_proposal(
-            name=name,
-            description=description,
-            body=body,
-            action="create",
-            goal=goal,
-            evidence=evidence,
-            support_files=pairs,
-            scan_findings=findings,
-        )
+        try:
+            rec = self.store.create_proposal(
+                name=name,
+                description=description,
+                body=body,
+                action="create",
+                goal=goal,
+                evidence=evidence,
+                support_files=pairs,
+                scan_findings=findings,
+            )
+        except ProposalValidationError as exc:
+            return self._blocked(exc.findings)
         return self._serialize(rec, findings)
 
     def update(
@@ -48,17 +51,20 @@ class SkillWorkshopService:
     ) -> dict[str, Any]:
         pairs = [(f["path"], f["content"]) for f in (support_files or [])]
         findings = scan_proposal_content(target_skill, description, body, pairs)
-        rec = self.store.create_proposal(
-            name=target_skill,
-            description=description,
-            body=body,
-            action="update",
-            target_skill=target_skill,
-            goal=goal,
-            evidence=evidence,
-            support_files=pairs,
-            scan_findings=findings,
-        )
+        try:
+            rec = self.store.create_proposal(
+                name=target_skill,
+                description=description,
+                body=body,
+                action="update",
+                target_skill=target_skill,
+                goal=goal,
+                evidence=evidence,
+                support_files=pairs,
+                scan_findings=findings,
+            )
+        except ProposalValidationError as exc:
+            return self._blocked(exc.findings)
         return self._serialize(rec, findings)
 
     def revise(self, proposal_id: str, *, body: str, description: str | None = None) -> dict[str, Any]:
@@ -143,4 +149,12 @@ class SkillWorkshopService:
             "evidence": rec.evidence,
             "scan_findings": findings,
             "support_file_count": len(rec.support_files),
+        }
+
+    @staticmethod
+    def _blocked(findings: list[str]) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "error": "scan blocked proposal",
+            "findings": list(dict.fromkeys(findings)),
         }

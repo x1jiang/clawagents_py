@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import time
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Optional
 
+from clawagents.skills.workshop.scanner import scan_proposal_content, support_path_findings
 from clawagents.skills.workshop.types import SkillProposalRecord, SupportFile
 
 
@@ -17,6 +17,12 @@ def _sha256_text(text: str) -> str:
 
 def _read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8") if path.is_file() else ""
+
+
+class ProposalValidationError(ValueError):
+    def __init__(self, findings: list[str]) -> None:
+        super().__init__("; ".join(findings))
+        self.findings = findings
 
 
 class SkillWorkshopStore:
@@ -56,13 +62,8 @@ class SkillWorkshopStore:
         if not meta_path.is_file():
             return None
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        support: list[SupportFile] = []
-        support_root = self._proposal_dir(proposal_id) / "support"
-        if support_root.is_dir():
-            for path in sorted(support_root.rglob("*")):
-                if path.is_file():
-                    rel = str(path.relative_to(support_root))
-                    support.append(SupportFile(path=rel, content=path.read_text(encoding="utf-8")))
+        pairs, _ = self._support_snapshot(proposal_id)
+        support = [SupportFile(path=path, content=content) for path, content in pairs]
         return SkillProposalRecord(
             id=meta["id"],
             name=meta["name"],
@@ -79,6 +80,23 @@ class SkillWorkshopStore:
             support_files=support,
         )
 
+    def _support_snapshot(self, proposal_id: str) -> tuple[list[tuple[str, str]], list[str]]:
+        support_root = self._proposal_dir(proposal_id) / "support"
+        support: list[tuple[str, str]] = []
+        findings: list[str] = []
+        if not support_root.is_dir():
+            return support, findings
+        for path in sorted(support_root.rglob("*")):
+            if not path.is_file() and not path.is_symlink():
+                continue
+            rel = path.relative_to(support_root).as_posix()
+            path_findings = support_path_findings(rel, support_root)
+            findings.extend(path_findings)
+            if path_findings or not path.is_file():
+                continue
+            support.append((rel, path.read_text(encoding="utf-8")))
+        return support, findings
+
     def create_proposal(
         self,
         *,
@@ -94,6 +112,15 @@ class SkillWorkshopStore:
     ) -> SkillProposalRecord:
         proposal_id = uuid.uuid4().hex[:12]
         now = time.time()
+        pairs = list(support_files or [])
+        support_root = self._proposal_dir(proposal_id) / "support"
+        path_findings = [
+            finding
+            for rel, _ in pairs
+            for finding in support_path_findings(rel, support_root)
+        ]
+        if path_findings:
+            raise ProposalValidationError(list(dict.fromkeys(path_findings)))
         target_hash = None
         if action == "update" and target_skill:
             skill_path = self.skills_dir / target_skill / "SKILL.md"
@@ -116,9 +143,10 @@ class SkillWorkshopStore:
         pdir = self._proposal_dir(proposal_id)
         pdir.mkdir(parents=True, exist_ok=True)
         self._body_path(proposal_id).write_text(body, encoding="utf-8")
-        if support_files:
-            for rel, content in support_files:
-                dest = pdir / "support" / rel
+        if pairs:
+            for rel, content in pairs:
+                parts = PurePosixPath(rel.replace("\\", "/")).parts
+                dest = support_root.joinpath(*parts)
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_text(content, encoding="utf-8")
         self._meta_path(proposal_id).write_text(json.dumps(meta, indent=2), encoding="utf-8")
@@ -200,18 +228,22 @@ class SkillWorkshopStore:
                 self.update_status(proposal_id, "stale")
                 return False, "target skill changed since proposal; marked stale", None
         body = self.proposal_body(proposal_id)
+        pairs, path_findings = self._support_snapshot(proposal_id)
+        findings = list(path_findings)
+        findings.extend(
+            scan_proposal_content(rec.name, rec.description, body, pairs)
+        )
+        if findings:
+            return False, f"scan blocked apply: {'; '.join(dict.fromkeys(findings))}", None
         skill_name = rec.target_skill if rec.action == "update" else rec.name
         rollback_id = self.save_rollback(skill_name, self.snapshot_skill(skill_name))
         skill_root = self.skills_dir / skill_name
         skill_root.mkdir(parents=True, exist_ok=True)
         self.skill_path(skill_name).write_text(body, encoding="utf-8")
-        pdir = self._proposal_dir(proposal_id) / "support"
-        if pdir.is_dir():
-            for path in pdir.rglob("*"):
-                if path.is_file():
-                    rel = path.relative_to(pdir)
-                    dest = skill_root / rel
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    dest.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+        for rel, content in pairs:
+            parts = PurePosixPath(rel.replace("\\", "/")).parts
+            dest = skill_root.joinpath(*parts)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(content, encoding="utf-8")
         self.update_status(proposal_id, "applied")
         return True, f"applied skill {skill_name}", rollback_id

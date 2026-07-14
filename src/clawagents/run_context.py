@@ -75,6 +75,11 @@ class RunContext(Generic[TContext]):
             if ``max_iterations`` would still allow more rounds. Each
             subagent gets a *fresh* budget so a runaway delegate cannot
             starve the parent run.
+        active_skill_name: Name of the skill most recently activated through
+            ``use_skill``.
+        active_skill_allowed_tools: Immutable hard capability boundary from
+            that skill's ``allowed-tools`` declaration, or ``None`` when the
+            skill did not declare a boundary.
     """
     context: TContext | None = None
     usage: Usage = field(default_factory=Usage)
@@ -82,10 +87,72 @@ class RunContext(Generic[TContext]):
     depth: int = 0
     skip_memory: bool = False
     iteration_budget: IterationBudget | None = None
+    active_skill_name: str | None = None
+    active_skill_content_hash: str | None = None
+    active_skill_allowed_tools: frozenset[str] | None = None
+    active_skills: dict[str, str] = field(default_factory=dict)
+    pending_skill_name: str | None = None
+    pending_skill_content_hash: str | None = None
+    pending_skill_next_offset: int | None = None
+    pending_skill_total_chars: int | None = None
+    pending_skill_allowed_tools: frozenset[str] | None = None
+    pending_skill_boundary_declared: bool = False
     _approvals: dict[str, ApprovalRecord] = field(default_factory=dict)
     _always_approvals: dict[str, ApprovalRecord] = field(default_factory=dict)
     _metadata: dict[str, Any] = field(default_factory=dict)
     _budget_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False, compare=False)
+
+    def activate_skill(
+        self,
+        name: str,
+        allowed_tools: list[str] | None,
+        content_hash: str | None = None,
+    ) -> None:
+        """Backward-compatible one-page activation helper."""
+        self.record_skill_page(
+            name,
+            allowed_tools,
+            content_hash or "",
+            next_offset=None,
+            total_chars=0,
+        )
+
+    def record_skill_page(
+        self,
+        name: str,
+        allowed_tools: list[str] | None,
+        content_hash: str,
+        *,
+        next_offset: int | None,
+        total_chars: int,
+    ) -> None:
+        """Track contiguous instruction delivery and activate only at EOF."""
+        self.active_skill_name = name
+        self.active_skill_content_hash = content_hash
+        declared = allowed_tools is not None
+        boundary = frozenset(allowed_tools or ()) if declared else None
+        if next_offset is not None:
+            self.pending_skill_name = name
+            self.pending_skill_content_hash = content_hash
+            self.pending_skill_next_offset = next_offset
+            self.pending_skill_total_chars = total_chars
+            self.pending_skill_allowed_tools = boundary
+            self.pending_skill_boundary_declared = declared
+            return
+
+        self.pending_skill_name = None
+        self.pending_skill_content_hash = None
+        self.pending_skill_next_offset = None
+        self.pending_skill_total_chars = None
+        self.pending_skill_allowed_tools = None
+        self.pending_skill_boundary_declared = False
+        self.active_skills[name] = content_hash
+        if declared:
+            self.active_skill_allowed_tools = (
+                boundary
+                if self.active_skill_allowed_tools is None
+                else self.active_skill_allowed_tools & boundary
+            )
 
     async def ensure_iteration_budget(self, size: int) -> IterationBudget:
         """Lazily attach an :class:`IterationBudget` if none is set yet.

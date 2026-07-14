@@ -1,10 +1,15 @@
+import copy
+import hashlib
 import json
 import os
 import re
 import shutil
 import sys
+import threading
+import time
+from collections import OrderedDict
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 
 from clawagents.tools.registry import Tool, ToolResult
@@ -32,7 +37,11 @@ class Skill:
     description: str
     content: str
     path: str
-    allowed_tools: List[str] = field(default_factory=list)
+    # None = no boundary declared; [] = explicitly allow no data-plane tools.
+    allowed_tools: Optional[List[str]] = None
+    aliases: List[str] = field(default_factory=list)
+    triggers: List[str] = field(default_factory=list)
+    anti_triggers: List[str] = field(default_factory=list)
     requires: Optional[SkillRequires] = None
     forbidden_actions: List[str] = field(default_factory=list)
     workspace_layout: str = ""
@@ -52,6 +61,74 @@ class Skill:
     def is_dir_skill(self) -> bool:
         """True for `<dir>/SKILL.md` skills, which own their directory."""
         return Path(self.path).name.lower() == "skill.md"
+
+
+@dataclass(frozen=True)
+class CatalogSnapshot:
+    generation: int
+    content_hash: str
+    scan_duration_ms: float
+    parsed_files: int
+    reused_files: int
+    collisions: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _ParsedSkillCacheEntry:
+    metadata: tuple[int, int, int]
+    content_hash: str
+    skill: Skill
+
+
+_PARSED_SKILL_CACHE_MAX = 256
+_PARSED_SKILL_CACHE: "OrderedDict[str, _ParsedSkillCacheEntry]" = OrderedDict()
+_PARSED_SKILL_CACHE_LOCK = threading.RLock()
+_CATALOG_GENERATION = 0
+
+
+def _next_catalog_generation() -> int:
+    global _CATALOG_GENERATION
+    with _PARSED_SKILL_CACHE_LOCK:
+        _CATALOG_GENERATION += 1
+        return _CATALOG_GENERATION
+
+
+def _read_parsed_skill(skill_file: Path) -> tuple[Skill, bool]:
+    """Parse changed skills and reuse immutable snapshots for unchanged files."""
+    canonical = str(skill_file.resolve())
+    stat = skill_file.stat()
+    metadata = (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+    with _PARSED_SKILL_CACHE_LOCK:
+        cached = _PARSED_SKILL_CACHE.get(canonical)
+        if cached is not None and cached.metadata == metadata:
+            _PARSED_SKILL_CACHE.move_to_end(canonical)
+            return copy.deepcopy(cached.skill), True
+
+    raw = skill_file.read_bytes()
+    after = skill_file.stat()
+    after_metadata = (after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+    if metadata != after_metadata:
+        raw = skill_file.read_bytes()
+        after = skill_file.stat()
+        after_metadata = (after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+    content_hash = hashlib.sha256(raw).hexdigest()
+
+    with _PARSED_SKILL_CACHE_LOCK:
+        cached = _PARSED_SKILL_CACHE.get(canonical)
+        if cached is not None and cached.content_hash == content_hash:
+            refreshed = _ParsedSkillCacheEntry(after_metadata, content_hash, cached.skill)
+            _PARSED_SKILL_CACHE[canonical] = refreshed
+            _PARSED_SKILL_CACHE.move_to_end(canonical)
+            return copy.deepcopy(cached.skill), True
+
+    skill = parse_skill_file(raw.decode("utf-8"), canonical)
+    entry = _ParsedSkillCacheEntry(after_metadata, content_hash, copy.deepcopy(skill))
+    with _PARSED_SKILL_CACHE_LOCK:
+        _PARSED_SKILL_CACHE[canonical] = entry
+        _PARSED_SKILL_CACHE.move_to_end(canonical)
+        while len(_PARSED_SKILL_CACHE) > _PARSED_SKILL_CACHE_MAX:
+            _PARSED_SKILL_CACHE.popitem(last=False)
+    return skill, False
 
 
 def _default_skill_name(file_path: str) -> str:
@@ -188,7 +265,10 @@ def parse_skill_file(content: str, file_path: str) -> Skill:
     name = _default_skill_name(file_path)
     description = ""
     body = content
-    allowed_tools: List[str] = []
+    allowed_tools: Optional[List[str]] = None
+    aliases: List[str] = []
+    triggers: List[str] = []
+    anti_triggers: List[str] = []
     requires: Optional[SkillRequires] = None
     forbidden_actions: List[str] = []
     workspace_layout: str = ""
@@ -213,10 +293,11 @@ def parse_skill_file(content: str, file_path: str) -> Skill:
 
         description = _parse_frontmatter_description(yaml_content)
 
-        # Parse allowed-tools: space/comma-delimited string
-        tools_match = re.search(r"^allowed-tools:\s*(.+)$", yaml_content, re.MULTILINE)
+        # Parse allowed-tools: space/comma-delimited string (optionally YAML-ish
+        # brackets/quotes, consistent with requires list parsing).
+        tools_match = re.search(r"^allowed-tools:\s*(.*)$", yaml_content, re.MULTILINE)
         if tools_match:
-            allowed_tools = [t.strip(",") for t in tools_match.group(1).split() if t.strip(",")]
+            allowed_tools = _parse_inline_list(tools_match.group(1))
 
         # Only the literal true counts (Claude Code boolean parsing rule).
         dmi_match = re.search(
@@ -253,6 +334,36 @@ def parse_skill_file(content: str, file_path: str) -> Skill:
                 return _parse_inline_list(im.group(1).strip())
 
             return None
+
+        def _parse_phrase_list(key: str) -> List[str]:
+            block = re.search(
+                r"^" + re.escape(key) + r":\s*\n((?:[ \t]+-[^\n]*\n?)+)",
+                yaml_content,
+                re.MULTILINE,
+            )
+            if block:
+                return [
+                    item.strip().strip("\"'")
+                    for item in re.findall(r"^[ \t]+-\s+(.+)$", block.group(1), re.MULTILINE)
+                    if item.strip()
+                ]
+            inline = re.search(
+                r"^" + re.escape(key) + r":\s+(.+)$",
+                yaml_content,
+                re.MULTILINE,
+            )
+            if not inline:
+                return []
+            raw = inline.group(1).strip().strip("[]")
+            return [item.strip().strip("\"'") for item in raw.split(",") if item.strip()]
+
+        aliases = _parse_phrase_list("aliases")
+        triggers = _parse_phrase_list("triggers")
+        anti_triggers = (
+            _parse_phrase_list("anti-triggers")
+            or _parse_phrase_list("anti_triggers")
+            or []
+        )
 
         # Parse forbidden-actions: inline or block list
         fa_items = _parse_block_list("forbidden-actions", yaml_content)
@@ -294,6 +405,9 @@ def parse_skill_file(content: str, file_path: str) -> Skill:
         content=body.strip(),
         path=file_path,
         allowed_tools=allowed_tools,
+        aliases=aliases,
+        triggers=triggers,
+        anti_triggers=anti_triggers,
         requires=requires,
         forbidden_actions=forbidden_actions,
         workspace_layout=workspace_layout,
@@ -495,6 +609,21 @@ class SkillStore:
         # Human-readable loader diagnostics (spec violations, skipped files).
         self.warnings: List[str] = []
         self._seen_dirs: set[str] = set()
+        self._parsed_files = 0
+        self._reused_files = 0
+        self._collisions: list[str] = []
+        self.catalog_snapshot = CatalogSnapshot(
+            generation=0,
+            content_hash=hashlib.sha256(b"[]").hexdigest(),
+            scan_duration_ms=0.0,
+            parsed_files=0,
+            reused_files=0,
+            collisions=(),
+        )
+
+    @property
+    def diagnostics(self) -> CatalogSnapshot:
+        return self.catalog_snapshot
 
     def add_directory(self, d: str | Path):
         path = Path(d)
@@ -516,10 +645,13 @@ class SkillStore:
                     f"{skill_file}: skipped (exceeds {MAX_SKILL_FILE_BYTES // 1024}KB limit)"
                 )
                 return
-            content = skill_file.read_text("utf-8")
+            skill, reused = _read_parsed_skill(skill_file)
         except (OSError, UnicodeDecodeError):
             return
-        skill = parse_skill_file(content, str(skill_file))
+        if reused:
+            self._reused_files += 1
+        else:
+            self._parsed_files += 1
         if not skill.name.strip():
             self.warnings.append(f"{skill_file}: skipped (empty skill name)")
             return
@@ -541,6 +673,19 @@ class SkillStore:
                 f"{skill_file}: stripped {n_name + n_desc + n_body} invisible/control "
                 f"char(s) from skill text"
             )
+
+        # A later directory is authoritative for a normalized skill identity,
+        # even when the replacement is unavailable or quarantined.  Remove all
+        # lower-precedence states before evaluating the replacement so an old
+        # runnable body cannot remain active beside a newer blocked copy.
+        identity = _norm_skill_key(skill.name)
+        for mapping in (self.skills, self.ineligible, self.quarantined):
+            for previous_name in list(mapping):
+                if _norm_skill_key(previous_name) == identity:
+                    self._collisions.append(
+                        f'{identity}: "{previous_name}" shadowed by "{skill.name}"'
+                    )
+                    mapping.pop(previous_name, None)
 
         for w in skill.warnings:
             self.warnings.append(f"{skill_file}: {w}")
@@ -572,6 +717,14 @@ class SkillStore:
         self.quarantined.pop(skill.name, None)
 
     async def load_all(self):
+        started = time.perf_counter()
+        self.skills.clear()
+        self.ineligible.clear()
+        self.quarantined.clear()
+        self.warnings.clear()
+        self._parsed_files = 0
+        self._reused_files = 0
+        self._collisions.clear()
         for d in self.skill_dirs:
             p = Path(d)
             if not p.exists() or not p.is_dir():
@@ -601,6 +754,41 @@ class SkillStore:
                         self._load_skill_file(entry)
                 except OSError:
                     continue
+
+        snapshot_rows = sorted(
+            (
+                "loaded",
+                _norm_skill_key(skill.name),
+                skill.name,
+                skill.description,
+                skill.path,
+                tuple(skill.allowed_tools or ()),
+                tuple(skill.aliases),
+                tuple(skill.triggers),
+                tuple(skill.anti_triggers),
+                hashlib.sha256(skill.content.encode("utf-8")).hexdigest(),
+            )
+            for skill in self.skills.values()
+        )
+        snapshot_rows.extend(
+            ("ineligible", _norm_skill_key(name), reason)
+            for name, reason in sorted(self.ineligible.items())
+        )
+        snapshot_rows.extend(
+            ("quarantined", _norm_skill_key(name), reason)
+            for name, reason in sorted(self.quarantined.items())
+        )
+        content_hash = hashlib.sha256(
+            json.dumps(snapshot_rows, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        self.catalog_snapshot = CatalogSnapshot(
+            generation=_next_catalog_generation(),
+            content_hash=content_hash,
+            scan_duration_ms=(time.perf_counter() - started) * 1000,
+            parsed_files=self._parsed_files,
+            reused_files=self._reused_files,
+            collisions=tuple(dict.fromkeys(self._collisions)),
+        )
 
     def list(self) -> List[Skill]:
         """Model-invocable skills (feeds the catalog and skill tools)."""
@@ -637,59 +825,156 @@ def _list_skill_resources(skill: Skill) -> List[str]:
     return out
 
 
-def create_skill_tools(store: SkillStore) -> List[Tool]:
+def _default_search_score(skill: Skill, query: str) -> float:
+    """Fallback scorer for callers outside ClawAgent's richer ranker."""
+    terms = {
+        token[:-1] if len(token) > 3 and token.endswith("s") else token
+        for token in re.findall(r"[a-z0-9]{3,}", query.lower())
+    }
+    fields = " ".join(
+        [skill.name, skill.description, *skill.aliases, *skill.triggers]
+    ).lower()
+    field_terms = {
+        token[:-1] if len(token) > 3 and token.endswith("s") else token
+        for token in re.findall(r"[a-z0-9]{3,}", fields)
+    }
+    if any(trigger.lower() in query.lower() for trigger in skill.anti_triggers):
+        return -100.0
+    return float(len(terms & field_terms))
+
+
+def create_skill_tools(
+    store: SkillStore,
+    relevance_scorer: Callable[[Any, str], float] | None = None,
+    available_tool_names: Callable[[], set[str]] | None = None,
+) -> List[Tool]:
+    score_skill = relevance_scorer or _default_search_score
 
     class ListSkillsTool:
         name = "list_skills"
         description = (
-            "List all available skill names and short descriptions. "
+            "Search and page through available skill names and short descriptions. "
             "Prefer the skills catalog already in the system prompt; call this "
             "only when that catalog was truncated or you need a skill not shown."
         )
-        parameters: Dict[str, Dict[str, Any]] = {}
+        parameters: Dict[str, Dict[str, Any]] = {
+            "query": {
+                "type": "string",
+                "description": "Optional case-insensitive name/description search",
+                "required": False,
+            },
+            "offset": {
+                "type": "integer",
+                "description": "Zero-based result offset (default 0)",
+                "required": False,
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Page size, 1-25 (default 20)",
+                "required": False,
+            },
+        }
 
         async def execute(self, args: Dict[str, Any]) -> ToolResult:
-            skills = store.list()
+            skills = sorted(store.list(), key=lambda item: item.name.lower())
             if not skills and not store.ineligible and not store.quarantined:
                 return ToolResult(success=True, output="No skills available.")
 
+            query = str(args.get("query", "") or "").strip().lower()
+            relevance_scores: dict[int, float] = {}
+            try:
+                offset = max(0, int(args.get("offset", 0) or 0))
+                limit = max(1, min(25, int(args.get("limit", 20) or 20)))
+            except (TypeError, ValueError):
+                return ToolResult(
+                    success=False,
+                    output="",
+                    error="offset and limit must be integers",
+                )
+            if query:
+                scored = [(score_skill(skill, query), skill) for skill in skills]
+                scored.sort(key=lambda pair: (-pair[0], pair[1].name.lower()))
+                skills = [skill for score, skill in scored if score > 0]
+                relevance_scores = {id(skill): score for score, skill in scored if score > 0}
+
+            total = len(skills)
+            page = skills[offset : offset + limit]
             lines = []
-            for s in skills:
-                line = f"- **{s.name}**: {s.description or '(no description)'}"
+            for s in page:
+                description = " ".join((s.description or "(no description)").split())
+                if len(description) > 240:
+                    description = description[:239].rstrip() + "…"
+                line = f"- **{s.name}**: {description}"
+                if query:
+                    score = relevance_scores.get(id(s), 0.0)
+                    confidence = "strong" if score >= 50 else "relevant" if score >= 12 else "possible"
+                    line += f"\n  → Match: {confidence} ({score:.1f})"
                 if s.allowed_tools:
-                    line += f"\n  → Allowed tools: {', '.join(s.allowed_tools)}"
+                    shown_tools = s.allowed_tools[:12]
+                    tools_text = ", ".join(shown_tools)
+                    if len(s.allowed_tools) > len(shown_tools):
+                        tools_text += ", …"
+                    line += f"\n  → Allowed tools: {tools_text}"
                 lines.append(line)
-            output = f"Available skills ({len(skills)}):\n" + "\n".join(lines)
-            if store.ineligible:
+            end = min(total, offset + len(page))
+            output = (
+                f"Available skills matching query ({offset}-{end} of {total}):\n"
+                + ("\n".join(lines) if lines else "No matching skills.")
+            )
+            if end < total:
+                output += f"\n\nMore results: call list_skills with offset={end}."
+            if not query and offset == 0 and store.ineligible:
+                unavailable_items = sorted(store.ineligible.items())
                 unavailable = "\n".join(
                     f"- **{name}**: {reason}"
-                    for name, reason in sorted(store.ineligible.items())
+                    for name, reason in unavailable_items[:10]
                 )
                 output += f"\n\nUnavailable (requirements not met):\n{unavailable}"
-            if store.quarantined:
+                if len(unavailable_items) > 10:
+                    output += f"\n- …and {len(unavailable_items) - 10} more unavailable skills"
+            if not query and offset == 0 and store.quarantined:
+                quarantined_items = sorted(store.quarantined.items())
                 blocked = "\n".join(
                     f"- **{name}**: {reason}"
-                    for name, reason in sorted(store.quarantined.items())
+                    for name, reason in quarantined_items[:10]
                 )
                 output += (
                     "\n\nQuarantined (failed security content scan — not loaded):\n"
                     + blocked
                 )
+                if len(quarantined_items) > 10:
+                    output += f"\n- …and {len(quarantined_items) - 10} more quarantined skills"
             return ToolResult(success=True, output=output)
 
     class UseSkillTool:
         name = "use_skill"
         description = (
-            "Load full instructions for one skill by name. Call this early when "
+            "Read instructions for one skill by name in contiguous pages. Call this early when "
             "a listed skill matches the user's task (project setup, cohort/SQL "
             "workflows, document formats, etc.) — do not reinvent that workflow. "
-            "Names are matched case-insensitively; hyphens/underscores are equivalent."
+            "Follow next_offset until complete. Names are matched case-insensitively; "
+            "hyphens/underscores are equivalent."
         )
         parameters = {
-            "name": {"type": "string", "description": "Name of the skill to load", "required": True}
+            "name": {"type": "string", "description": "Name of the skill to load", "required": True},
+            "offset": {
+                "type": "integer",
+                "description": "Character offset in rendered instructions (default 0)",
+                "required": False,
+            },
+            "max_chars": {
+                "type": "integer",
+                "description": "Page size, 1000-10000 characters (default 10000)",
+                "required": False,
+            },
+            "expected_hash": {
+                "type": "string",
+                "description": "Required content hash for continuation pages",
+                "required": False,
+            },
         }
 
-        async def execute(self, args: Dict[str, Any]) -> ToolResult:
+        async def execute(self, args: Dict[str, Any], run_context: Any = None) -> ToolResult:
             name = str(args.get("name", "")).strip()
             skill = resolve_skill(store, name)
 
@@ -704,6 +989,16 @@ def create_skill_tools(store: SkillStore) -> List[Tool]:
                 )
 
             if not skill:
+                alias_matches = resolve_skill_aliases(store, name)
+                if len(alias_matches) > 1:
+                    return ToolResult(
+                        success=False,
+                        output="",
+                        error=(
+                            f'Ambiguous skill alias "{name}". Use a canonical name: '
+                            + ", ".join(sorted(item.name for item in alias_matches))
+                        ),
+                    )
                 available = sorted(s.name for s in store.list())
                 suggestions = suggest_skills(store, name, limit=5)
                 hint = ""
@@ -731,7 +1026,50 @@ def create_skill_tools(store: SkillStore) -> List[Tool]:
                     ),
                 )
 
+            effective_allowed_tools = (
+                list(skill.allowed_tools) if skill.allowed_tools is not None else None
+            )
+            if effective_allowed_tools is not None:
+                control_keys = {_norm_skill_key("use_skill"), _norm_skill_key("list_skills")}
+                if available_tool_names is not None:
+                    available_map = {
+                        _norm_skill_key(tool_name): tool_name
+                        for tool_name in available_tool_names()
+                    }
+                    canonical: list[str] = []
+                    unknown: list[str] = []
+                    for declared in effective_allowed_tools:
+                        key = _norm_skill_key(declared)
+                        if key in control_keys:
+                            continue
+                        resolved = available_map.get(key)
+                        if resolved is None:
+                            unknown.append(declared)
+                        elif resolved not in canonical:
+                            canonical.append(resolved)
+                    if unknown:
+                        return ToolResult(
+                            success=False,
+                            output="",
+                            error=(
+                                f"Skill '{skill.name}' declares unknown allowed-tools: "
+                                + ", ".join(unknown)
+                            ),
+                        )
+                    effective_allowed_tools = canonical
+                else:
+                    effective_allowed_tools = [
+                        tool_name
+                        for tool_name in effective_allowed_tools
+                        if _norm_skill_key(tool_name) not in control_keys
+                    ]
+
             parts = [f"# Skill: {skill.name}"]
+            if effective_allowed_tools is not None:
+                parts.append(
+                    "Active allowed-tools boundary: "
+                    + (", ".join(effective_allowed_tools) or "no data-plane tools")
+                )
             # Resources referenced by the skill body (scripts/…, references/…)
             # resolve relative to this directory — without it the agent cannot
             # locate them (Claude Code prepends the same line).
@@ -762,7 +1100,77 @@ def create_skill_tools(store: SkillStore) -> List[Tool]:
                     parts.append(f"{i}. {step}")
 
             parts.append(f"\n{skill.content}")
-            return ToolResult(success=True, output="\n".join(parts))
+            rendered = "\n".join(parts)
+            content_hash = hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+            try:
+                offset = max(0, int(args.get("offset", 0) or 0))
+                max_chars = max(1000, min(10_000, int(args.get("max_chars", 10_000) or 10_000)))
+            except (TypeError, ValueError):
+                return ToolResult(
+                    success=False,
+                    output="",
+                    error="offset and max_chars must be integers",
+                )
+            if offset > len(rendered):
+                return ToolResult(
+                    success=False,
+                    output="",
+                    error=f"offset {offset} exceeds instruction length {len(rendered)}",
+                )
+
+            expected_hash = str(args.get("expected_hash", "") or "")
+            pending_name = getattr(run_context, "pending_skill_name", None)
+            if pending_name:
+                if (
+                    _norm_skill_key(pending_name) != _norm_skill_key(skill.name)
+                    or offset != getattr(run_context, "pending_skill_next_offset", None)
+                    or expected_hash != getattr(run_context, "pending_skill_content_hash", None)
+                    or content_hash != getattr(run_context, "pending_skill_content_hash", None)
+                ):
+                    return ToolResult(
+                        success=False,
+                        output="",
+                        error=(
+                            "Skill continuation is not contiguous or its content hash "
+                            "changed; restart at offset 0."
+                        ),
+                    )
+            elif offset != 0:
+                return ToolResult(
+                    success=False,
+                    output="",
+                    error="Skill loading must start at offset 0.",
+                )
+
+            end = min(len(rendered), offset + max_chars)
+            if end < len(rendered):
+                paragraph = rendered.rfind("\n\n", offset + max_chars // 2, end)
+                if paragraph > offset:
+                    end = paragraph + 2
+            chunk = rendered[offset:end]
+            page_header = (
+                f"[Skill {skill.name} sha256={content_hash}: "
+                f"characters {offset}-{end} of {len(rendered)}]\n"
+            )
+            if end < len(rendered):
+                continuation = (
+                    f"\n\n[More instructions remain. Call use_skill with "
+                    f'name="{skill.name}", offset={end}, and '
+                    f'expected_hash="{content_hash}".]'
+                )
+                next_offset: int | None = end
+            else:
+                continuation = "\n\n[End of skill instructions.]"
+                next_offset = None
+            if run_context is not None and hasattr(run_context, "record_skill_page"):
+                run_context.record_skill_page(
+                    skill.name,
+                    effective_allowed_tools,
+                    content_hash,
+                    next_offset=next_offset,
+                    total_chars=len(rendered),
+                )
+            return ToolResult(success=True, output=page_header + chunk + continuation)
 
     return [ListSkillsTool(), UseSkillTool()]
 
@@ -772,7 +1180,7 @@ def _norm_skill_key(name: str) -> str:
 
 
 def resolve_skill(store: SkillStore, name: str) -> Optional[Skill]:
-    """Resolve a skill by exact, case-insensitive, or hyphen/underscore-normalized name."""
+    """Resolve a skill by name or an explicit alias."""
     raw = (name or "").strip()
     if not raw:
         return None
@@ -784,7 +1192,20 @@ def resolve_skill(store: SkillStore, name: str) -> Optional[Skill]:
     if raw.lower() in lower_map:
         return lower_map[raw.lower()]
     norm_map = {_norm_skill_key(s.name): s for s in skills}
-    return norm_map.get(_norm_skill_key(raw))
+    normalized = _norm_skill_key(raw)
+    if normalized in norm_map:
+        return norm_map[normalized]
+    alias_matches = resolve_skill_aliases(store, raw)
+    return alias_matches[0] if len(alias_matches) == 1 else None
+
+
+def resolve_skill_aliases(store: SkillStore, name: str) -> List[Skill]:
+    normalized = _norm_skill_key(name)
+    return [
+        skill
+        for skill in store.list()
+        if any(_norm_skill_key(alias) == normalized for alias in skill.aliases)
+    ]
 
 
 def suggest_skills(store: SkillStore, name: str, limit: int = 5) -> List[str]:
@@ -794,12 +1215,26 @@ def suggest_skills(store: SkillStore, name: str, limit: int = 5) -> List[str]:
     raw = (name or "").strip()
     if not raw:
         return []
-    names = [s.name for s in store.list()]
+    skills = store.list()
+    names = [s.name for s in skills]
     if not names:
         return []
     direct = difflib.get_close_matches(raw, names, n=limit, cutoff=0.45)
     if direct:
         return direct
+    alias_to_names: dict[str, list[str]] = {}
+    for skill in skills:
+        for alias in skill.aliases:
+            alias_to_names.setdefault(alias, []).append(skill.name)
+    alias_hits = difflib.get_close_matches(raw, list(alias_to_names), n=limit, cutoff=0.45)
+    if alias_hits:
+        return list(
+            dict.fromkeys(
+                name
+                for alias in alias_hits
+                for name in sorted(alias_to_names[alias])
+            )
+        )[:limit]
     norm_names = {_norm_skill_key(n): n for n in names}
     soft = difflib.get_close_matches(_norm_skill_key(raw), list(norm_names), n=limit, cutoff=0.45)
     return [norm_names[k] for k in soft]

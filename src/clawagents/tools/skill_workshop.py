@@ -6,8 +6,14 @@ import json
 import os
 from typing import Any
 
+from clawagents.permissions.mode import PermissionMode
 from clawagents.skills.workshop.service import SkillWorkshopService
 from clawagents.tools.registry import Tool, ToolResult
+
+
+_WRITE_ACTIONS = frozenset(
+    {"create", "update", "revise", "apply", "reject", "quarantine", "rollback"}
+)
 
 
 class SkillWorkshopTool:
@@ -41,8 +47,21 @@ class SkillWorkshopTool:
     def __init__(self, workspace: str | None = None, skills_dir: str | None = None) -> None:
         self._service = SkillWorkshopService(workspace or os.getcwd(), skills_dir)
 
-    async def execute(self, args: dict[str, Any]) -> ToolResult:
+    async def execute(self, args: dict[str, Any], run_context: Any = None) -> ToolResult:
         action = str(args.get("action", ""))
+        if (
+            run_context is not None
+            and getattr(run_context, "permission_mode", PermissionMode.DEFAULT) == PermissionMode.PLAN
+            and action in _WRITE_ACTIONS
+        ):
+            return ToolResult(
+                success=False,
+                output="",
+                error=(
+                    f"Refused: skill_workshop action '{action}' mutates state and "
+                    "is unavailable in plan mode. Call exit_plan_mode first."
+                ),
+            )
         support_files = _parse_support_files(args.get("support_files"))
         try:
             if action == "create":

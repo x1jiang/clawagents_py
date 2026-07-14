@@ -395,6 +395,55 @@ class ToolRegistry:
         if not tool:
             return ToolResult(success=False, output="", error=f"Unknown tool: {tool_name}")
 
+        def _skill_key(value: object) -> str:
+            return re.sub(r"[\s\-]+", "_", str(value or "").strip().lower())
+
+        # Partial instructions are not actionable. Until every contiguous page
+        # is read, only the exact next use_skill continuation may execute.
+        pending_name = getattr(run_context, "pending_skill_name", None)
+        if pending_name:
+            expected_offset = getattr(run_context, "pending_skill_next_offset", None)
+            expected_hash = getattr(run_context, "pending_skill_content_hash", None)
+            try:
+                supplied_offset = int(args.get("offset", 0) or 0)
+            except (TypeError, ValueError):
+                supplied_offset = -1
+            continuing = (
+                tool_name == "use_skill"
+                and _skill_key(args.get("name")) == _skill_key(pending_name)
+                and supplied_offset == expected_offset
+                and args.get("expected_hash") == expected_hash
+            )
+            if not continuing:
+                return ToolResult(
+                    success=False,
+                    output="",
+                    error=(
+                        f"Refused: finish loading skill '{pending_name}' first. "
+                        f"Call use_skill with offset={expected_offset} and "
+                        f"expected_hash={expected_hash}."
+                    ),
+                )
+
+        # Completed skills compose by intersection. Skill discovery/loading is
+        # control-plane behavior; it may add restrictions but never widen them.
+        allowed_tools = getattr(run_context, "active_skill_allowed_tools", None)
+        control_plane = {"use_skill", "list_skills"}
+        if (
+            allowed_tools is not None
+            and tool_name not in allowed_tools
+            and tool_name not in control_plane
+        ):
+            active_name = str(getattr(run_context, "active_skill_name", "") or "")
+            return ToolResult(
+                success=False,
+                output="",
+                error=(
+                    f"Refused: active skill '{active_name}' allows only: "
+                    f"{', '.join(sorted(allowed_tools)) or 'no data-plane tools'}."
+                )
+            )
+
         # Plan-mode gate: refuse write-class tools when run_context is in PLAN mode.
         # Kept at the registry level (not in agent_loop) so all execution paths
         # see the same gate, including parallel dispatch.

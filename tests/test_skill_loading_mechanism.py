@@ -8,6 +8,7 @@ aligned with openclaw / Claude Code / deepagents skill systems.
 from __future__ import annotations
 
 import asyncio
+import re
 import sys
 
 import pytest
@@ -20,6 +21,8 @@ from clawagents.tools.skills import (
     parse_skill_file,
     skill_ineligibility_reason,
 )
+from clawagents.run_context import RunContext
+from clawagents.tools.registry import ToolRegistry, ToolResult
 
 
 def _write_skill(root, name, body="Do the thing.", frontmatter=None):
@@ -262,6 +265,29 @@ def test_list_skills_reports_unavailable_with_reason(tmp_path):
     assert "missing binary" in result.output
 
 
+def test_unavailable_higher_precedence_skill_shadows_runnable_copy(tmp_path):
+    low = tmp_path / "low"
+    high = tmp_path / "high"
+    _write_skill(low, "demo-skill", body="LOW PRECEDENCE BODY")
+    _write_skill(
+        high,
+        "replacement",
+        body="HIGH PRECEDENCE BODY",
+        frontmatter=(
+            "name: demo_skill\ndescription: unavailable replacement\n"
+            "requires:\n  env: [CLAW_TEST_DEFINITELY_UNSET_SHADOW]"
+        ),
+    )
+    store = SkillStore()
+    store.add_directory(low)
+    store.add_directory(high)
+    _load(store)
+
+    assert store.list() == []
+    assert store.get("demo-skill") is None
+    assert "demo_skill" in store.ineligible
+
+
 def test_use_skill_includes_base_dir_and_resources(tmp_path):
     root = tmp_path / "skills"
     d = _write_skill(root, "with-scripts", body="Run scripts/run.py to start.")
@@ -280,6 +306,400 @@ def test_use_skill_includes_base_dir_and_resources(tmp_path):
     assert f"Base directory for this skill: {d}" in result.output
     assert "scripts/run.py" in result.output
     assert "references/guide.md" in result.output
+
+
+def test_use_skill_pages_large_instructions_without_silent_middle_truncation(tmp_path):
+    root = tmp_path / "skills"
+    body = "A" * 11_000 + "MIDDLE-MARKER" + "Z" * 11_000
+    _write_skill(root, "large", body=body)
+    store = SkillStore()
+    store.add_directory(root)
+    _load(store)
+
+    use_tool = [t for t in create_skill_tools(store) if t.name == "use_skill"][0]
+    registry = ToolRegistry()
+    registry.register(use_tool)
+    context = RunContext()
+    first = asyncio.run(
+        registry.execute_tool("use_skill", {"name": "large"}, run_context=context)
+    )
+
+    assert first.success
+    assert "[… truncated" not in first.output
+    assert "More instructions remain" in first.output
+    next_offset = int(re.search(r"offset=(\d+)", first.output).group(1))
+    content_hash = re.search(r"sha256=([0-9a-f]+)", first.output).group(1)
+    second = asyncio.run(
+        registry.execute_tool(
+            "use_skill",
+            {"name": "large", "offset": next_offset, "expected_hash": content_hash},
+            run_context=context,
+        )
+    )
+    assert second.success
+    assert "MIDDLE-MARKER" in second.output
+    assert "[… truncated" not in second.output
+
+
+def test_allowed_tools_is_enforced_after_skill_activation(tmp_path):
+    root = tmp_path / "skills"
+    _write_skill(
+        root,
+        "restricted",
+        body="Use only the reader.",
+        frontmatter=(
+            "name: restricted\ndescription: restricted skill\n"
+            "allowed-tools: use_skill, read_file"
+        ),
+    )
+    store = SkillStore()
+    store.add_directory(root)
+    _load(store)
+    use_tool = [t for t in create_skill_tools(store) if t.name == "use_skill"][0]
+
+    class StubTool:
+        description = "stub"
+        parameters = {}
+
+        def __init__(self, name):
+            self.name = name
+
+        async def execute(self, args):
+            return ToolResult(success=True, output="ok")
+
+    registry = ToolRegistry()
+    registry.register(use_tool)
+    registry.register(StubTool("read_file"))
+    registry.register(StubTool("execute"))
+    context = RunContext()
+
+    activated = asyncio.run(
+        registry.execute_tool(
+            "use_skill", {"name": "restricted"}, run_context=context
+        )
+    )
+    allowed = asyncio.run(
+        registry.execute_tool("read_file", {}, run_context=context)
+    )
+    blocked = asyncio.run(
+        registry.execute_tool("execute", {}, run_context=context)
+    )
+    continued = asyncio.run(
+        registry.execute_tool(
+            "use_skill", {"name": "restricted"}, run_context=context
+        )
+    )
+
+    assert activated.success
+    assert allowed.success
+    assert not blocked.success
+    assert "allows only: read_file" in blocked.error
+    assert continued.success
+
+
+def test_allowed_tools_cannot_be_escaped_by_switching_skills(tmp_path):
+    root = tmp_path / "skills"
+    _write_skill(
+        root,
+        "restricted",
+        frontmatter=(
+            "name: restricted\ndescription: restricted\nallowed-tools: read_file"
+        ),
+    )
+    _write_skill(root, "permissive")
+    store = SkillStore()
+    store.add_directory(root)
+    _load(store)
+    use_tool = [tool for tool in create_skill_tools(store) if tool.name == "use_skill"][0]
+    registry = ToolRegistry()
+    registry.register(use_tool)
+    context = RunContext()
+
+    assert asyncio.run(
+        registry.execute_tool("use_skill", {"name": "restricted"}, run_context=context)
+    ).success
+    switched = asyncio.run(
+        registry.execute_tool("use_skill", {"name": "permissive"}, run_context=context)
+    )
+
+    assert switched.success is True
+    assert context.active_skill_allowed_tools == frozenset({"read_file"})
+    assert set(context.active_skills) == {"restricted", "permissive"}
+
+
+def test_use_skill_reports_content_hash_and_activation_state(tmp_path):
+    root = tmp_path / "skills"
+    _write_skill(root, "hashed")
+    store = SkillStore()
+    store.add_directory(root)
+    _load(store)
+    use_tool = [tool for tool in create_skill_tools(store) if tool.name == "use_skill"][0]
+    registry = ToolRegistry()
+    registry.register(use_tool)
+    context = RunContext()
+
+    result = asyncio.run(
+        registry.execute_tool("use_skill", {"name": "hashed"}, run_context=context)
+    )
+
+    assert result.success
+    assert "sha256=" in result.output
+    assert context.active_skill_content_hash
+
+
+def test_use_skill_requires_contiguous_pages_before_tool_use(tmp_path):
+    root = tmp_path / "skills"
+    _write_skill(
+        root,
+        "long-restricted",
+        body=("first rules\n\n" + "A" * 10_000 + "\n\nlast rules\n" + "Z" * 4_000),
+        frontmatter=(
+            "name: long-restricted\ndescription: long skill\nallowed-tools: read_file"
+        ),
+    )
+    store = SkillStore()
+    store.add_directory(root)
+    _load(store)
+    use_tool = [tool for tool in create_skill_tools(store) if tool.name == "use_skill"][0]
+
+    class ReadTool:
+        name = "read_file"
+        description = "read"
+        parameters = {}
+
+        async def execute(self, args):
+            return ToolResult(success=True, output="read")
+
+    registry = ToolRegistry()
+    registry.register(use_tool)
+    registry.register(ReadTool())
+    context = RunContext()
+    first = asyncio.run(
+        registry.execute_tool(
+            "use_skill",
+            {"name": "long-restricted", "max_chars": 4_000},
+            run_context=context,
+        )
+    )
+    assert first.success
+    assert context.pending_skill_next_offset is not None
+    assert "long-restricted" not in context.active_skills
+    assert not asyncio.run(
+        registry.execute_tool("read_file", {}, run_context=context)
+    ).success
+
+    while context.pending_skill_next_offset is not None:
+        continuation = asyncio.run(
+            registry.execute_tool(
+                "use_skill",
+                {
+                    "name": "long-restricted",
+                    "offset": context.pending_skill_next_offset,
+                    "expected_hash": context.pending_skill_content_hash,
+                    "max_chars": 4_000,
+                },
+                run_context=context,
+            )
+        )
+        assert continuation.success
+
+    assert "long-restricted" in context.active_skills
+    assert asyncio.run(
+        registry.execute_tool("read_file", {}, run_context=context)
+    ).success
+
+
+def test_use_skill_rejects_skipped_offset_and_stale_hash(tmp_path):
+    root = tmp_path / "skills"
+    _write_skill(root, "long", body="A" * 15_000)
+    store = SkillStore()
+    store.add_directory(root)
+    _load(store)
+    skill = store.get("long")
+    use_tool = [tool for tool in create_skill_tools(store) if tool.name == "use_skill"][0]
+    registry = ToolRegistry()
+    registry.register(use_tool)
+    context = RunContext()
+
+    assert not asyncio.run(
+        registry.execute_tool(
+            "use_skill", {"name": "long", "offset": 1000}, run_context=RunContext()
+        )
+    ).success
+    first = asyncio.run(
+        registry.execute_tool(
+            "use_skill", {"name": "long", "max_chars": 4_000}, run_context=context
+        )
+    )
+    assert first.success
+    skipped = asyncio.run(
+        registry.execute_tool(
+            "use_skill",
+            {
+                "name": "long",
+                "offset": context.pending_skill_next_offset + 1,
+                "expected_hash": context.pending_skill_content_hash,
+            },
+            run_context=context,
+        )
+    )
+    assert not skipped.success
+
+    skill.content += "changed"
+    stale = asyncio.run(
+        registry.execute_tool(
+            "use_skill",
+            {
+                "name": "long",
+                "offset": context.pending_skill_next_offset,
+                "expected_hash": context.pending_skill_content_hash,
+            },
+            run_context=context,
+        )
+    )
+    assert not stale.success
+
+
+def test_explicit_empty_allowed_tools_blocks_every_data_plane_tool(tmp_path):
+    root = tmp_path / "skills"
+    _write_skill(
+        root,
+        "observe-only",
+        frontmatter="name: observe-only\ndescription: no tools\nallowed-tools: []",
+    )
+    store = SkillStore()
+    store.add_directory(root)
+    _load(store)
+    use_tool = [tool for tool in create_skill_tools(store) if tool.name == "use_skill"][0]
+
+    class ReadTool:
+        name = "read_file"
+        description = "read"
+        parameters = {}
+
+        async def execute(self, args):
+            return ToolResult(success=True, output="read")
+
+    registry = ToolRegistry()
+    registry.register(use_tool)
+    registry.register(ReadTool())
+    context = RunContext()
+    assert asyncio.run(
+        registry.execute_tool("use_skill", {"name": "observe-only"}, run_context=context)
+    ).success
+    assert context.active_skill_allowed_tools == frozenset()
+    assert not asyncio.run(
+        registry.execute_tool("read_file", {}, run_context=context)
+    ).success
+
+
+def test_ambiguous_alias_and_unknown_allowed_tool_fail_closed(tmp_path):
+    root = tmp_path / "skills"
+    for name in ("first", "second"):
+        _write_skill(
+            root,
+            name,
+            frontmatter=f"name: {name}\ndescription: {name}\naliases: [shared alias]",
+        )
+    _write_skill(
+        root,
+        "unknown-tool",
+        frontmatter=(
+            "name: unknown-tool\ndescription: invalid boundary\n"
+            "allowed-tools: imaginary_tool"
+        ),
+    )
+    store = SkillStore()
+    store.add_directory(root)
+    _load(store)
+    use_tool = [
+        tool
+        for tool in create_skill_tools(
+            store,
+            available_tool_names=lambda: {"read_file", "use_skill", "list_skills"},
+        )
+        if tool.name == "use_skill"
+    ][0]
+
+    ambiguous = asyncio.run(use_tool.execute({"name": "shared alias"}, RunContext()))
+    invalid = asyncio.run(use_tool.execute({"name": "unknown-tool"}, RunContext()))
+    assert not ambiguous.success and "Ambiguous" in (ambiguous.error or "")
+    assert "first" in ambiguous.error and "second" in ambiguous.error
+    assert not invalid.success and "imaginary_tool" in (invalid.error or "")
+
+
+def test_catalog_snapshot_reuses_unchanged_parses_and_invalidates_changes(tmp_path):
+    root = tmp_path / "skills"
+    skill_dir = _write_skill(root, "cached", body="first body")
+
+    first = SkillStore()
+    first.add_directory(root)
+    _load(first)
+    second = SkillStore()
+    second.add_directory(root)
+    _load(second)
+
+    assert second.diagnostics.reused_files == 1
+    assert second.diagnostics.content_hash == first.diagnostics.content_hash
+
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: cached\ndescription: cached skill\n---\n\nchanged body\n",
+        encoding="utf-8",
+    )
+    third = SkillStore()
+    third.add_directory(root)
+    _load(third)
+
+    assert third.diagnostics.parsed_files == 1
+    assert third.diagnostics.content_hash != first.diagnostics.content_hash
+
+
+def test_parser_reads_structured_routing_metadata():
+    skill = parse_skill_file(
+        """---
+name: routed
+description: Routed skill
+aliases: [bibtex cleanup, citation fix]
+triggers:
+  - verify doi
+anti-triggers: [delete bibliography]
+---
+Body
+""",
+        "/tmp/routed/SKILL.md",
+    )
+
+    assert skill.aliases == ["bibtex cleanup", "citation fix"]
+    assert skill.triggers == ["verify doi"]
+    assert skill.anti_triggers == ["delete bibliography"]
+
+
+def test_list_skills_supports_search_and_pagination(tmp_path):
+    root = tmp_path / "skills"
+    for index in range(12):
+        _write_skill(
+            root,
+            f"skill-{index:02d}",
+            frontmatter=(
+                f"name: skill-{index:02d}\n"
+                f"description: {'database' if index == 7 else 'general'} workflow {index}"
+            ),
+        )
+    store = SkillStore()
+    store.add_directory(root)
+    _load(store)
+    list_tool = [t for t in create_skill_tools(store) if t.name == "list_skills"][0]
+
+    first = asyncio.run(list_tool.execute({"limit": 5}))
+    second = asyncio.run(list_tool.execute({"offset": 5, "limit": 5}))
+    searched = asyncio.run(list_tool.execute({"query": "database"}))
+
+    assert "0-5 of 12" in first.output
+    assert "offset=5" in first.output
+    assert "skill-00" in first.output and "skill-05" not in first.output
+    assert "skill-05" in second.output and "skill-00" not in second.output
+    assert "skill-07" in searched.output
+    assert "skill-00" not in searched.output
 
 
 def test_use_skill_flat_md_has_base_dir_but_no_sibling_resources(tmp_path):

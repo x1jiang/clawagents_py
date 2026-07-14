@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
+
+from clawagents.skills.workshop.types import SUPPORT_FOLDERS
 
 MAX_SKILL_BYTES = 40_000
 MAX_DESCRIPTION_BYTES = 160
@@ -14,6 +16,40 @@ _SUSPICIOUS = re.compile(
     r"(rm\s+-rf|curl\s+.*\|\s*(ba)?sh|eval\s*\(|exec\s*\(|__import__|subprocess\.|os\.system)",
     re.IGNORECASE,
 )
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def support_path_findings(path: str, support_root: Path | None = None) -> list[str]:
+    """Validate a support path before it is joined to a writable root."""
+    if not path or "\x00" in path:
+        return [f"invalid support path: {path}"]
+
+    normalized = path.replace("\\", "/")
+    pure = PurePosixPath(normalized)
+    windows = PureWindowsPath(path)
+    parts = pure.parts
+    findings: list[str] = []
+    if pure.is_absolute() or windows.is_absolute() or bool(windows.drive):
+        findings.append(f"invalid absolute support path: {path}")
+    if len(parts) < 2 or parts[0] not in SUPPORT_FOLDERS:
+        findings.append(f"support file must live under standard folders: {path}")
+    if any(part in {".", "..", ""} for part in parts):
+        findings.append(f"invalid support path traversal: {path}")
+
+    if support_root is not None and not findings:
+        root = support_root.resolve(strict=False)
+        parent = support_root.parent.resolve(strict=False)
+        destination = support_root.joinpath(*parts).resolve(strict=False)
+        if not _is_within(root, parent) or not _is_within(destination, root):
+            findings.append(f"support path escapes proposal support root: {path}")
+    return findings
 
 
 def scan_proposal_content(name: str, description: str, body: str, support_files: list[tuple[str, str]]) -> list[str]:
@@ -31,11 +67,7 @@ def scan_proposal_content(name: str, description: str, body: str, support_files:
             findings.append(f"suspicious pattern in support file {path}")
         if len(content.encode("utf-8")) > MAX_SUPPORT_FILE_BYTES:
             findings.append(f"support file too large: {path}")
-        parts = Path(path).parts
-        if parts[0] not in {"assets", "examples", "references", "scripts", "templates"}:
-            findings.append(f"support file must live under standard folders: {path}")
-        if ".." in parts or path.startswith("/"):
-            findings.append(f"invalid support path: {path}")
+        findings.extend(support_path_findings(path))
     if _SUSPICIOUS.search(body):
         findings.append("suspicious pattern in proposal body")
     return findings

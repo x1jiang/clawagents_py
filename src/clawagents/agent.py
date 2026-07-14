@@ -1,6 +1,8 @@
 import os
 import re
 import asyncio
+import difflib
+import unicodedata
 from pathlib import Path
 from typing import Callable, Optional, List, Dict, Any, Union
 
@@ -870,9 +872,13 @@ def create_claw_agent(
                 context_window=context_window,
             )
 
-        for skill_tool in create_skill_tools(skill_store):
+        for skill_tool in create_skill_tools(
+            skill_store,
+            relevance_scorer=_skill_relevance_score,
+            available_tool_names=lambda: {tool.name for tool in registry.list()},
+        ):
             # Both tools: thin catalog in-prompt; list_skills for overflow;
-            # use_skill loads one full body on demand (cost-effective).
+            # use_skill loads complete instructions in verified pages.
             if skill_tool.name in ("use_skill", "list_skills"):
                 registry.register(skill_tool)
 
@@ -924,7 +930,6 @@ def create_claw_agent(
     permission_mode_override = None
     if mode:
         from clawagents.modes import (
-            compose_before_tool,
             get_mode,
             make_mode_before_tool,
             resolve_permission_mode,
@@ -1135,6 +1140,9 @@ SKILL_LISTING_MAX_DESC_CHARS = 400
 SKILL_LISTING_CHARS_PER_TOKEN = 4
 # Soft cap on how many skills appear with descriptions before name-only overflow.
 MAX_SKILLS_IN_PROMPT = 80
+SKILL_CONFIDENT_MATCH_SCORE = 12.0
+SKILL_POSSIBLE_MATCH_SCORE = 3.0
+SKILL_RELEVANT_MAX_CANDIDATES = 12
 # Back-compat alias (older tests / callers).
 MAX_SKILLS_PROMPT_CHARS = SKILL_LISTING_BUDGET_FLOOR_CHARS
 
@@ -1143,7 +1151,7 @@ _SKILL_CATALOG_HEADER = (
     "If any skill below matches the user's task, call `use_skill` with that "
     "skill's exact name **before** improvising a multi-step workflow "
     "(project startup, cohort/SQL extraction, document formats, etc.). "
-    "Load at most one skill unless a skill explicitly chains another. "
+    "Load the minimal applicable set; multi-artifact tasks may require more than one. "
     "Call `list_skills` only if this list was truncated or you need a skill "
     "not shown.\n"
 )
@@ -1201,15 +1209,40 @@ def _format_skill_line(name: str, description: str, desc_cap: int) -> str:
     return f"- **{name}**"
 
 
+def _compact_skill_name_index(skills: list, max_chars: int = 2400) -> str:
+    names = sorted(
+        {
+            str(getattr(skill, "name", "") or "").strip()
+            for skill in skills
+            if str(getattr(skill, "name", "") or "").strip()
+        },
+        key=str.casefold,
+    )
+    prefix = "Catalog names: "
+    shown: list[str] = []
+    for name in names:
+        candidate = prefix + ", ".join([*shown, name])
+        if len(candidate) > max_chars:
+            break
+        shown.append(name)
+    text = prefix + ", ".join(shown)
+    if len(shown) < len(names):
+        text += f" (+{len(names) - len(shown)}; use list_skills)"
+    return text
+
+
 def _latest_user_text(messages: list) -> str:
-    """Best-effort extract of the latest user turn for skill ranking."""
+    """Extract current intent, carrying prior substance through short follow-ups."""
+    user_texts: list[str] = []
     for message in reversed(messages or []):
         role = message.get("role") if isinstance(message, dict) else getattr(message, "role", None)
         if role != "user":
             continue
         content = message.get("content", "") if isinstance(message, dict) else getattr(message, "content", "")
         if isinstance(content, str):
-            return content
+            text = content
+            if text.strip():
+                user_texts.append(text)
         if isinstance(content, list):
             parts: list[str] = []
             for part in content:
@@ -1217,15 +1250,101 @@ def _latest_user_text(messages: list) -> str:
                     parts.append(part)
                 elif isinstance(part, dict) and part.get("type") == "text":
                     parts.append(str(part.get("text") or ""))
-            return "\n".join(p for p in parts if p)
-    return ""
+            text = "\n".join(p for p in parts if p)
+            if text.strip():
+                user_texts.append(text)
+        if len(user_texts) >= 4:
+            break
+    if not user_texts:
+        return ""
+    current = user_texts[0]
+    if len(_skill_tokens(current)) >= 2:
+        return current
+    for prior in user_texts[1:]:
+        if len(_skill_tokens(prior)) >= 2:
+            return f"{current}\nPrior substantive request: {prior[-4000:]}"
+    return current
+
+
+_SKILL_STOP_WORDS = {
+    "the", "and", "for", "with", "from", "that", "this", "your", "have",
+    "please", "using", "into", "based", "update", "first", "then", "when",
+    "help", "want", "need", "make", "could", "would", "should",
+    "can", "you", "me", "our", "we", "us", "about", "it",
+    "yes", "do", "continue", "thanks", "thank", "okay", "ok", "good", "morning",
+    "how", "are",
+}
+
+
+def _skill_stem(token: str) -> str:
+    """Small dependency-free stemmer for retrieval, not linguistic display."""
+    value = token.lower()
+    irregular = {
+        "analysis": "analys",
+        "analyses": "analys",
+        "analyze": "analys",
+        "analyzing": "analys",
+    }
+    if value in irregular:
+        return irregular[value]
+    if len(value) > 6 and value.endswith("ation"):
+        return value[:-5]
+    if len(value) > 5 and value.endswith("ating"):
+        return value[:-5]
+    if len(value) > 4 and value.endswith("ate"):
+        return value[:-3]
+    if len(value) > 5 and value.endswith("ies"):
+        return value[:-3] + "y"
+    if len(value) > 5 and value.endswith("ing"):
+        value = value[:-3]
+        if len(value) > 3 and value[-1:] == value[-2:-1]:
+            value = value[:-1]
+        return value
+    if len(value) > 4 and value.endswith("ed"):
+        return value[:-2]
+    if len(value) > 4 and value.endswith(("ses", "xes", "zes", "ches", "shes")):
+        return value[:-2]
+    if len(value) > 3 and value.endswith("s") and not value.endswith("ss"):
+        return value[:-1]
+    if len(value) > 5 and value.endswith("up"):
+        return value[:-2]
+    return value
+
+
+def _skill_tokens(text: str) -> set[str]:
+    normalized = unicodedata.normalize("NFKC", text or "").casefold()
+    out: set[str] = set()
+    for token in re.findall(r"[a-z0-9+#]{2,}", normalized):
+        if token in _SKILL_STOP_WORDS:
+            continue
+        out.add(token)
+        stem = _skill_stem(token)
+        out.add(stem)
+        if token.endswith("ing") and stem and not stem.endswith("e"):
+            out.add(stem + "e")
+        if token.endswith("ed") and stem and not stem.endswith("e"):
+            out.add(stem + "e")
+        if token.endswith("ation") and stem:
+            out.add(stem + "ate")
+        if len(token) > 5 and token.endswith("up"):
+            out.add(token[:-2])
+    return out
+
+
+def _skill_core_tokens(text: str) -> set[str]:
+    normalized = unicodedata.normalize("NFKC", text or "").casefold()
+    return {
+        _skill_stem(token)
+        for token in re.findall(r"[a-z0-9+#]{2,}", normalized)
+        if token not in _SKILL_STOP_WORDS
+    }
 
 
 def _skill_relevance_score(skill: Any, query: str) -> float:
-    """Lightweight lexical score for ranking skills against the user turn."""
+    """High-recall local score using structure, phrases, and token coverage."""
     if not query:
         return 0.0
-    q = query.lower()
+    q = unicodedata.normalize("NFKC", query).casefold()
     name = str(getattr(skill, "name", "") or "")
     desc = str(getattr(skill, "description", "") or "")
     path = str(getattr(skill, "path", "") or "")
@@ -1234,19 +1353,78 @@ def _skill_relevance_score(skill: Any, query: str) -> float:
     path_l = path.lower()
     score = 0.0
 
-    tokens = set(re.findall(r"[a-z0-9]{3,}", q))
-    stop = {
-        "the", "and", "for", "with", "from", "that", "this", "your", "have",
-        "please", "using", "into", "based", "update", "first", "then", "when",
-    }
-    tokens -= stop
+    def _phrases(field: str) -> list[str]:
+        values = getattr(skill, field, []) or []
+        return [str(value).strip().lower() for value in values if str(value).strip()]
 
+    tokens = _skill_tokens(q)
     name_tokens = re.findall(r"[a-z0-9]+", name_l.replace("_", " ").replace("-", " "))
-    name_phrase = " ".join(name_tokens)
-    if name_l and name_l in q:
-        score += 80.0
-    elif name_phrase and name_phrase in q:
-        score += 70.0
+    name_pattern = (
+        r"(?<![a-z0-9])"
+        + r"[\s_-]+".join(re.escape(token) for token in name_tokens)
+        + r"(?![a-z0-9])"
+        if name_tokens
+        else r"(?!)"
+    )
+    explicit_name = bool(re.search(name_pattern, q))
+
+    aliases = _phrases("aliases")
+    triggers = _phrases("triggers")
+    anti_triggers = _phrases("anti_triggers")
+
+    def _phrase_matches(phrase: str) -> bool:
+        phrase_tokens = _skill_core_tokens(phrase)
+        return bool(phrase_tokens) and phrase_tokens <= _skill_core_tokens(q)
+
+    def _phrase_is_negated(phrase: str) -> bool:
+        words = re.findall(r"[a-z0-9]+", phrase.casefold())
+        if not words:
+            return False
+        return bool(
+            re.search(
+                rf"\b(?:not|never|avoid|without|do\s+not|don't)\b"
+                rf"(?:\W+\w+){{0,3}}\W+{re.escape(words[0])}\b",
+                q,
+            )
+        )
+
+    if not explicit_name and any(
+        _phrase_matches(phrase) and not _phrase_is_negated(phrase)
+        for phrase in anti_triggers
+    ):
+        return -160.0
+    for phrase in aliases:
+        if _phrase_matches(phrase):
+            score += 80.0
+    for phrase in triggers:
+        if _phrase_matches(phrase):
+            score += 70.0
+
+    if explicit_name:
+        score += 120.0
+
+    name_token_set = _skill_core_tokens(name_l.replace("_", " ").replace("-", " "))
+    query_core_tokens = _skill_core_tokens(q)
+    name_overlap = query_core_tokens & name_token_set
+    score += 14.0 * len(name_overlap)
+    if name_token_set and name_token_set <= query_core_tokens:
+        score += 35.0
+
+    query_words = re.findall(r"[a-z0-9+#]{4,}", q)
+    searchable_words = re.findall(
+        r"[a-z0-9+#]{4,}",
+        " ".join([name_l, *aliases, *triggers]),
+    )
+    fuzzy = max(
+        (
+            difflib.SequenceMatcher(None, query_word, candidate).ratio()
+            for query_word in query_words
+            for candidate in searchable_words
+        ),
+        default=0.0,
+    )
+    if fuzzy >= 0.82:
+        score += 8.0
 
     # Filename / folder stem matches (e.g. new_project_starting_instruction.md)
     path_obj = Path(path) if path else None
@@ -1258,21 +1436,26 @@ def _skill_relevance_score(skill: Any, query: str) -> float:
             stem = path_obj.stem.lower()
     if stem and len(stem) >= 4 and stem not in {"skill", "readme", "skills"}:
         stem_phrase = stem.replace("_", " ").replace("-", " ")
-        q_compact = q.replace(" ", "_").replace("-", "_")
-        if stem in q_compact:
+        stem_tokens = _skill_tokens(stem_phrase)
+        if stem_tokens and stem_tokens <= tokens:
             score += 60.0
-        elif stem_phrase and stem_phrase in q:
-            score += 50.0
-        elif any(tok in stem for tok in tokens if len(tok) >= 5):
+        elif any(tok in _skill_stem(stem) for tok in tokens if len(tok) >= 5):
             score += 8.0
 
-    for tok in tokens:
-        if tok in name_l:
-            score += 6.0
-        if tok in desc_l:
-            score += 2.5
-        if tok in path_l:
-            score += 1.5
+    desc_tokens = _skill_tokens(desc_l)
+    path_tokens = _skill_tokens(path_l.replace("_", " ").replace("-", " "))
+    desc_overlap = tokens & desc_tokens
+    path_overlap = tokens & path_tokens
+    generic = {"workflow", "project", "file", "tool", "task", "analysis", "data", "general"}
+    informative_overlap = desc_overlap - generic
+    score += 6.0 * len(informative_overlap) + 1.0 * len(desc_overlap & generic)
+    score += 2.0 * len(path_overlap)
+    if tokens and desc_tokens:
+        coverage = len(informative_overlap) / min(len(tokens), len(desc_tokens))
+        if coverage >= 0.75:
+            score += 18.0
+        elif coverage >= 0.5:
+            score += 10.0
     return score
 
 
@@ -1294,11 +1477,12 @@ def _build_skill_catalog_prompt(
 ) -> str:
     """Build a bounded name/description catalog (Claude/Codex-style).
 
-    Strategy (cost-effective):
-    1. Rank skills against the current user turn when a query is provided.
-    2. Always keep skill *names* when possible.
-    3. Shorten descriptions first (per-skill cap, then global shorten steps).
-    4. Only omit skills after descriptions are exhausted; point to list_skills.
+    Strategy (quality-first):
+    1. Rank with exact names, structured routing metadata, and token coverage.
+    2. Include every confident match up to a generous ambiguity cap.
+    3. Surface possible matches or an explicit discovery fallback instead of
+       silently hiding the skill system.
+    4. Treat the character budget as a safety ceiling, never the objective.
     """
     if not loaded_skills:
         return ""
@@ -1310,6 +1494,81 @@ def _build_skill_catalog_prompt(
         max_desc = max(40, int(env_desc))
 
     budget = skill_listing_budget_chars(context_window)
+    name_index = _compact_skill_name_index(
+        loaded_skills,
+        max_chars=max(800, min(2400, budget // 2)),
+    )
+
+    # Normal LLM rounds have a current user query. Prefer recall over saving a
+    # small prompt suffix: include all confident candidates up to a generous
+    # cap, and preserve a discovery route when confidence is low.
+    if query and query.strip():
+        scored = [
+            (skill, _skill_relevance_score(skill, query))
+            for skill in ranked
+        ]
+        confident = [pair for pair in scored if pair[1] >= SKILL_CONFIDENT_MATCH_SCORE]
+        possible = [pair for pair in scored if pair[1] >= SKILL_POSSIBLE_MATCH_SCORE]
+        meaningful_query = len(_skill_tokens(query)) >= 2
+        if confident:
+            relevant = list(confident[:SKILL_RELEVANT_MAX_CANDIDATES])
+            selected_ids = {id(skill) for skill, _score in relevant}
+            for candidate in possible:
+                if len(relevant) >= SKILL_RELEVANT_MAX_CANDIDATES:
+                    break
+                if id(candidate[0]) not in selected_ids:
+                    relevant.append(candidate)
+                    selected_ids.add(id(candidate[0]))
+            heading = "### Relevant skills for this turn"
+        elif possible and meaningful_query:
+            relevant = possible[: min(6, SKILL_RELEVANT_MAX_CANDIDATES)]
+            heading = "### Possible skill matches — inspect before choosing"
+        elif meaningful_query:
+            return (
+                "## Skill Discovery\n"
+                "No confident catalog match was found. Before improvising a specialized "
+                "multi-step workflow, call `list_skills` with a focused query; its ranked "
+                "search covers aliases, triggers, descriptions, and inflected terms.\n"
+                + name_index
+            )
+        else:
+            return ""
+
+        lines = [_SKILL_CATALOG_HEADER.rstrip(), name_index, heading]
+        for skill, _score in relevant:
+            lines.append(
+                _format_skill_line(
+                    str(getattr(skill, "name", "") or "skill"),
+                    str(getattr(skill, "description", "") or ""),
+                    min(max_desc, 240),
+                )
+            )
+        lines.append(
+            "Choose by task fit, not rank alone. Call `use_skill` and read every page "
+            "before acting."
+        )
+        all_matches = possible
+        if len(all_matches) > len(relevant):
+            lines.append(
+                f"{len(all_matches) - len(relevant)} additional matches are "
+                "available through `list_skills` with the same query."
+            )
+        text = "\n".join(lines)
+        if len(text) > budget:
+            compact = [_SKILL_CATALOG_HEADER.rstrip(), name_index, heading]
+            for skill, _score in relevant:
+                line = _format_skill_line(
+                    str(getattr(skill, "name", "") or "skill"),
+                    str(getattr(skill, "description", "") or ""),
+                    100,
+                )
+                if len("\n".join([*compact, line])) > budget - 160:
+                    break
+                compact.append(line)
+            compact.append("More matches: call `list_skills` with the user's task as query.")
+            text = "\n".join(compact)
+        return text
+
     footer_full = "\n\n({n} more skills available — use list_skills to see all)"
     # Reserve space for a worst-case overflow footer.
     reserve = len(footer_full.format(n=len(ranked))) + 8
@@ -1323,33 +1582,7 @@ def _build_skill_catalog_prompt(
     if not entries:
         return ""
 
-    recommended_lines: list[str] = []
-    if query and query.strip():
-        top = []
-        for skill in ranked[:5]:
-            score = _skill_relevance_score(skill, query)
-            if score < 8.0:
-                continue
-            top.append(
-                (
-                    str(getattr(skill, "name", "") or ""),
-                    str(getattr(skill, "description", "") or ""),
-                    score,
-                )
-            )
-        if top:
-            recommended_lines.append("### Recommended for this turn")
-            for name, desc, _score in top[:3]:
-                recommended_lines.append(
-                    _format_skill_line(name, desc, min(max_desc, 180))
-                )
-            recommended_lines.append(
-                "Call `use_skill` with one of these names before freestyling."
-            )
-            recommended_lines.append("")
-
-    recommended_block = "\n".join(recommended_lines)
-    header = _SKILL_CATALOG_HEADER + (recommended_block + "\n" if recommended_block else "")
+    header = _SKILL_CATALOG_HEADER
     body_budget = max(200, budget - len(header) - reserve)
 
     # Try progressively shorter descriptions until everything fits, else pack

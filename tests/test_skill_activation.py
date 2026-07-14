@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
 
 from clawagents.agent import _build_skill_catalog_prompt, _skill_relevance_score
 from clawagents.prompts import (
@@ -37,11 +36,83 @@ def test_skill_catalog_ranks_matching_skill_first():
         "and run the atomic waterfall cohort workflow for knee osteoarthritis."
     )
     text = _build_skill_catalog_prompt(skills, context_window=128_000, query=query)
-    assert "Recommended for this turn" in text
+    assert "Relevant skills for this turn" in text
     assert "atomic_waterfall_query" in text
     # Recommended block should mention the cohort skill before unrelated filler.
-    rec = text.split("### Recommended for this turn", 1)[1]
+    rec = text.split("### Relevant skills for this turn", 1)[1]
     assert rec.find("atomic_waterfall_query") < rec.find("unrelated") or "unrelated" not in rec.split("Call `use_skill`")[0]
+
+
+def test_skill_catalog_omits_metadata_when_nothing_clears_threshold():
+    skills = [
+        SimpleNamespace(
+            name="atomic_waterfall_query",
+            description="Cohort SQL extraction",
+            path="skills/atomic/SKILL.md",
+        ),
+        SimpleNamespace(
+            name="slides",
+            description="Format a presentation deck",
+            path="skills/slides/SKILL.md",
+        ),
+    ]
+
+    assert _build_skill_catalog_prompt(skills, query="hello") == ""
+
+
+def test_skill_catalog_injects_only_relevant_top_k_for_current_turn():
+    skills = [
+        SimpleNamespace(
+            name="atomic_waterfall_query",
+            description="Cohort SQL waterfall validation",
+            path="skills/atomic/SKILL.md",
+        ),
+        SimpleNamespace(
+            name="generic_sql",
+            description="General SQL formatting",
+            path="skills/sql/SKILL.md",
+        ),
+        SimpleNamespace(
+            name="slides",
+            description="Format a presentation deck",
+            path="skills/slides/SKILL.md",
+        ),
+    ]
+
+    text = _build_skill_catalog_prompt(
+        skills, query="run the atomic waterfall cohort workflow"
+    )
+    assert "atomic_waterfall_query" in text
+    recommendations = text.split("### Relevant skills for this turn", 1)[1]
+    assert "slides" not in recommendations
+
+
+def test_two_description_terms_clear_relevance_threshold():
+    skills = [
+        SimpleNamespace(
+            name="postgres-helper",
+            description="Database migration workflow",
+            path="skills/postgres/SKILL.md",
+        )
+    ]
+
+    text = _build_skill_catalog_prompt(skills, query="database workflow")
+    assert "postgres-helper" in text
+
+
+def test_structured_aliases_triggers_and_anti_triggers_control_relevance():
+    skill = SimpleNamespace(
+        name="citation-management",
+        description="Scholarly metadata workflow",
+        path="skills/citation/SKILL.md",
+        aliases=["bibtex cleanup"],
+        triggers=["verify doi"],
+        anti_triggers=["delete bibliography"],
+    )
+
+    assert _skill_relevance_score(skill, "please do bibtex cleanup") >= 45
+    assert _skill_relevance_score(skill, "verify doi metadata") >= 30
+    assert _skill_relevance_score(skill, "delete bibliography") < 0
 
 
 def test_skill_relevance_boosts_filename_mentions():

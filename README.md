@@ -1190,7 +1190,9 @@ agent = create_claw_agent("gpt-5", tools=[WikipediaQueryRun()])
 
 ## Skills System
 
-Skills are **reusable instruction sets** that teach the agent domain-specific knowledge — without polluting the system prompt. They use a progressive disclosure pattern: a bounded name/description catalog (~1.5% of context, 4k–16k chars; override with `CLAW_SKILL_LISTING_CHAR_BUDGET`) is ranked against the latest user turn and injected each round; full bodies load on demand via `use_skill` (and `list_skills` for overflow).
+Skills are **reusable instruction sets** that teach the agent domain-specific knowledge without blindly injecting every body. Retrieval is quality-first: a compact name index preserves discoverability, structured aliases/triggers/anti-triggers and morphology-aware ranking retain every plausible intent up to a generous ambiguity cap, and short follow-ups inherit the prior substantive request. `list_skills` uses the same ranked search when the model needs a wider view.
+
+`use_skill` delivers large instructions in contiguous, content-hash-bound pages. No data-plane tool can run until every page is read; skipped, stale, or reordered continuations fail. Multiple completed skills compose, and their declared `allowed-tools` boundaries intersect so loading another skill cannot widen authority. An explicit empty boundary allows no data-plane tools.
 
 ### Skill Directory Structure
 
