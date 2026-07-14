@@ -22,6 +22,7 @@ Efficiency features (learned from deepagents/openclaw):
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import logging
@@ -1377,6 +1378,33 @@ async def _summarize_chunk(
     raise RuntimeError("Summarization returned empty")
 
 
+def _content_key_text(content: Any) -> str:
+    """Stable text stand-in for message content (compaction input + reuse keys).
+
+    Multimodal list content must not go through ``str()`` — that dumps the
+    full base64 data URL (megabytes) into the summarizer prompt. Join the
+    real text parts and replace each image with a short digest placeholder;
+    the digest keeps reuse keys distinct per distinct image so compaction's
+    original-message reuse can't swap two same-text messages.
+    """
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return str(content)
+    parts: list[str] = []
+    for p in content:
+        if not isinstance(p, dict):
+            continue
+        if p.get("type") == "text":
+            parts.append(str(p.get("text", "") or ""))
+        elif p.get("type") in ("image_url", "image"):
+            digest = hashlib.sha1(
+                json.dumps(p, sort_keys=True, default=str).encode("utf-8")
+            ).hexdigest()[:8]
+            parts.append(f"[image attachment #{digest}]")
+    return "\n".join(parts)
+
+
 async def _compact_if_needed(
     messages: list[LLMMessage],
     context_window: int,
@@ -1472,7 +1500,7 @@ async def _compact_if_needed(
         agent_msgs = [
             AgentMessage(
                 role=m.role,
-                content=m.content if isinstance(m.content, str) else str(m.content),
+                content=_content_key_text(m.content),
             )
             for m in ([*system_msgs, *non_system])
         ]
@@ -1494,7 +1522,7 @@ async def _compact_if_needed(
             for _om in (*system_msgs, *non_system):
                 _okey = (
                     _om.role,
-                    _om.content if isinstance(_om.content, str) else str(_om.content),
+                    _content_key_text(_om.content),
                 )
                 _originals_by_key.setdefault(_okey, []).append(_om)
 
@@ -1758,7 +1786,7 @@ def _archive_pre_compact_transcript(older_messages: list[LLMMessage], task_conte
             "\n### Messages\n\n",
         ]
         for m in older_messages:
-            content = m.content if isinstance(m.content, str) else str(m.content)
+            content = _content_key_text(m.content)
             lines.append(f"**{m.role}**: {content[:2000]}\n\n")
 
         path.write_text("".join(lines), "utf-8")
@@ -1902,6 +1930,7 @@ async def run_agent_graph(
     action_mode: str = "tools",
     approval_handler: Any = None,
     require_approval_tools: Optional[list[str]] = None,
+    image_blocks: Optional[list[dict]] = None,
 ) -> AgentState:
     """Single ReAct loop: LLM → tools → LLM → tools → ... → final answer."""
     if features is not None:
@@ -2154,9 +2183,18 @@ async def run_agent_graph(
         tool_description=tool_desc,
         lesson_preamble=lesson_preamble,
     )
+    # Attach images (if any) to the first user message as content blocks so a
+    # vision model sees pixels. ``current_task`` stays the plain string, so
+    # compaction/events/session paths that expect text are unaffected.
+    if image_blocks:
+        first_user_content: Any = ([{"type": "text", "text": task}] if task else []) + list(
+            image_blocks
+        )
+    else:
+        first_user_content = task
     messages: list[LLMMessage] = [
         LLMMessage(role="system", content=system_content),
-        LLMMessage(role="user", content=task),
+        LLMMessage(role="user", content=first_user_content),
     ]
 
     # Session: write initial state

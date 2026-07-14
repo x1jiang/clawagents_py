@@ -175,13 +175,35 @@ class ClawAgent:
         session_preload_limit: Optional[int] = None,
         on_stream_event: Optional[Callable[[StreamEvent], None]] = None,
         handoffs: Optional[list[Handoff]] = None,
+        images: Optional[list[dict]] = None,
     ) -> AgentState:
         """Start the ReAct agent loop for ``task``.
 
         All per-call keyword arguments (``hooks``, ``input_guardrails``,
         ``output_type``, ``session``, ``on_stream_event`` …) override the
         values supplied to ``ClawAgent.__init__`` for just this invocation.
+
+        ``images`` attaches image content to the first user message so a vision
+        model sees pixels, not a path. Each item is ``{"data": <base64 or
+        data-URL>, "media_type": "image/png"}``; images are sanitized
+        (resized/recompressed to provider limits) before sending.
         """
+        image_blocks: Optional[list[dict]] = None
+        if images:
+            from clawagents.media.images import build_user_image_block
+
+            image_blocks = []
+            for img in images:
+                if isinstance(img, str):
+                    image_blocks.append(build_user_image_block(img))
+                elif isinstance(img, dict):
+                    data = img.get("data") or img.get("url") or ""
+                    media_type = (
+                        img.get("media_type") or img.get("mime_type") or "image/png"
+                    )
+                    if data:
+                        image_blocks.append(build_user_image_block(data, media_type))
+
         if run_context is None:
             run_context = RunContext(context=user_context)
         elif user_context is not None and run_context.context is None:
@@ -237,6 +259,7 @@ class ClawAgent:
             action_mode=self.action_mode,
             approval_handler=self.approval_handler,
             require_approval_tools=self.require_approval_tools,
+            image_blocks=image_blocks,
         )
 
     # ── Convenience hook methods ──────────────────────────────────────

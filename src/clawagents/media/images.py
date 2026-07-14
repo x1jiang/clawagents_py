@@ -242,6 +242,106 @@ def sanitize_image_block(
     return new_block
 
 
+def build_user_image_block(
+    data: Union[str, bytes],
+    media_type: str = "image/png",
+    *,
+    max_dim: int = DEFAULT_MAX_DIM,
+    max_bytes: int = DEFAULT_MAX_BYTES,
+    quality_steps: Tuple[int, ...] = DEFAULT_QUALITY_STEPS,
+) -> Dict[str, Any]:
+    """Build a sanitized OpenAI-style ``image_url`` block for a user message.
+
+    ``data`` may be a base64 string (with or without a ``data:`` prefix) or
+    raw bytes. The image is clamped to ``max_dim`` / ``max_bytes`` (reusing the
+    tool-result sanitizer) and returned as::
+
+        {"type": "image_url",
+         "image_url": {"url": "data:<mime>;base64,<b64>"}}
+
+    This is the canonical internal shape: the OpenAI provider passes it through
+    natively, the Gemini provider converts it to ``inline_data``, and the
+    Anthropic provider converts it to an ``image``/``source`` block. If the
+    bytes can't be decoded or shrunk to fit, a ``text`` block explaining the
+    drop is returned instead so the turn still progresses.
+    """
+    if isinstance(data, bytes):
+        b64 = base64.b64encode(data).decode("ascii")
+    else:
+        raw_str = data.strip()
+        if raw_str.startswith("data:") and "," in raw_str:
+            header, raw_str = raw_str.split(",", 1)
+            # data:<mime>;base64 — recover the declared mime if the caller
+            # didn't pass one explicitly.
+            if header.startswith("data:"):
+                declared = header[5:].split(";", 1)[0].strip()
+                if declared and media_type == "image/png":
+                    media_type = declared
+        # Drop internal whitespace/newlines (MIME-wrapped base64) so the value
+        # is canonical before validation and transport.
+        b64 = "".join(raw_str.split())
+
+    # Validate the base64 up front so the contract is deterministic regardless
+    # of whether Pillow is installed (the sanitizer's Pillow-missing guard
+    # would otherwise return the un-decoded block unchanged).
+    try:
+        base64.b64decode(b64, validate=True)
+    except (binascii.Error, ValueError):
+        return {
+            "type": "text",
+            "text": "[image source data was not valid base64, dropped]",
+        }
+
+    # Reuse the battle-tested tool-result sanitizer by wrapping as an
+    # Anthropic-style block, then convert the (possibly shrunk) result.
+    sanitized = sanitize_image_block(
+        {
+            "type": "image",
+            "source": {"type": "base64", "media_type": media_type, "data": b64},
+        },
+        max_dim=max_dim,
+        max_bytes=max_bytes,
+        quality_steps=quality_steps,
+    )
+    if sanitized.get("type") != "image":
+        # Sanitizer replaced it with a text drop/error block — pass through.
+        return sanitized
+
+    src = sanitized.get("source") or {}
+    out_media = src.get("media_type") or media_type
+    out_data = src.get("data") or b64
+    return {
+        "type": "image_url",
+        "image_url": {"url": f"data:{out_media};base64,{out_data}"},
+    }
+
+
+def image_url_to_anthropic_block(part: Dict[str, Any]) -> Dict[str, Any] | None:
+    """Convert an OpenAI-style ``image_url`` block to an Anthropic ``image``
+    block. Returns ``None`` if the part isn't a data-URL image_url.
+
+    Anthropic's Messages API has no ``image_url`` type; it requires
+    ``{"type":"image","source":{"type":"base64","media_type":…,"data":…}}``
+    (or a ``url`` source). URL-only ``image_url`` values are mapped to a URL
+    source; malformed values yield ``None`` so the caller can drop them.
+    """
+    if not isinstance(part, dict) or part.get("type") != "image_url":
+        return None
+    url = ((part.get("image_url") or {}).get("url")) or ""
+    if not isinstance(url, str) or not url:
+        return None
+    if url.startswith("data:") and ";base64," in url:
+        header, b64 = url[5:].split(";base64,", 1)
+        media_type = header.split(";", 1)[0].strip() or "image/png"
+        return {
+            "type": "image",
+            "source": {"type": "base64", "media_type": media_type, "data": b64},
+        }
+    if url.startswith(("http://", "https://")):
+        return {"type": "image", "source": {"type": "url", "url": url}}
+    return None
+
+
 def sanitize_tool_output(
     output: Union[List[Dict[str, Any]], str],
     *,
@@ -277,6 +377,8 @@ __all__ = [
     "is_pillow_available",
     "sanitize_image_block",
     "sanitize_tool_output",
+    "build_user_image_block",
+    "image_url_to_anthropic_block",
     "DEFAULT_MAX_DIM",
     "DEFAULT_MAX_BYTES",
     "DEFAULT_QUALITY_STEPS",

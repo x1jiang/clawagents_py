@@ -669,6 +669,32 @@ def _chat_tools_to_responses_tools(
     return out or None
 
 
+def _content_to_responses_parts(content: list[Any], role: str) -> list[dict[str, Any]]:
+    """Convert Chat Completions-style content parts to Responses API parts.
+
+    User-image attachments travel internally as ``{"type": "image_url"}``
+    blocks; the Responses endpoint rejects that type — it wants
+    ``input_text`` / ``input_image`` parts with ``image_url`` as a plain
+    string. Assistant history text maps to ``output_text``. Unconvertible
+    parts are dropped so one stray block can't 400 the whole request.
+    """
+    text_type = "output_text" if role == "assistant" else "input_text"
+    parts: list[dict[str, Any]] = []
+    for p in content:
+        if not isinstance(p, dict):
+            continue
+        ptype = p.get("type")
+        if ptype in ("text", "input_text", "output_text"):
+            parts.append({"type": text_type, "text": p.get("text", "") or ""})
+        elif ptype == "input_image" and role != "assistant":
+            parts.append(p)
+        elif ptype == "image_url" and role != "assistant":
+            url = ((p.get("image_url") or {}).get("url")) or ""
+            if isinstance(url, str) and url:
+                parts.append({"type": "input_image", "image_url": url})
+    return parts
+
+
 def _messages_to_responses_input(
     messages: list[dict[str, Any]],
 ) -> tuple[str | None, list[dict[str, Any]]]:
@@ -713,6 +739,12 @@ def _messages_to_responses_input(
             content = m.get("content")
             if content is None:
                 content = ""
+            if isinstance(content, list):
+                content = _content_to_responses_parts(content, role)
+                if not content:
+                    # Nothing convertible survived (unknown block types); an
+                    # empty content list would 400 the request — drop the message.
+                    continue
             items.append({"role": role, "content": content})
             continue
         # Unknown roles: pass through if they look like Responses items.
@@ -2005,6 +2037,32 @@ except ImportError:
     _HAS_ANTHROPIC = False
 
 
+def _anthropic_message_content(content: Any) -> Any:
+    """Shape a user/assistant message's content for Anthropic's Messages API.
+
+    Anthropic has no ``image_url`` content type — convert the canonical
+    OpenAI-style image blocks (used for user-message images) into
+    ``image``/``source`` blocks. Without this an attached image reaches Claude
+    as an invalid block and the request 400s. Non-list content and non-image
+    blocks pass through unchanged; malformed image_url parts are dropped.
+    """
+    if not isinstance(content, list):
+        return content
+    if not any(isinstance(p, dict) and p.get("type") == "image_url" for p in content):
+        return content
+    from clawagents.media.images import image_url_to_anthropic_block
+
+    converted: list[Any] = []
+    for part in content:
+        if isinstance(part, dict) and part.get("type") == "image_url":
+            block = image_url_to_anthropic_block(part)
+            if block is not None:
+                converted.append(block)
+        else:
+            converted.append(part)
+    return converted
+
+
 class AnthropicProvider(LLMProvider):
     name = "anthropic"
 
@@ -2063,7 +2121,9 @@ class AnthropicProvider(LLMProvider):
                 api_messages.append({"role": "assistant", "content": content_blocks})
             else:
                 role = "assistant" if m.role == "assistant" else "user"
-                api_messages.append({"role": role, "content": m.content})
+                api_messages.append(
+                    {"role": role, "content": _anthropic_message_content(m.content)}
+                )
 
         kwargs: dict[str, Any] = {
             "model": self.model,
@@ -2352,6 +2412,50 @@ class BedrockProvider(AnthropicProvider):
         self._temperature = config.temperature
 
 
+def _converse_content_blocks(content: Any) -> list[dict[str, Any]]:
+    """Convert message content into Bedrock Converse content blocks.
+
+    Strings become a single text block. List content (the internal
+    OpenAI-style multimodal shape) maps text parts to text blocks and
+    data-URL ``image_url`` parts to native Converse image blocks with
+    decoded bytes. Unconvertible parts are dropped — letting the old
+    ``str(list)`` fallback run would dump megabytes of base64 into the
+    prompt as literal text.
+    """
+    if content is None or isinstance(content, str):
+        return [{"text": content or ""}]
+    if not isinstance(content, list):
+        return [{"text": str(content)}]
+    import base64 as _b64
+    import binascii as _binascii
+
+    blocks: list[dict[str, Any]] = []
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        ptype = part.get("type")
+        if ptype == "text":
+            text = part.get("text") or ""
+            if text:
+                blocks.append({"text": text})
+        elif ptype == "image_url":
+            url = ((part.get("image_url") or {}).get("url")) or ""
+            if not (isinstance(url, str) and url.startswith("data:") and ";base64," in url):
+                continue
+            header, b64 = url[5:].split(";base64,", 1)
+            fmt = header.split(";", 1)[0].strip().lower().removeprefix("image/")
+            if fmt == "jpg":
+                fmt = "jpeg"
+            if fmt not in ("png", "jpeg", "gif", "webp"):
+                continue
+            try:
+                raw = _b64.b64decode(b64, validate=True)
+            except (_binascii.Error, ValueError):
+                continue
+            blocks.append({"image": {"format": fmt, "source": {"bytes": raw}}})
+    return blocks or [{"text": ""}]
+
+
 class BedrockConverseProvider(LLMProvider):
     """Non-Claude Bedrock models (Nova, Llama, GPT-OSS, …) via Converse API.
 
@@ -2400,13 +2504,15 @@ class BedrockConverseProvider(LLMProvider):
             if m.role == "system":
                 system_parts.append(m.content if isinstance(m.content, str) else str(m.content))
                 continue
-            role = "assistant" if m.role == "assistant" else "user"
-            text = m.content if isinstance(m.content, str) else str(m.content)
             if m.role == "tool":
-                text = f"[tool {m.tool_call_id or ''}] {text}"
-                role = "user"
+                text = m.content if isinstance(m.content, str) else str(m.content)
+                converse_messages.append(
+                    {"role": "user", "content": [{"text": f"[tool {m.tool_call_id or ''}] {text}"}]}
+                )
+                continue
+            role = "assistant" if m.role == "assistant" else "user"
             converse_messages.append(
-                {"role": role, "content": [{"text": text or ""}]}
+                {"role": role, "content": _converse_content_blocks(m.content)}
             )
 
         kwargs: dict[str, Any] = {
