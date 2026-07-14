@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.13.0-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.13.1-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -22,8 +22,8 @@ This repo is the **Python framework** (`pip install clawagents`). Ready-made cli
 | Product | Latest | What it is | Link |
 |---------|--------|------------|------|
 | **ClawAgents Desktop** | **v0.2.4** | Native macOS app — project chats, file editor, SSH remotes, Settings (incl. AWS Bedrock), Developer ID signed + notarized | [Repo](https://github.com/x1jiang/clawagents-desktop) · [Download DMG](https://github.com/x1jiang/clawagents-desktop/releases/tag/v0.2.4) |
-| **ClawAgents for VS Code / Cursor** | **v1.0.35** | Editor extension — chat, tools, Bedrock, ATLAS opt-in, Effort / Wire API | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Release + VSIX](https://github.com/x1jiang/clawagents-vscode/releases/tag/v1.0.35) |
-| **Python package** | **v6.13.0** | This library — `pip install -U 'clawagents[bedrock]'` · ATLAS via `atlas-skill` (GitHub) | [PyPI](https://pypi.org/project/clawagents/6.13.0/) · [Release](https://github.com/x1jiang/clawagents_py/releases/tag/v6.13.0) |
+| **ClawAgents for VS Code / Cursor** | **v1.0.36** | Editor extension — chat, tools, Bedrock, ATLAS opt-in, Effort / Wire API | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Release + VSIX](https://github.com/x1jiang/clawagents-vscode/releases/tag/v1.0.36) |
+| **Python package** | **v6.13.1** | This library — `pip install -U 'clawagents[bedrock]'` · ATLAS via `atlas-skill` (GitHub) | [PyPI](https://pypi.org/project/clawagents/6.13.1/) · [Release](https://github.com/x1jiang/clawagents_py/releases/tag/v6.13.1) |
 | **TypeScript package** | **v6.12.13** | Node/TS sibling — `npm install git+https://github.com/x1jiang/clawagents.git` | [Repo](https://github.com/x1jiang/clawagents) |
 
 ## Installation
@@ -39,7 +39,13 @@ pip install -U 'clawagents[all]'       # All providers + tiktoken
 pip install 'atlas-skill @ git+https://github.com/multi-agent-systems-failure-taxonomy/ATLAS.git@3a917f3e0b993e3bfd77f652b013193aed167964'
 ```
 
-> **Version 6.13.0** — ATLAS adaptive failure-taxonomy integration (July 2026).
+> **Version 6.13.1** — ATLAS completion authority hardened (July 2026).
+
+### New In v6.13.1
+
+- **ATLAS fail-closed** — reflection-harvest and final-gate exceptions abort the run instead of silently releasing an answer.
+- **Pinned ATLAS revision** — install docs and hints pin `atlas-skill` to commit `3a917f3e0b993e3bfd77f652b013193aed167964`.
+- **Companion** — VS Code **1.0.36**.
 
 ### New In v6.13.0
 
