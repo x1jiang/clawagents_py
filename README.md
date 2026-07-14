@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.12.12-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.12.13-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -22,9 +22,9 @@ This repo is the **Python framework** (`pip install clawagents`). Ready-made cli
 | Product | Latest | What it is | Link |
 |---------|--------|------------|------|
 | **ClawAgents Desktop** | **v0.2.4** | Native macOS app — project chats, file editor, SSH remotes, Settings (incl. AWS Bedrock), Developer ID signed + notarized | [Repo](https://github.com/x1jiang/clawagents-desktop) · [Download DMG](https://github.com/x1jiang/clawagents-desktop/releases/tag/v0.2.4) |
-| **ClawAgents for VS Code / Cursor** | **v1.0.31** | Editor extension — chat, tools, Bedrock, image/PDF/DOCX attach, Effort / Wire API | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Release + VSIX](https://github.com/x1jiang/clawagents-vscode/releases/tag/v1.0.31) |
-| **Python package** | **v6.12.12** | This library — `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/6.12.12/) · [Release](https://github.com/x1jiang/clawagents_py/releases/tag/v6.12.12) |
-| **TypeScript package** | **v6.12.12** | Node/TS sibling — `npm install git+https://github.com/x1jiang/clawagents.git` | [Repo](https://github.com/x1jiang/clawagents) |
+| **ClawAgents for VS Code / Cursor** | **v1.0.32** | Editor extension — chat, tools, Bedrock, image/PDF/DOCX attach, Effort / Wire API | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Release + VSIX](https://github.com/x1jiang/clawagents-vscode/releases/tag/v1.0.32) |
+| **Python package** | **v6.12.13** | This library — `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/6.12.13/) · [Release](https://github.com/x1jiang/clawagents_py/releases/tag/v6.12.13) |
+| **TypeScript package** | **v6.12.13** | Node/TS sibling — `npm install git+https://github.com/x1jiang/clawagents.git` | [Repo](https://github.com/x1jiang/clawagents) |
 
 ## Installation
 
@@ -36,7 +36,15 @@ pip install -U 'clawagents[bedrock]'   # + Amazon Bedrock (Claude via IAM + Nova
 pip install -U 'clawagents[all]'       # All providers + tiktoken
 ```
 
-> **Version 6.12.12** — Multimodal user-message attachments (July 2026). Cumulative with 6.12.4–6.12.11.
+> **Version 6.12.13** — Skill use complete, relevant, and contained (July 2026). Cumulative with 6.12.4–6.12.12.
+
+### New In v6.12.13
+
+- **Skill retrieval** — high-recall intent coverage (aliases / triggers / anti-triggers / morphology) instead of fixed token-saving cutoffs; short follow-ups inherit prior intent.
+- **Paged `use_skill`** — contiguous, content-hash-bound pages; no data-plane tools until every page is read.
+- **Composed `allowed-tools`** — intersecting boundaries only (cannot widen authority by loading another skill).
+- **Workshop hardening** — path/content validation on writes.
+- **Companion** — VS Code **1.0.32**; TypeScript **6.12.13**.
 
 ### New In v6.12.12
 
