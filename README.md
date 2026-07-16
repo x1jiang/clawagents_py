@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.17.4-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.17.5-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -23,7 +23,7 @@ This repo is the **Python framework** (`pip install clawagents`). Ready-made cli
 |---------|--------|------------|------|
 | **ClawAgents Desktop** | **v0.2.4** | Native macOS app — project chats, file editor, SSH remotes, Settings (incl. AWS Bedrock), Developer ID signed + notarized | [Repo](https://github.com/x1jiang/clawagents-desktop) · [Download DMG](https://github.com/x1jiang/clawagents-desktop/releases/tag/v0.2.4) |
 | **ClawAgents for VS Code / Cursor** | **v1.0.47** | Editor extension — chat, tools, Goal redirect, hunk review, session rewind, voice dictation, Bedrock | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Release + VSIX](https://github.com/x1jiang/clawagents-vscode/releases/tag/v1.0.47) |
-| **Python package** | **v6.17.4** | This library — Act mode no longer inherits Goal verifier · `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/) · [Release](https://github.com/x1jiang/clawagents_py/releases) |
+| **Python package** | **v6.17.5** | This library — skill allowed-tools / grep / apply_patch tool-error fixes · `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/) · [Release](https://github.com/x1jiang/clawagents_py/releases) |
 | **TypeScript package** | **v6.12.13** | Node/TS sibling — `npm install git+https://github.com/x1jiang/clawagents.git` | [Repo](https://github.com/x1jiang/clawagents) |
 
 ## Installation
@@ -36,9 +36,16 @@ pip install -U 'clawagents[bedrock]'   # + Amazon Bedrock (Claude via IAM + Nova
 pip install -U 'clawagents[all]'       # All providers + tiktoken
 ```
 
+> **Version 6.17.5** — Skill allowed-tools / grep / apply_patch tool-error fixes (July 2026).
+
 > **Version 6.17.4** — Act mode no longer inherits Goal verifier from a prior Goal run (July 2026).
 
 > **Version 6.17.3** — Tier-2 wiring: hooks, hunk attribution, conversation rewind, bwrap secrets (July 2026).
+
+### New In v6.17.5
+- **Skills:** Claude YAML `allowed-tools:` block lists parse correctly; `Bash`/`Read`/… map to clawagents tools
+- **grep:** `path: "*.js"` treated as glob filter (not a missing path)
+- **apply_patch:** clear error for unsupported `*** Begin Patch` envelopes
 
 ### New In v6.17.4
 - **Act ≠ Goal** — Goal tools, standing reminder, and final verifier only run when `goal_mode=True`. Switching to Act/Plan pauses an active disk-backed goal.
@@ -1525,6 +1532,11 @@ parity sweep.
 ---
 
 ## Changelog
+
+### v6.17.5 — Tool error regressions (July 2026)
+
+- Claude skill `allowed-tools` YAML lists + aliases
+- grep glob-as-path; apply_patch Begin Patch guidance
 
 ### v6.17.4 — Act vs Goal isolation (July 2026)
 

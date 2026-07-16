@@ -285,13 +285,22 @@ class GrepTool:
 
     async def execute(self, args: Dict[str, Any]) -> ToolResult:
         sb = self._sb
-        target = sb.safe_path(str(args.get("path", "")))
+        raw_path = str(args.get("path", "") or "").strip()
         pattern = str(args.get("pattern", ""))
         glob_filter = str(args.get("glob_filter", "*"))
         recursive = bool(args.get("recursive", False))
 
         if not pattern:
             return ToolResult(success=False, output="", error="No pattern provided")
+
+        # Models often pass "*.js" as path; treat that as cwd + glob_filter.
+        if raw_path and any(ch in raw_path for ch in "*?[]") and "/" not in raw_path.replace("\\", "/"):
+            if glob_filter in ("", "*"):
+                glob_filter = raw_path
+            raw_path = "."
+            recursive = True
+
+        target = sb.safe_path(raw_path or ".")
 
         try:
             try:

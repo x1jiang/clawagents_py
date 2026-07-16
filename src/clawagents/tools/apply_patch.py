@@ -110,7 +110,9 @@ class ApplyPatchTool:
     description = (
         "Apply a surgical edit to a file using either Aider-style "
         "<<<<<<< SEARCH / ======= / >>>>>>> REPLACE fences, or a unified diff hunk. "
-        "Prefer this over write_file for localized changes."
+        "Prefer this over write_file for localized changes. "
+        "Do not send Cursor/Codex '*** Begin Patch' envelopes — use SEARCH/REPLACE "
+        "or a plain unified diff body with @@ hunks."
     )
     parameters = {
         "path": {"type": "string", "description": "File to patch", "required": True},
@@ -153,6 +155,16 @@ class ApplyPatchTool:
                 return ToolResult(
                     success=True,
                     output=f"Applied {applied} SEARCH/REPLACE hunk(s) to {file_path}",
+                )
+            if "*** Begin Patch" in patch or "*** Update File:" in patch:
+                return ToolResult(
+                    success=False,
+                    output="",
+                    error=(
+                        "unsupported patch envelope (*** Begin Patch). "
+                        "Use <<<<<<< SEARCH / ======= / >>>>>>> REPLACE fences "
+                        "or a unified diff with @@ hunks, or call edit_file instead."
+                    ),
                 )
             ok, new_content, msg = _apply_unified_diff(content, patch)
             if not ok:

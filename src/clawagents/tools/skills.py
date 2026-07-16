@@ -178,7 +178,35 @@ def _fallback_description(body: str) -> str:
 
 def _parse_inline_list(raw: str) -> List[str]:
     cleaned = re.sub(r'[\[\]"\']', "", raw)
-    return [x.strip() for x in re.split(r"[\s,]+", cleaned) if x.strip()]
+    # Drop YAML list bullets left over from `allowed-tools: - Bash` / bad parses.
+    return [
+        x.strip()
+        for x in re.split(r"[\s,]+", cleaned)
+        if x.strip() and x.strip() != "-"
+    ]
+
+
+# Claude Code / Codex skill frontmatter → clawagents tool names.
+_ALLOWED_TOOL_ALIASES: dict[str, str] = {
+    "bash": "execute",
+    "shell": "execute",
+    "run": "execute",
+    "read": "read_file",
+    "write": "write_file",
+    "edit": "edit_file",
+    "multiedit": "edit_file",
+    "grep": "grep",
+    "glob": "glob",
+    "ls": "list_dir",
+    "listdir": "list_dir",
+    "agent": "task",
+    "task": "task",
+    "askuserquestion": "ask_user",
+    "askuser": "ask_user",
+    "websearch": "web_search",
+    "webfetch": "web_fetch",
+    "notebookedit": "edit_file",
+}
 
 
 def _parse_requires_block(yaml_content: str) -> Tuple[Optional[str], Optional[List[str]], Optional[List[str]]]:
@@ -298,11 +326,29 @@ def parse_skill_file(content: str, file_path: str) -> Skill:
 
         description = _parse_frontmatter_description(yaml_content)
 
-        # Parse allowed-tools: space/comma-delimited string (optionally YAML-ish
-        # brackets/quotes, consistent with requires list parsing).
-        tools_match = re.search(r"^allowed-tools:\s*(.*)$", yaml_content, re.MULTILINE)
-        if tools_match:
-            allowed_tools = _parse_inline_list(tools_match.group(1))
+        # Parse allowed-tools: YAML block list (`- Bash`) or inline list.
+        # IMPORTANT: do not use `\s*` after the colon — it eats the newline and
+        # turns the first bullet into the bogus tokens "-", "Bash".
+        allowed_tools = None
+        block_tools = re.search(
+            r"^allowed-tools:[ \t]*\n((?:[ \t]+-[^\n]*\n?)+)",
+            yaml_content,
+            re.MULTILINE,
+        )
+        if block_tools:
+            allowed_tools = [
+                item.strip().strip("\"'")
+                for item in re.findall(
+                    r"^[ \t]+-\s+(.+)$", block_tools.group(1), re.MULTILINE
+                )
+                if item.strip().strip("\"'")
+            ]
+        else:
+            tools_match = re.search(
+                r"^allowed-tools:[ \t]*(.+)$", yaml_content, re.MULTILINE
+            )
+            if tools_match:
+                allowed_tools = _parse_inline_list(tools_match.group(1))
 
         # Only the literal true counts (Claude Code boolean parsing rule).
         dmi_match = re.search(
@@ -1184,6 +1230,7 @@ def create_skill_tools(
             effective_allowed_tools = (
                 list(skill.allowed_tools) if skill.allowed_tools is not None else None
             )
+            skill_unknown_tools: list[str] = []
             if effective_allowed_tools is not None:
                 control_keys = {_norm_skill_key("use_skill"), _norm_skill_key("list_skills")}
                 if available_tool_names is not None:
@@ -1194,15 +1241,25 @@ def create_skill_tools(
                     canonical: list[str] = []
                     unknown: list[str] = []
                     for declared in effective_allowed_tools:
-                        key = _norm_skill_key(declared)
+                        raw = declared.strip()
+                        if not raw or raw == "-":
+                            continue
+                        # Claude-style "Bash(git *)" → outer tool name only.
+                        if "(" in raw and raw.endswith(")"):
+                            raw = raw.split("(", 1)[0].strip()
+                        key = _norm_skill_key(raw)
                         if key in control_keys:
                             continue
+                        alias = _ALLOWED_TOOL_ALIASES.get(key)
+                        if alias is not None:
+                            key = _norm_skill_key(alias)
                         resolved = available_map.get(key)
                         if resolved is None:
                             unknown.append(declared)
                         elif resolved not in canonical:
                             canonical.append(resolved)
-                    if unknown:
+                    if unknown and not canonical:
+                        # Nothing mapped — hard fail (keeps bogus-tool regression).
                         return ToolResult(
                             success=False,
                             output="",
@@ -1211,12 +1268,16 @@ def create_skill_tools(
                                 + ", ".join(unknown)
                             ),
                         )
+                    # Claude skills often declare Agent/WebSearch/… — keep what
+                    # we know and note the rest so the agent can adapt.
                     effective_allowed_tools = canonical
+                    skill_unknown_tools = unknown
                 else:
                     effective_allowed_tools = [
                         tool_name
                         for tool_name in effective_allowed_tools
                         if _norm_skill_key(tool_name) not in control_keys
+                        and tool_name.strip() not in ("", "-")
                     ]
 
             parts = [f"# Skill: {skill.name}"]
@@ -1224,6 +1285,11 @@ def create_skill_tools(
                 parts.append(
                     "Active allowed-tools boundary: "
                     + (", ".join(effective_allowed_tools) or "no data-plane tools")
+                )
+            if skill_unknown_tools:
+                parts.append(
+                    "Note: ignored host-only allowed-tools (no clawagents equivalent): "
+                    + ", ".join(skill_unknown_tools)
                 )
             # Resources referenced by the skill body (scripts/…, references/…)
             # resolve relative to this directory — without it the agent cannot
