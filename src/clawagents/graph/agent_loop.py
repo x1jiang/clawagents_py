@@ -1518,16 +1518,21 @@ def _goal_llm_complete(run_context: Any, llm: LLMProvider):
 
 
 def _drain_interject(run_context: Any) -> str | None:
-    if run_context is None:
+    """Legacy single-string drain — prefer :func:`drain_interject_messages`."""
+    from clawagents.interjection import drain_interjects
+
+    parts = drain_interjects(run_context)
+    if not parts:
         return None
-    meta = getattr(run_context, "_metadata", None)
-    if not isinstance(meta, dict):
-        return None
-    pending = meta.pop("pending_interject", None)
-    if pending is None:
-        return None
-    text = str(pending).strip()
-    return text or None
+    # Compat: join only if caller expects one blob (prefer multi-message path).
+    return parts[0] if len(parts) == 1 else "\n\n".join(parts)
+
+
+def _drain_interject_messages(run_context: Any) -> list[LLMMessage]:
+    """Each pending interject → one standalone synthetic user turn (Grok parity)."""
+    from clawagents.interjection import drain_interjects
+
+    return [LLMMessage(role="user", content=text) for text in drain_interjects(run_context)]
 
 
 _GOAL_REMINDER_START = "\n\n<!--claw:goal-reminder-->\n"
@@ -2917,20 +2922,22 @@ async def run_agent_graph(
             # reported "1 iteration" in events and the session writer.
             state.iterations += 1
 
-            # Mid-turn user redirect (VS Code / host sets pending_interject).
+            # Mid-turn user redirect — each entry is its own synthetic user turn.
             try:
                 from clawagents.config.features import is_enabled as _feat_ij
 
                 if _feat_ij("mid_turn_interject"):
-                    _ij = _drain_interject(run_context)
-                    if _ij:
-                        messages.append(
-                            LLMMessage(
-                                role="user",
-                                content=f"[User redirect mid-turn]\n{_ij}",
-                            )
+                    _ij_msgs = _drain_interject_messages(run_context)
+                    if _ij_msgs:
+                        messages.extend(_ij_msgs)
+                        emit(
+                            "context",
+                            {
+                                "message": (
+                                    f"mid-turn interjection applied ({len(_ij_msgs)} turn(s))"
+                                )
+                            },
                         )
-                        emit("context", {"message": "mid-turn interjection applied"})
             except Exception:
                 logger.debug("mid-turn interject drain failed", exc_info=True)
 
@@ -4798,4 +4805,17 @@ async def run_agent_graph(
         "elapsed": elapsed,
         "usage": usage.to_dict(),
     })
+
+    # Stranded interjects (arrived after last drain / on cancel) → host queues them.
+    try:
+        from clawagents.interjection import take_stranded_interjects
+
+        stranded = take_stranded_interjects(run_context)
+        if stranded:
+            if run_context is not None and isinstance(getattr(run_context, "_metadata", None), dict):
+                run_context._metadata["stranded_interjects"] = list(stranded)
+            emit("stranded_interject", {"prompts": stranded, "count": len(stranded)})
+    except Exception:
+        logger.debug("stranded interject flush failed", exc_info=True)
+
     return state

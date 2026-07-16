@@ -231,8 +231,48 @@ async def _with_retry(
 
     When ``policy`` is ``None``, behaviour matches the pre-existing
     ``_is_retryable`` heuristic so providers that don't opt-in keep working.
+
+    When ``provider_circuit_breaker`` is enabled, a per-tag breaker admits
+    half-open probes and reclaims abandoned probe leases after ``open_duration``.
     """
     last_error: BaseException | None = None
+    breaker = None
+    try:
+        from clawagents.config.features import is_enabled as _feat_cb
+
+        if _feat_cb("provider_circuit_breaker"):
+            from clawagents.circuit_breaker import (
+                BreakerOpen,
+                Outcome,
+                get_provider_breaker,
+            )
+
+            breaker = get_provider_breaker(tag)
+    except Exception:
+        breaker = None
+
+    async def _guarded() -> T:
+        if breaker is not None:
+            try:
+                breaker.check()
+            except BreakerOpen as open_exc:
+                delay = max(0.05, float(open_exc.retry_after) or 0.05)
+                logger.warning(
+                    "  [%s] circuit breaker open — backing off %.2fs",
+                    tag,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+                breaker.check()
+        try:
+            result = await fn()
+        except Exception as exc:
+            if breaker is not None and _is_retryable(exc):
+                breaker.record(Outcome.FAILURE)
+            raise
+        if breaker is not None:
+            breaker.record(Outcome.SUCCESS)
+        return result
 
     if policy is None:
         for attempt in range(_MAX_RETRIES + 1):
@@ -244,9 +284,18 @@ async def _with_retry(
                 )
                 await asyncio.sleep(delay)
             try:
-                return await fn()
+                return await _guarded()
             except Exception as exc:
                 last_error = exc
+                if breaker is not None:
+                    try:
+                        from clawagents.circuit_breaker import BreakerOpen as _BO
+
+                        if isinstance(exc, _BO):
+                            await asyncio.sleep(max(0.05, float(exc.retry_after) or 0.05))
+                            continue
+                    except Exception:
+                        pass
                 if not _is_retryable(exc):
                     break
         raise last_error  # type: ignore[misc]
@@ -256,10 +305,18 @@ async def _with_retry(
     attempt = 0
     while attempt < max_attempts:
         try:
-            return await fn()
+            return await _guarded()
         except Exception as exc:
             last_error = exc
             attempt += 1
+            try:
+                from clawagents.circuit_breaker import BreakerOpen as _BO
+
+                if isinstance(exc, _BO):
+                    await asyncio.sleep(max(0.05, exc.retry_after))
+                    continue
+            except Exception:
+                pass
             try:
                 descriptor = policy.classify(exc)
                 should = policy.should_retry(exc, attempt, descriptor=descriptor)

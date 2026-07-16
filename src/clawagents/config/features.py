@@ -89,6 +89,7 @@ _FEATURE_DEFAULTS: dict[str, str] = {
     "session_rewind":       "1",   # Rewind to prompt N (files + conversation)
     "hook_taxonomy":        "1",   # Expanded hook events + webhook SSRF guard
     "sandbox_fail_closed":  "0",   # Refuse soft-fallback; secret path deny binds
+    "provider_circuit_breaker": "1",  # Half-open probe-lease reclaim on LLM transport
 }
 
 
