@@ -176,10 +176,85 @@ def _check(label: str, ok: bool, detail: str = "") -> bool:
     return ok
 
 
+def _probe_other_interpreters(current_exe: str, current_ver: str) -> list[str]:
+    """Find other python* binaries on PATH with a different clawagents version."""
+    import shutil
+
+    warnings: list[str] = []
+    seen: set[str] = set()
+    try:
+        seen.add(os.path.realpath(current_exe))
+    except OSError:
+        seen.add(current_exe)
+
+    names = ("python3", "python", "python3.13", "python3.12", "python3.11")
+    for name in names:
+        resolved = shutil.which(name)
+        if not resolved:
+            continue
+        try:
+            real = os.path.realpath(resolved)
+        except OSError:
+            real = resolved
+        if real in seen:
+            continue
+        seen.add(real)
+        try:
+            import subprocess
+
+            out = subprocess.run(
+                [
+                    resolved,
+                    "-c",
+                    "import clawagents,sys; "
+                    "print(getattr(clawagents,'__version__','?')); "
+                    "print(getattr(clawagents,'__file__','?'))",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=12,
+            )
+        except Exception as exc:
+            warnings.append(f"{resolved}: probe failed ({exc})")
+            continue
+        if out.returncode != 0:
+            continue
+        lines = [ln.strip() for ln in (out.stdout or "").splitlines() if ln.strip()]
+        other_ver = lines[0] if lines else "?"
+        if other_ver == current_ver:
+            continue
+        warnings.append(f"{resolved}: clawagents {other_ver} (this process: {current_ver})")
+    return warnings
+
+
 def cmd_doctor():
     """Check configuration health and report issues."""
     sys.stderr.write("\nClawAgents Doctor\n" + "=" * 40 + "\n\n")
     issues = 0
+
+    # 0. Install identity (catches multi-Python drift)
+    import clawagents as _pkg
+
+    pkg_ver = getattr(_pkg, "__version__", "?")
+    pkg_file = getattr(_pkg, "__file__", "?")
+    _check("Installed package", True, f"clawagents {pkg_ver}")
+    _check("Interpreter", True, sys.executable)
+    _check("Package path", True, str(pkg_file))
+    if pkg_file and pkg_file != "?" and "site-packages" not in str(pkg_file) and "/src/clawagents/" in str(pkg_file).replace("\\", "/"):
+        _check(
+            "Editable / source checkout",
+            True,
+            "importing from a source tree — shell `python3` may still use a different install",
+        )
+    for warn in _probe_other_interpreters(sys.executable, str(pkg_ver)):
+        _check("PATH interpreter drift", False, warn)
+        issues += 1
+        sys.stderr.write(
+            "      Fix: upgrade that interpreter, or set VS Code clawagents.pythonPath "
+            "to this executable and Restart Sidecar.\n"
+            f"      Example: \"{warn.split(':', 1)[0]}\" -m pip install -U "
+            f"'clawagents[gemini,anthropic,bedrock,mcp]>={pkg_ver},<7'\n"
+        )
 
     # 1. Load config first (triggers .env discovery)
     import clawagents.config.config as _cfg
