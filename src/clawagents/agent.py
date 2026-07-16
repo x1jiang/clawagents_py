@@ -164,6 +164,7 @@ class ClawAgent:
         self.action_mode = action_mode if action_mode in ("tools", "code") else "tools"
         self.approval_handler = approval_handler
         self.require_approval_tools = list(require_approval_tools or [])
+        self.goal_mode = False
 
     async def invoke(
         self,
@@ -247,6 +248,8 @@ class ClawAgent:
         store = getattr(self, "skill_store", None)
         if store is not None:
             run_context._metadata["skill_store"] = store
+        # Gate Goal reminder + final verifier on this turn's mode (Act ≠ Goal).
+        run_context._metadata["goal_mode"] = bool(getattr(self, "goal_mode", False))
 
         return await run_agent_graph(
             task=task,
@@ -1006,7 +1009,11 @@ def create_claw_agent(
     from clawagents.config.features import is_enabled as _feat_on
     from clawagents.goal.tools import create_goal_tools
 
-    if _feat_on("goal_autopilot"):
+    # Goal tools + verifier only when UI/API explicitly enables Goal mode.
+    # Otherwise Act/Plan turns still saw start_goal / final-gate verify because
+    # goal_autopilot defaults on and an active `.clawagents/goal/state.json`
+    # from a prior Goal run kept hijacking the loop.
+    if goal_mode and _feat_on("goal_autopilot"):
         for t in create_goal_tools():
             if registry.get(t.name) is None:
                 registry.register(t)
@@ -1096,6 +1103,7 @@ def create_claw_agent(
         approval_handler=approval_handler,
         require_approval_tools=require_approval_tools,
     )
+    agent.goal_mode = bool(goal_mode)
     if skill_store is not None:
         agent.skill_store = skill_store  # type: ignore[attr-defined]
     agent._permission_engine = _perm_engine  # type: ignore[attr-defined]

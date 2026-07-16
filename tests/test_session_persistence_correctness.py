@@ -59,29 +59,43 @@ class _CompactingMockLLM:
         self.summarize_calls = 0
 
     async def chat(self, messages, on_chunk=None, cancel_event=None, tools=None):
-        # Both summarizer engines must be recognized: the legacy chunk
-        # summarizer and the compress_messages_safe summarization engine
-        # (v6.10.6+). Otherwise their calls consume the scripted main-turn
-        # responses and the test exercises a different flow than intended.
-        is_summarize = any(
+        # Side-channel LLM calls (compaction / memory flush / dream) must not
+        # consume the scripted main-turn responses — otherwise this test
+        # never exercises the tool round it asserts on.
+        side_channel_prefixes = (
+            "You are summarizing a chunk",
+            "You are a summarization engine",
+            "Your task is to produce a faithful, concise summary",
+            "Extract durable project memories from this recent conversation",
+            "You are consolidating agent session memories into a durable MEMORY.md",
+        )
+        is_side_channel = any(
             isinstance(m.content, str)
-            and (
-                m.content.startswith("You are summarizing a chunk")
-                or m.content.startswith("You are a summarization engine")
-                or m.content.startswith(
-                    "Your task is to produce a faithful, concise summary"
-                )
-            )
+            and m.content.startswith(side_channel_prefixes)
             for m in messages
         )
-        if is_summarize:
-            self.summarize_calls += 1
-            # Long enough to pass full-replace degenerate-summary gate (≥500 chars).
-            return LLMResponse(
-                content="<summary>\n" + ("COMPACTION_SUMMARY detail " * 40) + "\n</summary>",
-                model="mock",
-                tokens_used=5,
+        if is_side_channel:
+            is_summarize = any(
+                isinstance(m.content, str)
+                and (
+                    m.content.startswith("You are summarizing a chunk")
+                    or m.content.startswith("You are a summarization engine")
+                    or m.content.startswith(
+                        "Your task is to produce a faithful, concise summary"
+                    )
+                )
+                for m in messages
             )
+            if is_summarize:
+                self.summarize_calls += 1
+                # Long enough to pass full-replace degenerate-summary gate (≥500 chars).
+                return LLMResponse(
+                    content="<summary>\n" + ("COMPACTION_SUMMARY detail " * 40) + "\n</summary>",
+                    model="mock",
+                    tokens_used=5,
+                )
+            # memory flush / dream consolidation — acknowledge without tools
+            return LLMResponse(content="NO_REPLY", model="mock", tokens_used=1)
 
         self.main_calls += 1
         if self.main_calls == 1:

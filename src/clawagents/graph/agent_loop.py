@@ -1573,6 +1573,9 @@ def _sync_goal_reminder_into_system(
         from clawagents.config.features import is_enabled as _feat_goal_sys
         from clawagents.goal import get_goal_tracker, goal_system_reminder
 
+        meta = getattr(run_context, "_metadata", None)
+        if not (isinstance(meta, dict) and meta.get("goal_mode")):
+            return
         if not _feat_goal_sys("goal_autopilot"):
             return
         tracker = get_goal_tracker(run_context)
@@ -2532,7 +2535,14 @@ async def run_agent_graph(
                 get_goal_tracker,
             )
 
-            if _feat_goal_bind("goal_autopilot") and get_goal_tracker(run_context) is None:
+            # Only bind the disk-backed goal tracker in Goal mode. Act/Plan must
+            # not inherit an active `.clawagents/goal/state.json` from a prior run.
+            _want_goal = bool(meta.get("goal_mode"))
+            if (
+                _want_goal
+                and _feat_goal_bind("goal_autopilot")
+                and get_goal_tracker(run_context) is None
+            ):
                 attach_goal_to_run_context(
                     run_context, GoalTracker(meta["workspace"])
                 )
@@ -2666,7 +2676,11 @@ async def run_agent_graph(
         from clawagents.config.features import is_enabled as _feat_goal_sys
         from clawagents.goal import get_goal_tracker, goal_system_reminder
 
-        if _feat_goal_sys("goal_autopilot"):
+        _goal_mode_on = bool(
+            isinstance(run_context._metadata, dict)
+            and run_context._metadata.get("goal_mode")
+        )
+        if _goal_mode_on and _feat_goal_sys("goal_autopilot"):
             _gt_sys = get_goal_tracker(run_context)
             _rem = goal_system_reminder(_gt_sys.state if _gt_sys else None)
             if _rem:
@@ -3386,9 +3400,14 @@ async def run_agent_graph(
                     from clawagents.config.features import is_enabled as _feat_goal
                     from clawagents.goal import GoalOrchestrator, get_goal_tracker
 
-                    _goal_tracker = get_goal_tracker(run_context)
+                    _goal_mode_on = bool(
+                        isinstance(run_context._metadata, dict)
+                        and run_context._metadata.get("goal_mode")
+                    )
+                    _goal_tracker = get_goal_tracker(run_context) if _goal_mode_on else None
                     if (
-                        _feat_goal("goal_autopilot")
+                        _goal_mode_on
+                        and _feat_goal("goal_autopilot")
                         and _goal_tracker is not None
                         and _goal_tracker.is_active()
                         and _goal_tracker.state is not None
