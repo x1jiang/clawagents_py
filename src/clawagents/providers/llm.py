@@ -1023,6 +1023,14 @@ class OpenAIProvider(LLMProvider):
         }
         if oai_tools:
             kwargs["tools"] = oai_tools
+        schema = getattr(self, "_structured_json_schema", None)
+        if isinstance(schema, dict) and schema:
+            try:
+                from clawagents.structured_output import openai_chat_response_format
+
+                kwargs["response_format"] = openai_chat_response_format(schema)
+            except Exception:
+                pass
         _apply_tool_reasoning_compat(
             kwargs,
             model=self.model,
@@ -1071,6 +1079,14 @@ class OpenAIProvider(LLMProvider):
         resp_tools = _chat_tools_to_responses_tools(oai_tools)
         if resp_tools:
             kwargs["tools"] = resp_tools
+        schema = getattr(self, "_structured_json_schema", None)
+        if isinstance(schema, dict) and schema:
+            try:
+                from clawagents.structured_output import openai_responses_text_format
+
+                kwargs["text"] = openai_responses_text_format(schema)
+            except Exception:
+                pass
         _apply_responses_reasoning(kwargs, preferred=self._reasoning_effort)
         if stream:
             kwargs["stream"] = True
@@ -1833,6 +1849,15 @@ class GeminiProvider(LLMProvider):
             config_opts["system_instruction"] = system_instruction
         if tools:
             config_opts["tools"] = _to_gemini_tools(tools)
+        schema = getattr(self, "_structured_json_schema", None)
+        if isinstance(schema, dict) and schema and not tools:
+            try:
+                from clawagents.structured_output import gemini_response_schema
+
+                config_opts["response_mime_type"] = "application/json"
+                config_opts["response_schema"] = gemini_response_schema(schema)
+            except Exception:
+                pass
         gemini_config = types.GenerateContentConfig(**config_opts)
 
         async def _call(contents: list[dict[str, Any]]) -> LLMResponse:
@@ -2204,6 +2229,16 @@ class AnthropicProvider(LLMProvider):
         # making "temperature: 0" runs non-deterministic only on Claude.
         if self._temperature is not None and self._temperature >= 0:
             kwargs["temperature"] = self._temperature
+        schema = getattr(self, "_structured_json_schema", None)
+        if isinstance(schema, dict) and schema and not tools:
+            # Anthropic structured output suppresses tools — only apply when
+            # this turn is tool-free (matches Grok shell StructuredOutput tool path).
+            try:
+                from clawagents.structured_output import anthropic_output_format
+
+                kwargs["output_config"] = {"format": anthropic_output_format(schema)}
+            except Exception:
+                pass
         if tools:
             def _anthropic_prop(v: dict[str, Any]) -> dict[str, Any]:
                 prop: dict[str, Any] = {

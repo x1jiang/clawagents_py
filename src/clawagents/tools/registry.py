@@ -184,6 +184,35 @@ def _snapshot_before_write(tool_name: str, args: Dict[str, Any]) -> None:
         pass
 
 
+def _record_hunk_watcher_write(tool_name: str, args: Dict[str, Any]) -> None:
+    """Feed successful writes into hunk watcher for rewind attribution."""
+    from clawagents.config.features import is_enabled
+
+    if not (is_enabled("hunk_watcher") or is_enabled("session_rewind")):
+        return
+    if tool_name not in _WRITE_TOOLS:
+        return
+    path_str = args.get("path") or args.get("file_path") or args.get("target_path") or ""
+    if not path_str:
+        return
+    try:
+        from pathlib import Path
+
+        from clawagents.memory.hunk_watcher import get_watcher
+
+        root = Path.cwd().resolve()
+        resolved = Path(path_str).resolve()
+        if resolved != root and root not in resolved.parents:
+            return
+        if not resolved.is_file():
+            return
+        rel = str(resolved.relative_to(root)).replace("\\", "/")
+        content = resolved.read_text(encoding="utf-8", errors="replace")
+        get_watcher(root).record_agent_write(rel, content)
+    except Exception:
+        pass
+
+
 def truncate_tool_output(output: str | list[dict[str, Any]], max_chars: int = MAX_TOOL_OUTPUT_CHARS) -> str | list[dict[str, Any]]:
     if not isinstance(output, str):
         return output
@@ -524,6 +553,9 @@ class ToolRegistry:
             # Cache successful results for cacheable tools
             if is_cacheable and truncated.success:
                 self._result_cache.set(tool_name, effective_args, truncated)
+
+            if truncated.success and tool_name in _WRITE_TOOLS:
+                _record_hunk_watcher_write(tool_name, effective_args)
 
             return truncated
         except asyncio.TimeoutError:

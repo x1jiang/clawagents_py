@@ -406,6 +406,14 @@ def sanitize_compacted_history(messages: list[LLMMessage]) -> list[LLMMessage]:
     return out
 
 
+def _rough_message_tokens(messages: Sequence[LLMMessage]) -> int:
+    total = 0
+    for m in messages:
+        content = m.content if isinstance(m.content, str) else str(m.content)
+        total += len(content.encode("utf-8"))
+    return max(1, total // 4)
+
+
 async def apply_full_replace_compaction(
     messages: list[LLMMessage],
     llm: LLMProvider,
@@ -417,6 +425,7 @@ async def apply_full_replace_compaction(
     user_prefix: str = "",
     transcript_hint: str | None = None,
     lossy: bool = False,
+    history_then_steps: bool | None = None,
 ) -> list[LLMMessage] | None:
     """Run full-replace compaction. Returns None when not applicable."""
     system_msgs = [m for m in messages if m.role == "system"]
@@ -425,6 +434,26 @@ async def apply_full_replace_compaction(
     if split is None:
         return None
     older, last_query, recent = split
+
+    # HistoryThenSteps: fold recent tool steps into history summarization only
+    # when they exceed ~30% of history tokens (Grok graduated compaction).
+    try:
+        from clawagents.config.features import is_enabled
+        from clawagents.memory.compaction_segments import should_compact_steps_after_history
+
+        hts = (
+            history_then_steps
+            if history_then_steps is not None
+            else is_enabled("history_then_steps")
+        )
+        if hts and recent:
+            history_tokens = _rough_message_tokens(older)
+            steps_tokens = _rough_message_tokens(recent)
+            if should_compact_steps_after_history(history_tokens, steps_tokens):
+                older = list(older) + list(recent)
+                recent = []
+    except Exception:
+        pass
 
     task_context = last_query[:500] if last_query else ""
     conv = render_conversation_for_summary(older, lossy=lossy)

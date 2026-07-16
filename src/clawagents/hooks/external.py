@@ -122,6 +122,82 @@ async def run_hook(
         return None
 
 
+def build_taxonomy_dispatcher(
+    legacy: HooksConfig | None = None,
+) -> Any | None:
+    """Load expanded hook taxonomy dispatcher when ``hook_taxonomy`` is enabled."""
+    from clawagents.config.features import is_enabled
+
+    if not is_enabled("hook_taxonomy"):
+        return None
+
+    from clawagents.hooks.taxonomy import (
+        HookDispatcher,
+        HookEvent,
+        HookHandler,
+        load_handlers_from_config,
+        normalize_event,
+    )
+
+    handlers: list[HookHandler] = []
+    hooks_file = Path.cwd() / ".clawagents" / "hooks.json"
+    if hooks_file.exists():
+        try:
+            data = json.loads(hooks_file.read_text())
+            handlers.extend(load_handlers_from_config(data))
+            for key, ev_name in (
+                ("pre_tool_use", "PreToolUse"),
+                ("post_tool_use", "PostToolUse"),
+                ("pre_llm", "UserPromptSubmit"),
+                ("post_llm", "Notification"),
+            ):
+                cmd = data.get(key)
+                ev = normalize_event(ev_name)
+                if cmd and isinstance(cmd, str) and ev is not None:
+                    if not any(h.event == ev and h.command for h in handlers):
+                        handlers.append(
+                            HookHandler(event=ev, command=["bash", "-lc", cmd])
+                        )
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Failed to load taxonomy hooks.json: %s", exc)
+
+    if legacy is not None:
+        for attr, ev_name in (
+            ("pre_tool_use", "PreToolUse"),
+            ("post_tool_use", "PostToolUse"),
+            ("pre_llm", "UserPromptSubmit"),
+            ("post_llm", "Notification"),
+        ):
+            cmd = getattr(legacy, attr, None)
+            ev = normalize_event(ev_name)
+            if cmd and ev is not None:
+                if not any(h.event == ev and h.command for h in handlers):
+                    handlers.append(
+                        HookHandler(event=ev, command=["bash", "-lc", cmd])
+                    )
+
+    return HookDispatcher(handlers=handlers)
+
+
+async def dispatch_taxonomy_hook(
+    dispatcher: Any,
+    event: Any,
+    payload: dict[str, Any] | None = None,
+    *,
+    blocking: bool | None = None,
+) -> tuple[bool, str]:
+    """Run taxonomy hook dispatch off the event loop (subprocess/webhook I/O)."""
+    if dispatcher is None:
+        return True, ""
+    decision = await asyncio.to_thread(
+        dispatcher.dispatch,
+        event,
+        payload or {},
+        blocking=blocking,
+    )
+    return bool(decision.allowed), str(decision.reason or "")
+
+
 class ExternalHookRunner:
     """Runs external hooks at key points in the agent loop."""
 

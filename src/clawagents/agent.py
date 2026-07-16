@@ -1124,6 +1124,36 @@ def create_claw_agent(
     from clawagents.tools.subagent import create_task_tool
     registry.register(create_task_tool(llm, registry, workspace=os.getcwd()))
 
+    # v6.17: PTY sessions + rewind tools
+    try:
+        from clawagents.config.features import is_enabled as _feat617
+        if _feat617("pty_sessions"):
+            from clawagents.tools.pty_session import create_pty_tools
+            for t in create_pty_tools():
+                if registry.get(t.name) is None:
+                    registry.register(t)
+        if _feat617("session_rewind"):
+            from clawagents.memory.hunk_watcher import create_rewind_tools, get_watcher
+            for t in create_rewind_tools():
+                if registry.get(t.name) is None:
+                    registry.register(t)
+            try:
+                get_watcher(os.getcwd()).start()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # v6.17: hybrid smart-memory recall
+    try:
+        from clawagents.config.features import is_enabled as _feat_mem
+        if _feat_mem("smart_memory") or _feat_mem("hybrid_memory_search"):
+            from clawagents.tools.memory_search import create_memory_search_tool
+            if registry.get("memory_search") is None:
+                registry.register(create_memory_search_tool(workspace=os.getcwd()))
+    except Exception:
+        pass
+
     # ── MCP server integration (v6.4, optional) ────────────────────────
     if mcp_servers:
         from clawagents.mcp import (

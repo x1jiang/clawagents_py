@@ -24,6 +24,11 @@ class OSSandboxProfile:
     description: str = ""
     # When True, missing seatbelt/bwrap raises instead of soft-fallback.
     require_binary: bool = False
+    # Paths denied for read+write (secret files) when fail-closed sandbox is on.
+    secret_deny_paths: tuple[str, ...] = (
+        ".env", ".env.*", "**/credentials*", "**/secrets*", "**/*.pem",
+    )
+    auto_allow_bash: bool = False
 
 
 _BUILTIN: dict[str, OSSandboxProfile] = {
@@ -85,6 +90,78 @@ _BUILTIN: dict[str, OSSandboxProfile] = {
 }
 
 
+
+
+def _default_secret_globs() -> tuple[str, ...]:
+    return (".env", ".env.*", "**/credentials*", "**/secrets*", "**/*.pem")
+
+
+def load_project_sandbox_toml(workspace: str | Path | None = None) -> dict[str, OSSandboxProfile]:
+    """Load add-only custom profiles from ``.clawagents/sandbox.toml`` (JSON-compatible).
+
+    Project configs may *add* profiles but never redefine built-in names.
+    Supports a minimal JSON/TOML-ish ``{"profiles": {"name": {...}}}`` file
+    (JSON body is accepted; full TOML is optional if tomllib is present).
+    """
+    import json
+
+    ws = Path(workspace or os.getcwd())
+    candidates = [
+        ws / ".clawagents" / "sandbox.toml",
+        ws / ".clawagents" / "sandbox.json",
+        Path.home() / ".clawagents" / "sandbox.toml",
+    ]
+    found: dict[str, OSSandboxProfile] = {}
+    conflicts: list[str] = []
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            raw_text = path.read_text(encoding="utf-8")
+            data: Any
+            if path.suffix == ".json":
+                data = json.loads(raw_text)
+            else:
+                try:
+                    import tomllib
+                    data = tomllib.loads(raw_text)
+                except Exception:
+                    data = json.loads(raw_text)
+        except Exception:
+            continue
+        rows = data.get("profiles") if isinstance(data, dict) else None
+        if not isinstance(rows, dict):
+            continue
+        for name, cfg in rows.items():
+            key = str(name).strip().lower()
+            if key in _BUILTIN:
+                conflicts.append(key)
+                continue
+            if key in found:
+                continue  # add-only: first wins
+            if not isinstance(cfg, dict):
+                continue
+            found[key] = OSSandboxProfile(
+                name=key,
+                backend=cfg.get("backend", "local"),  # type: ignore[arg-type]
+                read_only=bool(cfg.get("read_only", False)),
+                network=bool(cfg.get("network", True)),
+                allow_paths=tuple(cfg.get("allow_paths") or (".",)),
+                deny_paths=tuple(cfg.get("deny_paths") or ()),
+                require_binary=bool(cfg.get("require_binary", False)),
+                secret_deny_paths=tuple(cfg.get("secret_deny_paths") or _default_secret_globs()),
+                description=str(cfg.get("description") or f"project profile {key}"),
+                auto_allow_bash=bool(cfg.get("auto_allow_bash", False)),
+            )
+    if conflicts:
+        # Stash for diagnostics
+        os.environ.setdefault(
+            "CLAW_SANDBOX_PROFILE_CONFLICTS",
+            ",".join(sorted(set(conflicts))),
+        )
+    return found
+
+
 def get_profile(name: str | OSSandboxProfile | None) -> OSSandboxProfile:
     if name is None:
         return _BUILTIN["off"]
@@ -93,7 +170,11 @@ def get_profile(name: str | OSSandboxProfile | None) -> OSSandboxProfile:
     key = str(name).strip().lower()
     if key in _BUILTIN:
         return _BUILTIN[key]
-    raise ValueError(f"Unknown sandbox profile: {name!r}. Known: {sorted(_BUILTIN)}")
+    project = load_project_sandbox_toml()
+    if key in project:
+        return project[key]
+    known = sorted(set(_BUILTIN) | set(project))
+    raise ValueError(f"Unknown sandbox profile: {name!r}. Known: {known}")
 
 
 def list_profiles() -> list[OSSandboxProfile]:
@@ -105,6 +186,7 @@ def _seatbelt_profile_text(
     cwd: str,
     network: bool,
     read_only: bool,
+    secret_deny_paths: tuple[str, ...] = (),
 ) -> str:
     """Seatbelt profile with write confinement (deny file-write*, then allow workspace).
 
@@ -119,6 +201,25 @@ def _seatbelt_profile_text(
         "(allow default)",
         "(deny file-write*)",
     ]
+    # Fail-closed secret reads: deny literal .env-class files under workspace.
+    for glob in secret_deny_paths or ():
+        base = glob.replace("**/", "").replace("*", "")
+        if not base or "/" in base.strip("."):
+            # Only emit simple basename literals for seatbelt (full glob
+            # expansion is Linux/bwrap's job).
+            if glob in {".env", "credentials", "secrets"} or glob.startswith(".env"):
+                lit = f"{safe}/{glob}".replace("\\", "\\\\").replace('"', '\\"')
+                lines.append(f'(deny file-read* (literal "{lit}"))')
+                lines.append(f'(deny file-write* (literal "{lit}"))')
+            continue
+        lit = f'{safe}/{base}'.replace("\\", "\\\\").replace('"', '\\"')
+        lines.append(f'(deny file-read* (literal "{lit}"))')
+        lines.append(f'(deny file-write* (literal "{lit}"))')
+    # Always deny workspace/.env when secrets enabled
+    if secret_deny_paths:
+        env_lit = f'{safe}/.env'.replace("\\", "\\\\").replace('"', '\\"')
+        lines.append(f'(deny file-read* (literal "{env_lit}"))')
+        lines.append(f'(deny file-write* (literal "{env_lit}"))')
     if not network:
         lines.append("(deny network*)")
     if read_only:
@@ -248,6 +349,9 @@ class ProfileBackend:
                     cwd=self.cwd,
                     network=self._profile.network,
                     read_only=self._profile.read_only,
+                    secret_deny_paths=getattr(
+                        self._profile, "secret_deny_paths", ()
+                    ),
                 )
                 profile_path = Path(self.cwd) / ".clawagents" / "seatbelt.sb"
                 try:
@@ -338,6 +442,28 @@ def resolve_sandbox(
     else:
         inner = LocalBackend(root=workspace)
 
+    # Fail-closed: when feature on, require real OS sandbox binaries.
+    try:
+        from clawagents.config.features import is_enabled as _feat_sb
+        if _feat_sb("sandbox_fail_closed") and prof.name != "off":
+            prof = OSSandboxProfile(
+                name=prof.name,
+                backend=prof.backend if prof.backend in ("seatbelt", "bwrap", "docker") else (
+                    "seatbelt" if os.uname().sysname == "Darwin" else "bwrap"
+                ),
+                read_only=prof.read_only,
+                network=prof.network,
+                allow_paths=prof.allow_paths or (".",),
+                deny_paths=prof.deny_paths,
+                env_allow=prof.env_allow,
+                require_binary=True,
+                secret_deny_paths=getattr(prof, "secret_deny_paths", _default_secret_globs()),
+                description=prof.description,
+                auto_allow_bash=getattr(prof, "auto_allow_bash", False),
+            )
+    except Exception:
+        pass
+
     # Auto-upgrade path-confined / network-deny local profiles onto real OS
     # sandboxes when binaries exist (workspace writes stay confined).
     _wants_os = (
@@ -359,7 +485,9 @@ def resolve_sandbox(
             deny_paths=prof.deny_paths,
             env_allow=prof.env_allow,
             require_binary=prof.require_binary,
+            secret_deny_paths=getattr(prof, "secret_deny_paths", _default_secret_globs()),
             description=prof.description,
+            auto_allow_bash=getattr(prof, "auto_allow_bash", False),
         )
     elif (
         _wants_os
@@ -375,7 +503,9 @@ def resolve_sandbox(
             deny_paths=prof.deny_paths,
             env_allow=prof.env_allow,
             require_binary=prof.require_binary,
+            secret_deny_paths=getattr(prof, "secret_deny_paths", _default_secret_globs()),
             description=prof.description,
+            auto_allow_bash=getattr(prof, "auto_allow_bash", False),
         )
 
     if prof.name == "off" and not prof.read_only and not prof.deny_paths and not prof.allow_paths:

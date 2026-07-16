@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "clawagents"
-version = "6.16.0"
+version = "6.17.0"
 description = "Lean, full-stack agentic AI framework with PTRL (Prompt-Time Reinforcement Learning)"
 readme = "README.md"
 license = "MIT"
@@ -47,6 +47,8 @@ browser = ["playwright>=1.40.0"]
 # extras exist so cloud-provider users have a stable extras name today).
 browser-browserbase = ["playwright>=1.40.0"]
 browser-cloud = ["playwright>=1.40.0"]
+pty = ["pexpect>=4.8", "pyte>=0.8"]
+watch = ["watchfiles>=0.21"]
 # Cron expressions. Interval and one-shot schedules work without this.
 cron = ["croniter>=1.4"]
 # Reinforcement-learning fine-tuning hooks (TRL adapter, Atropos export).
@@ -63,6 +65,9 @@ all = [
     "mcp>=1.0.0",
     "playwright>=1.40.0",
     "croniter>=1.4",
+    "pexpect>=4.8",
+    "pyte>=0.8",
+    "watchfiles>=0.21",
 ]
 dev = [
     "pytest>=7.0",

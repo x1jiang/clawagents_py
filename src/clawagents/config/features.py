@@ -74,7 +74,23 @@ _FEATURE_DEFAULTS: dict[str, str] = {
     "goal_autopilot":       "1",   # Grok-style /goal planner→verify→strategist
     "prefire_compaction":   "1",   # Two-pass: summarize before hard cliff
     "mid_turn_interject":   "1",   # Accept queued user redirect mid-loop
+
+    # v6.17 Grok-Build parity pack
+    "smart_memory":         "1",   # Access boost + temporal decay + blake2 dedup
+    "memory_dream":         "1",   # Dream consolidation into MEMORY.md
+    "memory_flush":         "1",   # Pre-compaction memory flush
+    "hybrid_memory_search": "1",   # FTS5 BM25-style + MMR hybrid recall
+    "pty_sessions":         "1",   # Interactive PTY shell sessions
+    "structured_output":    "1",   # Native provider json_schema / response_format
+    "doom_loop":            "1",   # Generation tail-repetition resample
+    "history_then_steps":   "1",   # Graduated compaction mode
+    "compaction_segments":  "1",   # Greppable segment_NNN.md + INDEX.md
+    "hunk_watcher":         "1",   # External edit attribution via mtime watch
+    "session_rewind":       "1",   # Rewind to prompt N (files + conversation)
+    "hook_taxonomy":        "1",   # Expanded hook events + webhook SSRF guard
+    "sandbox_fail_closed":  "0",   # Refuse soft-fallback; secret path deny binds
 }
+
 
 # Env var prefix: CLAW_FEATURE_MICRO_COMPACT=1
 _ENV_PREFIX = "CLAW_FEATURE_"

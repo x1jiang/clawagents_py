@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from dataclasses import dataclass
 
@@ -34,10 +35,59 @@ def search_sqlite_messages(
     session_id: str | None = None,
     order_desc: bool = True,
 ) -> list[SqliteSearchRow]:
-    """Search message payloads in SQLite; optional session filter."""
+    """Search message payloads in SQLite; prefer FTS5 BM25 when indexed."""
     token = query.strip()
     if not token:
         return []
+    # Prefer FTS5 when the virtual table exists
+    try:
+        ensure_fts5(conn)
+        fts_q = " OR ".join(re.findall(r"\w+", token)) or token
+        if session_id:
+            cur = conn.execute(
+                """
+                SELECT m.session_id, m.id, m.ord,
+                       coalesce(json_extract(m.payload, '$.role'), '') AS role,
+                       coalesce(json_extract(m.payload, '$.content'), '') AS content,
+                       bm25(messages_fts) AS rank
+                FROM messages_fts
+                JOIN messages m ON m.id = messages_fts.message_id
+                WHERE messages_fts MATCH ? AND m.session_id = ?
+                ORDER BY rank
+                LIMIT ?
+                """,
+                (fts_q, session_id, limit),
+            )
+        else:
+            cur = conn.execute(
+                """
+                SELECT m.session_id, m.id, m.ord,
+                       coalesce(json_extract(m.payload, '$.role'), '') AS role,
+                       coalesce(json_extract(m.payload, '$.content'), '') AS content,
+                       bm25(messages_fts) AS rank
+                FROM messages_fts
+                JOIN messages m ON m.id = messages_fts.message_id
+                WHERE messages_fts MATCH ?
+                ORDER BY rank
+                LIMIT ?
+                """,
+                (fts_q, limit),
+            )
+        rows: list[SqliteSearchRow] = []
+        for row in cur.fetchall():
+            rows.append(
+                SqliteSearchRow(
+                    session_id=str(row[0]),
+                    message_id=int(row[1]),
+                    ord=int(row[2]),
+                    role=str(row[3] or ""),
+                    content=str(row[4] or ""),
+                )
+            )
+        if rows:
+            return rows
+    except Exception:
+        pass
     order = "id DESC" if order_desc else "ord ASC"
     pattern = f"%{token.lower()}%"
     if session_id:
@@ -66,7 +116,7 @@ def search_sqlite_messages(
             """,
             (pattern, limit),
         )
-    rows: list[SqliteSearchRow] = []
+    rows = []
     for row in cur.fetchall():
         rows.append(
             SqliteSearchRow(

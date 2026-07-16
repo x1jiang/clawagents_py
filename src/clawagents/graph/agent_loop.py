@@ -1594,6 +1594,7 @@ async def _compact_if_needed(
     run_context: Optional[RunContext] = None,
     fire_hook: Optional[Callable[..., Any]] = None,
     savings_history: list[float] | None = None,
+    taxonomy_dispatcher: Any | None = None,
 ) -> list[LLMMessage]:
     messages = _truncate_old_tool_args(messages)
 
@@ -1646,6 +1647,44 @@ async def _compact_if_needed(
         emit("context", {"message": "compacted oversized tool results before summarization"})
     current_tokens = _estimate_messages_tokens(messages, token_multiplier)
 
+    # Pre-compaction memory flush (Grok memory_flush)
+    try:
+        from clawagents.config.features import is_enabled as _feat_flush
+        from clawagents.memory.memory_flush import should_flush, run_memory_flush
+
+        cycle = 0
+        if run_context is not None and isinstance(run_context._metadata, dict):
+            cycle = int(run_context._metadata.get("compaction_cycle") or 0)
+        ws = None
+        if run_context is not None and isinstance(run_context._metadata, dict):
+            ws = run_context._metadata.get("workspace")
+        if _feat_flush("memory_flush") and should_flush(
+            current_tokens, budget, compaction_cycle=cycle, workspace=ws
+        ):
+            async def _flush_llm(prompt: str) -> str:
+                resp = await llm.complete(
+                    [LLMMessage(role="user", content=prompt)],
+                    stream=False,
+                )
+                return str(getattr(resp, "content", "") or "")
+
+            flush_out = await run_memory_flush(
+                messages, _flush_llm, workspace=ws, compaction_cycle=cycle
+            )
+            emit(
+                "context",
+                {
+                    "message": (
+                        f"memory flush: {flush_out.status}"
+                        + (f" ({flush_out.detail})" if flush_out.detail else "")
+                    )
+                },
+            )
+            if run_context is not None and isinstance(run_context._metadata, dict):
+                run_context._metadata["compaction_cycle"] = cycle + 1
+    except Exception:
+        logger.debug("memory flush failed", exc_info=True)
+
     # Prefire / two-pass: summarize before the hard cliff (Grok two_pass).
     try:
         from clawagents.config.features import is_enabled as _feat_prefire
@@ -1688,6 +1727,24 @@ async def _compact_if_needed(
             await fire_hook("on_pre_compact", len(messages), current_tokens)
         except Exception:
             logger.debug("on_pre_compact hook failed", exc_info=True)
+
+    if taxonomy_dispatcher is not None:
+        try:
+            from clawagents.hooks.external import dispatch_taxonomy_hook
+            from clawagents.hooks.taxonomy import HookEvent
+
+            await dispatch_taxonomy_hook(
+                taxonomy_dispatcher,
+                HookEvent.PRE_COMPACT,
+                {
+                    "message_count": len(messages),
+                    "current_tokens": current_tokens,
+                    "budget": budget,
+                },
+                blocking=False,
+            )
+        except Exception:
+            logger.debug("taxonomy pre_compact hook failed", exc_info=True)
 
     system_msgs: list[LLMMessage] = []
     non_system: list[LLMMessage] = []
@@ -1766,6 +1823,7 @@ async def _compact_if_needed(
                 workspace=workspace,
                 carryover_markdown=carryover_md or None,
                 system_reminder=reminder,
+                history_then_steps=_feat("history_then_steps"),
             )
             if fr is not None:
                 # Prefer identity reuse for system + recent tails that survived
@@ -1780,6 +1838,7 @@ async def _compact_if_needed(
                         carryover_markdown=carryover_md or None,
                         system_reminder=reminder,
                         lossy=True,
+                        history_then_steps=_feat("history_then_steps"),
                     )
                     if fr_lossy is not None:
                         fr = _reuse_messages_where_possible(messages, fr_lossy)
@@ -1815,6 +1874,46 @@ async def _compact_if_needed(
                             await fire_hook("on_post_compact", len(fr), summary_snip)
                         except Exception:
                             logger.debug("on_post_compact hook failed", exc_info=True)
+                    if taxonomy_dispatcher is not None:
+                        try:
+                            from clawagents.hooks.external import dispatch_taxonomy_hook
+                            from clawagents.hooks.taxonomy import HookEvent
+
+                            await dispatch_taxonomy_hook(
+                                taxonomy_dispatcher,
+                                HookEvent.POST_COMPACT,
+                                {
+                                    "message_count": len(fr),
+                                    "before_tokens": current_tokens,
+                                    "after_tokens": fr_tokens,
+                                    "mode": "full_replace",
+                                },
+                                blocking=False,
+                            )
+                        except Exception:
+                            logger.debug("taxonomy post_compact hook failed", exc_info=True)
+                    # Greppable compaction segment archive
+                    try:
+                        from clawagents.config.features import is_enabled as _feat_seg
+                        from clawagents.memory.compaction_segments import (
+                            write_segment,
+                            segment_recovery_hint,
+                        )
+
+                        if _feat_seg("compaction_segments") and workspace:
+                            archive = "\n".join(
+                                f"[{m.role}] {str(m.content)[:500]}"
+                                for m in messages
+                                if getattr(m, "role", None) != "system"
+                            )[:12000]
+                            write_segment(
+                                archive,
+                                workspace=workspace,
+                                turns=max(1, len(messages) - 1),
+                            )
+                            emit("context", {"message": segment_recovery_hint()})
+                    except Exception:
+                        logger.debug("compaction segment write failed", exc_info=True)
                     return fr
     except Exception:
         logger.debug("full_replace_compaction path failed; falling back", exc_info=True)
@@ -2455,12 +2554,23 @@ async def run_agent_graph(
 
     # Feature: External Hooks — load shell hooks from .clawagents/hooks.json or env
     ext_hook_runner = None
+    hooks_cfg = None
     if _feat_enabled("external_hooks"):
         from clawagents.hooks.external import load_hooks_config, ExternalHookRunner
         hooks_cfg = load_hooks_config()
         if hooks_cfg:
             ext_hook_runner = ExternalHookRunner(hooks_cfg)
             emit("context", {"message": "external hooks: loaded"})
+
+    taxonomy_dispatcher = None
+    try:
+        from clawagents.hooks.external import build_taxonomy_dispatcher
+
+        taxonomy_dispatcher = build_taxonomy_dispatcher(hooks_cfg)
+        if taxonomy_dispatcher is not None:
+            emit("context", {"message": "hook taxonomy: loaded"})
+    except Exception:
+        logger.debug("hook taxonomy load failed", exc_info=True)
 
     token_multiplier = 1.0
     resolved_model_name: Optional[str] = None
@@ -2613,6 +2723,49 @@ async def run_agent_graph(
         usage=usage,
         run_context=run_context,
     )
+
+    if taxonomy_dispatcher is not None:
+        try:
+            from clawagents.hooks.external import dispatch_taxonomy_hook
+            from clawagents.hooks.taxonomy import HookEvent
+
+            await dispatch_taxonomy_hook(
+                taxonomy_dispatcher,
+                HookEvent.SESSION_START,
+                {"task": task[:500] if task else ""},
+                blocking=False,
+            )
+            await dispatch_taxonomy_hook(
+                taxonomy_dispatcher,
+                HookEvent.USER_PROMPT_SUBMIT,
+                {"prompt": task[:2000] if task else ""},
+                blocking=False,
+            )
+        except Exception:
+            logger.debug("taxonomy session_start hook failed", exc_info=True)
+
+    # Session rewind: snapshot workspace-touched files at prompt boundary
+    try:
+        from clawagents.config.features import is_enabled as _feat_rw
+
+        if _feat_rw("session_rewind") or _feat_rw("hunk_watcher"):
+            from clawagents.memory.hunk_watcher import get_watcher
+
+            _ws_rw = None
+            if run_context is not None and isinstance(run_context._metadata, dict):
+                _ws_rw = run_context._metadata.get("workspace")
+            w = get_watcher(_ws_rw)
+            meta_rw = (
+                run_context._metadata
+                if run_context is not None and isinstance(run_context._metadata, dict)
+                else None
+            )
+            idx = int((meta_rw or {}).get("prompt_index") or 0) + 1
+            if meta_rw is not None:
+                meta_rw["prompt_index"] = idx
+            w.snapshot_turn(idx, user_text=(task or "")[:2000])
+    except Exception:
+        logger.debug("rewind snapshot failed", exc_info=True)
 
     # Session protocol — hydrate history before first LLM call (non-destructive).
     _session_preloaded_count = 0
@@ -2836,6 +2989,7 @@ async def run_agent_graph(
                 messages, context_window, llm, emit, token_multiplier, resolved_model_name, run_context,
                 fire_hook=_fire_hook,
                 savings_history=_compaction_savings,
+                taxonomy_dispatcher=taxonomy_dispatcher,
             )
             # Compaction / trim can still leave pairs inconsistent — sanitize again.
             messages = _patch_dangling_tool_calls(messages)
@@ -2892,6 +3046,18 @@ async def run_agent_graph(
             if active_hooks:
                 await _fire_hook("on_llm_start", resolved_model_name or "", messages)
             try:
+                # Native structured output (json_schema → provider wire formats)
+                try:
+                    from clawagents.config.features import is_enabled as _feat_so
+                    from clawagents.structured_output import schema_from_output_type
+
+                    if _feat_so("structured_output") and output_type is not None:
+                        _schema = schema_from_output_type(output_type)
+                        setattr(llm, "_structured_json_schema", _schema)
+                    else:
+                        setattr(llm, "_structured_json_schema", None)
+                except Exception:
+                    pass
                 response = await llm.chat(
                     messages,
                     on_chunk=on_chunk if streaming else None,
@@ -2981,6 +3147,7 @@ async def run_agent_graph(
                         messages, context_window, llm, emit, token_multiplier, resolved_model_name, run_context,
                         fire_hook=_fire_hook,
                         savings_history=_compaction_savings,
+                        taxonomy_dispatcher=taxonomy_dispatcher,
                     )
                     # Don't persist recovery-compaction artifacts to the session.
                     _session_note_messages(track=False)
@@ -3009,6 +3176,49 @@ async def run_agent_graph(
                     tool_calls=response.tool_calls,
                     gemini_parts=response.gemini_parts,
                 )
+
+            # Doom-loop: thinking tail-repetition → resample (Grok doom_loop)
+            try:
+                from clawagents.config.features import is_enabled as _feat_doom
+                from clawagents.doom_loop import (
+                    DoomLoopRecoveryPolicy,
+                    DoomLoopState,
+                    detect_tail_repetition,
+                    note_trigger,
+                    should_resample,
+                )
+
+                if _feat_doom("doom_loop") and _thinking_content:
+                    sig = detect_tail_repetition(_thinking_content, channel="thinking")
+                    if sig is not None:
+                        meta = (
+                            run_context._metadata
+                            if run_context is not None
+                            and isinstance(run_context._metadata, dict)
+                            else {}
+                        )
+                        doom_state = meta.get("doom_loop_state")
+                        if not isinstance(doom_state, DoomLoopState):
+                            doom_state = DoomLoopState()
+                            if meta is not None:
+                                meta["doom_loop_state"] = doom_state
+                        note_trigger(doom_state, sig)
+                        pol = DoomLoopRecoveryPolicy()
+                        if should_resample(sig, doom_state, pol):
+                            doom_state.retry_count += 1
+                            emit(
+                                "warn",
+                                {
+                                    "message": (
+                                        f"doom-loop {sig.label} — resampling "
+                                        f"({doom_state.retry_count}/{pol.max_retries})"
+                                    )
+                                },
+                            )
+                            # Drop empty/partial doom response and retry this round
+                            continue
+            except Exception:
+                logger.debug("doom-loop check failed", exc_info=True)
 
             # Use exclusively native or text-based tool calls based on user-provided mode
             native_tool_call_objects: list[NativeToolCall] | None = None
@@ -3427,8 +3637,8 @@ async def run_agent_graph(
                 native_tc = native_tool_call_objects[0] if native_tool_call_objects else None
                 emit("tool_call", {"name": call.tool_name})
 
-                # External pre_tool_use hook
-                if ext_hook_runner:
+                # External / taxonomy pre_tool_use hook
+                if ext_hook_runner and taxonomy_dispatcher is None:
                     try:
                         ext_allowed, ext_args = await ext_hook_runner.pre_tool_use(call.tool_name, call.args)
                         if not ext_allowed:
@@ -3459,6 +3669,46 @@ async def run_agent_graph(
                         call = ParsedToolCall(tool_name=call.tool_name, args=ext_args)
                     except Exception as hook_err:
                         emit("warn", {"message": f"external pre_tool_use hook error: {hook_err}"})
+
+                if taxonomy_dispatcher is not None:
+                    try:
+                        from clawagents.hooks.external import dispatch_taxonomy_hook
+                        from clawagents.hooks.taxonomy import HookEvent
+
+                        tax_allowed, tax_reason = await dispatch_taxonomy_hook(
+                            taxonomy_dispatcher,
+                            HookEvent.PRE_TOOL_USE,
+                            {"tool": call.tool_name, "args": call.args},
+                            blocking=True,
+                        )
+                        if not tax_allowed:
+                            reason = tax_reason or "blocked by taxonomy hook"
+                            emit("tool_skipped", {"name": call.tool_name, "reason": reason})
+                            if use_native_tools and native_tc and native_tc.tool_call_id:
+                                messages.append(LLMMessage(
+                                    role="assistant",
+                                    content=response.content or "",
+                                    tool_calls_meta=[{
+                                        "id": native_tc.tool_call_id,
+                                        "name": call.tool_name,
+                                        "args": call.args,
+                                    }],
+                                    gemini_parts=getattr(response, "gemini_parts", None),
+                                    thinking=_thinking_content,
+                                ))
+                                messages.append(LLMMessage(
+                                    role="tool",
+                                    content=f"[Tool Skipped] {call.tool_name} was not approved: {reason}",
+                                    tool_call_id=native_tc.tool_call_id,
+                                ))
+                            else:
+                                messages.append(LLMMessage(
+                                    role="user",
+                                    content=f"[Tool Skipped] {call.tool_name} was not approved: {reason}",
+                                ))
+                            continue
+                    except Exception as hook_err:
+                        emit("warn", {"message": f"taxonomy pre_tool_use hook error: {hook_err}"})
 
                 if before_tool:
                     hook_approved = True
@@ -3641,8 +3891,8 @@ async def run_agent_graph(
                         )
 
 
-                # External post_tool_use hook
-                if ext_hook_runner:
+                # External / taxonomy post_tool_use hook
+                if ext_hook_runner and taxonomy_dispatcher is None:
                     try:
                         ext_result = await ext_hook_runner.post_tool_use(
                             call.tool_name, call.args,
@@ -3656,6 +3906,25 @@ async def run_agent_graph(
                             )
                     except Exception as hook_err:
                         emit("warn", {"message": f"external post_tool_use hook error: {hook_err}"})
+
+                if taxonomy_dispatcher is not None:
+                    try:
+                        from clawagents.hooks.external import dispatch_taxonomy_hook
+                        from clawagents.hooks.taxonomy import HookEvent
+
+                        await dispatch_taxonomy_hook(
+                            taxonomy_dispatcher,
+                            HookEvent.POST_TOOL_USE,
+                            {
+                                "tool": call.tool_name,
+                                "args": call.args,
+                                "success": tool_result.success,
+                                "output": str(tool_result.output)[:1000],
+                            },
+                            blocking=False,
+                        )
+                    except Exception as hook_err:
+                        emit("warn", {"message": f"taxonomy post_tool_use hook error: {hook_err}"})
 
                 if after_tool:
                     try:
@@ -3813,7 +4082,7 @@ async def run_agent_graph(
                 # Mirror the single-call path: an external policy gate must not
                 # be bypassable by batching a forbidden call with another one.
                 _candidate_pairs: list[tuple[int, ParsedToolCall]] = list(enumerate(tool_calls))
-                if ext_hook_runner:
+                if ext_hook_runner and taxonomy_dispatcher is None:
                     _ext_pairs: list[tuple[int, ParsedToolCall]] = []
                     for _orig_i, _c in _candidate_pairs:
                         try:
@@ -3827,6 +4096,36 @@ async def run_agent_graph(
                             emit("warn", {"message": f"external pre_tool_use hook error: {hook_err}"})
                         _ext_pairs.append((_orig_i, _c))
                     _candidate_pairs = _ext_pairs
+                    if not _candidate_pairs:
+                        continue
+
+                if taxonomy_dispatcher is not None:
+                    from clawagents.hooks.external import dispatch_taxonomy_hook
+                    from clawagents.hooks.taxonomy import HookEvent
+
+                    _tax_pairs: list[tuple[int, ParsedToolCall]] = []
+                    for _orig_i, _c in _candidate_pairs:
+                        try:
+                            tax_allowed, tax_reason = await dispatch_taxonomy_hook(
+                                taxonomy_dispatcher,
+                                HookEvent.PRE_TOOL_USE,
+                                {"tool": _c.tool_name, "args": _c.args},
+                                blocking=True,
+                            )
+                            if not tax_allowed:
+                                reason = tax_reason or "blocked by taxonomy hook"
+                                emit("tool_skipped", {"name": _c.tool_name, "reason": reason})
+                                messages.append(
+                                    LLMMessage(
+                                        role="user",
+                                        content=f"[Tool Skipped] {_c.tool_name} was not approved: {reason}",
+                                    )
+                                )
+                                continue
+                        except Exception as hook_err:
+                            emit("warn", {"message": f"taxonomy pre_tool_use hook error: {hook_err}"})
+                        _tax_pairs.append((_orig_i, _c))
+                    _candidate_pairs = _tax_pairs
                     if not _candidate_pairs:
                         continue
 
@@ -3965,9 +4264,8 @@ async def run_agent_graph(
                             )
 
 
-                # External post_tool_use hook (parallel) — parity with the
-                # single-call path so result-rewriting policy hooks apply.
-                if ext_hook_runner:
+                # External / taxonomy post_tool_use hook (parallel)
+                if ext_hook_runner and taxonomy_dispatcher is None:
                     _ext_results: list[ToolResult] = []
                     for _c, _r in zip(approved_calls, results):
                         try:
@@ -3985,6 +4283,26 @@ async def run_agent_graph(
                             emit("warn", {"message": f"external post_tool_use hook error: {hook_err}"})
                         _ext_results.append(_r)
                     results = _ext_results
+
+                if taxonomy_dispatcher is not None:
+                    from clawagents.hooks.external import dispatch_taxonomy_hook
+                    from clawagents.hooks.taxonomy import HookEvent
+
+                    for _c, _r in zip(approved_calls, results):
+                        try:
+                            await dispatch_taxonomy_hook(
+                                taxonomy_dispatcher,
+                                HookEvent.POST_TOOL_USE,
+                                {
+                                    "tool": _c.tool_name,
+                                    "args": _c.args,
+                                    "success": _r.success,
+                                    "output": str(_r.output)[:1000],
+                                },
+                                blocking=False,
+                            )
+                        except Exception as hook_err:
+                            emit("warn", {"message": f"taxonomy post_tool_use hook error: {hook_err}"})
 
                 if after_tool:
                     safe_results: list[ToolResult] = []
@@ -4398,6 +4716,81 @@ async def run_agent_graph(
     })
     if active_hooks:
         await _fire_hook("on_run_end", state.result)
+
+    # Dream consolidation + session-end taxonomy (non-blocking with timeout)
+    try:
+        from clawagents.config.features import is_enabled as _feat_dream
+
+        _ws = None
+        if run_context is not None and isinstance(run_context._metadata, dict):
+            _ws = run_context._metadata.get("workspace")
+        if _ws is None:
+            import os as _os
+
+            _ws = _os.getcwd()
+
+        if _feat_dream("memory_dream") or _feat_dream("smart_memory"):
+            from clawagents.memory.dream import (
+                append_session_log,
+                check_dream_gates,
+                run_dream,
+            )
+
+            _stem = None
+            if session_writer is not None:
+                _stem = getattr(session_writer, "session_id", None)
+            _log_body = f"## Task\n{(task or '')[:4000]}\n\n## Outcome\n{state.status}\n\n## Result\n{(state.result or '')[:8000]}"
+            append_session_log(_log_body, workspace=_ws, stem=_stem)
+
+        if _feat_dream("memory_dream"):
+            _gate = check_dream_gates(_ws)
+            if not isinstance(_gate, str):
+
+                async def _dream_llm(prompt: str) -> str:
+                    resp = await llm.chat(
+                        [LLMMessage(role="user", content=prompt)],
+                        stream=False,
+                    )
+                    return str(getattr(resp, "content", "") or "")
+
+                try:
+                    dream_out = await asyncio.wait_for(
+                        run_dream(_dream_llm, workspace=_ws),
+                        timeout=90.0,
+                    )
+                    if dream_out.ok:
+                        emit("context", {"message": f"dream: {dream_out.reason}"})
+                    else:
+                        emit("context", {"message": f"dream skipped: {dream_out.reason}"})
+                except asyncio.TimeoutError:
+                    asyncio.create_task(run_dream(_dream_llm, workspace=_ws))
+                    emit("context", {"message": "dream: scheduled (timeout)"})
+    except Exception:
+        logger.debug("dream scheduling failed", exc_info=True)
+
+    if taxonomy_dispatcher is not None:
+        try:
+            from clawagents.hooks.external import dispatch_taxonomy_hook
+            from clawagents.hooks.taxonomy import HookEvent
+
+            await dispatch_taxonomy_hook(
+                taxonomy_dispatcher,
+                HookEvent.SESSION_END,
+                {
+                    "status": state.status,
+                    "result_preview": (state.result or "")[:500],
+                    "tool_calls": state.tool_calls,
+                },
+                blocking=False,
+            )
+            await dispatch_taxonomy_hook(
+                taxonomy_dispatcher,
+                HookEvent.STOP,
+                {"status": state.status},
+                blocking=False,
+            )
+        except Exception:
+            logger.debug("taxonomy session_end hook failed", exc_info=True)
 
     emit("agent_done", {
         "tool_calls": state.tool_calls,
