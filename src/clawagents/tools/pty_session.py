@@ -100,6 +100,7 @@ class PtySession:
             dimensions=(rows, cols),
             timeout=None,
         )
+        self._last_used = time.time()
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
         time.sleep(0.05)
@@ -286,11 +287,40 @@ class PtySession:
 
 _SESSIONS: Dict[str, PtySession] = {}
 _SESSIONS_LOCK = threading.Lock()
+_SESSION_TTL_S = 30 * 60  # idle reap
+
+
+def _reap_idle_sessions() -> None:
+    """Drop ended or long-idle PTY sessions so they cannot leak forever."""
+    now = time.time()
+    dead: list[str] = []
+    with _SESSIONS_LOCK:
+        for sid, sess in list(_SESSIONS.items()):
+            idle = now - float(getattr(sess, "_last_used", now) or now)
+            ended = bool(getattr(sess, "_ended", False))
+            alive = False
+            try:
+                alive = (not ended) and bool(sess._child.isalive())
+            except Exception:
+                alive = False
+            if ended or not alive or idle > _SESSION_TTL_S:
+                dead.append(sid)
+        for sid in dead:
+            sess = _SESSIONS.pop(sid, None)
+            if sess is not None:
+                try:
+                    sess.stop()
+                except Exception:
+                    pass
 
 
 def get_session(session_id: str) -> PtySession | None:
+    _reap_idle_sessions()
     with _SESSIONS_LOCK:
-        return _SESSIONS.get(session_id)
+        sess = _SESSIONS.get(session_id)
+        if sess is not None:
+            sess._last_used = time.time()
+        return sess
 
 
 def create_pty_tools():
@@ -329,8 +359,10 @@ def create_pty_tools():
                 )
             except Exception as exc:  # noqa: BLE001
                 return ToolResult(success=False, output="", error=str(exc))
+            sess._last_used = time.time()
             with _SESSIONS_LOCK:
                 _SESSIONS[sess.session_id] = sess
+            _reap_idle_sessions()
             screen = sess.screen_text()
             return ToolResult(
                 success=True,
@@ -389,11 +421,16 @@ def create_pty_tools():
         }
 
         async def execute(self, args: dict) -> ToolResult:
+            import asyncio
+
+            _reap_idle_sessions()
             sess = get_session(str(args.get("session_id") or ""))
             if sess is None:
                 return ToolResult(success=False, output="", error="unknown session_id")
             try:
-                outcome = sess.wait_for(
+                sess._last_used = time.time()
+                outcome = await asyncio.to_thread(
+                    sess.wait_for,
                     text=args.get("text"),
                     regex=args.get("regex"),
                     gone=args.get("gone"),

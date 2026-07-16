@@ -1775,6 +1775,8 @@ async def _compact_if_needed(
                 ws = run_context._metadata.get("workspace")
                 if isinstance(ws, str):
                     workspace = ws
+            if not workspace:
+                workspace = os.getcwd()
 
             # Auto-enrich carryover from transcript signals when host didn't set it
             try:
@@ -3261,8 +3263,11 @@ async def run_agent_graph(
                     tool_calls=response.tool_calls,
                     gemini_parts=response.gemini_parts,
                 )
+            # Provider-native thinking field (Anthropic/Gemini) when no <think> tags.
+            if not _thinking_content and getattr(response, "thinking", None):
+                _thinking_content = str(response.thinking)
 
-            # Doom-loop: thinking tail-repetition → resample (Grok doom_loop)
+            # Doom-loop: thinking OR response tail-repetition → resample with temp bump
             try:
                 from clawagents.config.features import is_enabled as _feat_doom
                 from clawagents.doom_loop import (
@@ -3273,8 +3278,16 @@ async def run_agent_graph(
                     should_resample,
                 )
 
-                if _feat_doom("doom_loop") and _thinking_content:
-                    sig = detect_tail_repetition(_thinking_content, channel="thinking")
+                if _feat_doom("doom_loop"):
+                    sig = None
+                    if _thinking_content:
+                        sig = detect_tail_repetition(
+                            _thinking_content, channel="thinking"
+                        )
+                    if sig is None and response.content:
+                        sig = detect_tail_repetition(
+                            str(response.content), channel="response"
+                        )
                     if sig is not None:
                         meta = (
                             run_context._metadata
@@ -3291,6 +3304,12 @@ async def run_agent_graph(
                         pol = DoomLoopRecoveryPolicy()
                         if should_resample(sig, doom_state, pol):
                             doom_state.retry_count += 1
+                            # Bump temperature so resample is not a deterministic repeat.
+                            try:
+                                cur_t = float(getattr(llm, "_temperature", 0.0) or 0.0)
+                                setattr(llm, "_temperature", min(1.0, max(0.4, cur_t + 0.4)))
+                            except Exception:
+                                pass
                             emit(
                                 "warn",
                                 {
@@ -3300,7 +3319,6 @@ async def run_agent_graph(
                                     )
                                 },
                             )
-                            # Drop empty/partial doom response and retry this round
                             continue
             except Exception:
                 logger.debug("doom-loop check failed", exc_info=True)
@@ -4896,8 +4914,9 @@ async def run_agent_graph(
                     else:
                         emit("context", {"message": f"dream skipped: {dream_out.reason}"})
                 except asyncio.TimeoutError:
-                    asyncio.create_task(run_dream(_dream_llm, workspace=_ws))
-                    emit("context", {"message": "dream: scheduled (timeout)"})
+                    # Do not orphan a second task while the cancelled coroutine
+                    # still holds dream.lock — run_dream's finally releases it.
+                    emit("context", {"message": "dream: timed out (lock released)"})
     except Exception:
         logger.debug("dream scheduling failed", exc_info=True)
 

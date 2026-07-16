@@ -193,101 +193,87 @@ async def run_dream(
     except OSError as exc:
         return DreamResult(ok=False, reason=f"lock_failed:{exc}")
 
-    memory_path = ws / ".clawagents" / "MEMORY.md"
-    # Never overwrite a human-authored workspace-root MEMORY.md.
-    legacy_root = ws / "MEMORY.md"
-    existing = ""
-    if memory_path.is_file():
-        try:
-            existing = memory_path.read_text(encoding="utf-8")
-        except OSError:
-            existing = ""
-    elif legacy_root.is_file():
-        # Read-only seed from root file; writes go under .clawagents/.
-        try:
-            existing = legacy_root.read_text(encoding="utf-8")
-        except OSError:
-            existing = ""
-
-    prompt = build_dream_user_message(ws, gate.sessions, existing, prompt_cap=cfg.prompt_cap)
-    if not prompt:
-        try:
-            lock.unlink(missing_ok=True)
-        except OSError:
-            pass
-        return DreamResult(ok=False, reason="empty_prompt")
-
+    # Always release the lock — including CancelledError from wait_for timeout.
     try:
-        raw = await llm_complete(prompt)
-    except Exception as exc:  # noqa: BLE001
-        try:
-            lock.unlink(missing_ok=True)
-        except OSError:
-            pass
-        return DreamResult(ok=False, reason=f"llm_error:{exc}")
+        memory_path = ws / ".clawagents" / "MEMORY.md"
+        # Never overwrite a human-authored workspace-root MEMORY.md.
+        legacy_root = ws / "MEMORY.md"
+        existing = ""
+        if memory_path.is_file():
+            try:
+                existing = memory_path.read_text(encoding="utf-8")
+            except OSError:
+                existing = ""
+        elif legacy_root.is_file():
+            try:
+                existing = legacy_root.read_text(encoding="utf-8")
+            except OSError:
+                existing = ""
 
-    consolidated = process_dream_response(raw, max_chars=cfg.max_chars)
-    if not consolidated:
-        try:
-            lock.unlink(missing_ok=True)
-        except OSError:
-            pass
-        return DreamResult(ok=False, reason="nothing_to_store")
-
-    try:
-        memory_path.parent.mkdir(parents=True, exist_ok=True)
-        memory_path.write_text(consolidated.rstrip() + "\n", encoding="utf-8")
-    except OSError as exc:
-        try:
-            lock.unlink(missing_ok=True)
-        except OSError:
-            pass
-        return DreamResult(ok=False, reason=f"write_failed:{exc}")
-
-    cleared: list[str] = []
-    now = time.time()
-    sess_dir = _sessions_dir(ws)
-    for stem in gate.sessions:
-        path = sess_dir / f"{stem}.md"
-        try:
-            if path.is_file() and now - path.stat().st_mtime >= cfg.stale_session_min_age_secs:
-                path.unlink(missing_ok=True)
-                cleared.append(stem)
-        except OSError:
-            continue
-
-    state = _load_state(ws)
-    state["last_dream_at"] = time.time()
-    processed = list(state.get("processed") or [])
-    processed.extend(cleared)
-    state["processed"] = processed[-200:]
-    _save_state(ws, state)
-
-    try:
-        lock.unlink(missing_ok=True)
-    except OSError:
-        pass
-
-    # Also ingest into smart store as curated evergreen
-    try:
-        from clawagents.memory.smart_store import ingest_text
-
-        ingest_text(
-            consolidated,
-            path=".clawagents/MEMORY.md",
-            source="curated",
-            workspace=ws,
-            chunk_id="memory_md",
+        prompt = build_dream_user_message(
+            ws, gate.sessions, existing, prompt_cap=cfg.prompt_cap
         )
-    except Exception:
-        pass
+        if not prompt:
+            return DreamResult(ok=False, reason="empty_prompt")
 
-    return DreamResult(
-        ok=True,
-        reason="consolidated",
-        memory_path=str(memory_path),
-        sessions_cleared=cleared,
-    )
+        try:
+            raw = await llm_complete(prompt)
+        except Exception as exc:  # noqa: BLE001
+            return DreamResult(ok=False, reason=f"llm_error:{exc}")
+
+        consolidated = process_dream_response(raw, max_chars=cfg.max_chars)
+        if not consolidated:
+            return DreamResult(ok=False, reason="nothing_to_store")
+
+        try:
+            memory_path.parent.mkdir(parents=True, exist_ok=True)
+            memory_path.write_text(consolidated.rstrip() + "\n", encoding="utf-8")
+        except OSError as exc:
+            return DreamResult(ok=False, reason=f"write_failed:{exc}")
+
+        cleared: list[str] = []
+        now = time.time()
+        sess_dir = _sessions_dir(ws)
+        for stem in gate.sessions:
+            path = sess_dir / f"{stem}.md"
+            try:
+                if path.is_file() and now - path.stat().st_mtime >= cfg.stale_session_min_age_secs:
+                    path.unlink(missing_ok=True)
+                    cleared.append(stem)
+            except OSError:
+                continue
+
+        state = _load_state(ws)
+        state["last_dream_at"] = time.time()
+        processed = list(state.get("processed") or [])
+        processed.extend(cleared)
+        state["processed"] = processed[-200:]
+        _save_state(ws, state)
+
+        try:
+            from clawagents.memory.smart_store import ingest_text
+
+            ingest_text(
+                consolidated,
+                path=".clawagents/MEMORY.md",
+                source="curated",
+                workspace=ws,
+                chunk_id="memory_md",
+            )
+        except Exception:
+            pass
+
+        return DreamResult(
+            ok=True,
+            reason="consolidated",
+            memory_path=str(memory_path),
+            sessions_cleared=cleared,
+        )
+    finally:
+        try:
+            lock.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 __all__ = [

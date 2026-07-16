@@ -166,7 +166,7 @@ def format_search_hits(hits: list[SessionSearchHit]) -> str:
 
 
 def ensure_fts5(conn: sqlite3.Connection) -> None:
-    """Optional FTS5 index for read-heavy search workloads (insert-only)."""
+    """Create FTS5 index + triggers so inserts/deletes stay in sync."""
     conn.execute(
         """
         CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
@@ -177,3 +177,37 @@ def ensure_fts5(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
+            INSERT INTO messages_fts(content, session_id, message_id)
+            VALUES (
+                coalesce(json_extract(new.payload, '$.content'), new.payload),
+                new.session_id,
+                new.id
+            );
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+            DELETE FROM messages_fts WHERE message_id = old.id;
+        END
+        """
+    )
+    # Backfill once if the FTS table is empty but messages exist.
+    try:
+        n_fts = conn.execute("SELECT COUNT(*) FROM messages_fts").fetchone()[0]
+        n_msg = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+        if n_msg and not n_fts:
+            conn.execute(
+                """
+                INSERT INTO messages_fts(content, session_id, message_id)
+                SELECT coalesce(json_extract(payload, '$.content'), payload),
+                       session_id, id
+                FROM messages
+                """
+            )
+    except Exception:
+        pass

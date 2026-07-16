@@ -46,10 +46,10 @@ class DoomLoopState:
 def is_confident_trigger(
     signal: DoomLoopSignal, policy: DoomLoopRecoveryPolicy | None = None
 ) -> bool:
-    """Only thinking-channel tail_repetition at/under max_threshold is actionable."""
+    """Thinking or response-channel tail_repetition at/under max_threshold."""
     pol = policy or DoomLoopRecoveryPolicy()
     return (
-        signal.channel == "thinking"
+        signal.channel in ("thinking", "response")
         and signal.kind == "tail_repetition"
         and signal.threshold <= pol.max_threshold
     )

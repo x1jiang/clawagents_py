@@ -7,12 +7,15 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 LARGE_PROMPT_THRESHOLD = 25_000
 
 _META_KEY = "pending_interjects"  # list[str]
 _LEGACY_KEY = "pending_interject"  # str (compat)
+
+_BUF_LOCK = threading.Lock()
 
 
 def user_query(user_message: str) -> str:
@@ -44,23 +47,27 @@ def _meta(run_context: Any) -> dict | None:
 
 
 def enqueue_interject(run_context: Any, text: str) -> bool:
-    """Append one interjection entry (never merge into prior text)."""
+    """Append one interjection entry (never merge into prior text).
+
+    Thread-safe for host threads enqueueing while the agent loop drains.
+    """
     msg = (text or "").strip()
     if not msg:
         return False
     meta = _meta(run_context)
     if meta is None:
         return False
-    # Migrate legacy single-string key once
-    legacy = meta.pop(_LEGACY_KEY, None)
-    buf = meta.get(_META_KEY)
-    if not isinstance(buf, list):
-        buf = []
-        meta[_META_KEY] = buf
-    if isinstance(legacy, str) and legacy.strip():
-        buf.append(legacy.strip())
-    buf.append(msg)
-    return True
+    with _BUF_LOCK:
+        # Migrate legacy single-string key once
+        legacy = meta.pop(_LEGACY_KEY, None)
+        buf = meta.get(_META_KEY)
+        if not isinstance(buf, list):
+            buf = []
+            meta[_META_KEY] = buf
+        if isinstance(legacy, str) and legacy.strip():
+            buf.append(legacy.strip())
+        buf.append(msg)
+        return True
 
 
 def drain_interjects(run_context: Any) -> list[str]:
@@ -71,8 +78,9 @@ def drain_interjects(run_context: Any) -> list[str]:
     meta = _meta(run_context)
     if meta is None:
         return []
-    legacy = meta.pop(_LEGACY_KEY, None)
-    raw = meta.pop(_META_KEY, None)
+    with _BUF_LOCK:
+        legacy = meta.pop(_LEGACY_KEY, None)
+        raw = meta.pop(_META_KEY, None)
     entries: list[str] = []
     if isinstance(raw, list):
         entries.extend(str(x).strip() for x in raw if str(x).strip())
@@ -88,8 +96,9 @@ def take_stranded_interjects(run_context: Any) -> list[str]:
     meta = _meta(run_context)
     if meta is None:
         return []
-    legacy = meta.pop(_LEGACY_KEY, None)
-    raw = meta.pop(_META_KEY, None)
+    with _BUF_LOCK:
+        legacy = meta.pop(_LEGACY_KEY, None)
+        raw = meta.pop(_META_KEY, None)
     entries: list[str] = []
     if isinstance(raw, list):
         entries.extend(str(x).strip() for x in raw if str(x).strip())

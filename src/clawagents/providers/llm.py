@@ -242,17 +242,20 @@ async def _with_retry(
     fn: Callable[[], Coroutine[Any, Any, T]],
     *,
     policy: Any = None,
+    breaker_tag: str | None = None,
 ) -> T:
     """Retry ``fn`` with either the legacy heuristic or a :class:`RetryPolicy`.
 
     When ``policy`` is ``None``, behaviour matches the pre-existing
     ``_is_retryable`` heuristic so providers that don't opt-in keep working.
 
-    When ``provider_circuit_breaker`` is enabled, a per-tag breaker admits
-    half-open probes and reclaims abandoned probe leases after ``open_duration``.
+    When ``provider_circuit_breaker`` is enabled, a per-endpoint breaker admits
+    half-open probes. ``BreakerOpen`` waits without burning retry budget.
+    ``breaker_tag`` should be a :func:`breaker_key` identity (base_url+model).
     """
     last_error: BaseException | None = None
     breaker = None
+    bkey = breaker_tag or tag
     try:
         from clawagents.config.features import is_enabled as _feat_cb
 
@@ -263,35 +266,49 @@ async def _with_retry(
                 get_provider_breaker,
             )
 
-            breaker = get_provider_breaker(tag)
+            breaker = get_provider_breaker(bkey)
     except Exception:
         breaker = None
 
-    async def _guarded() -> T:
-        if breaker is not None:
+    async def _admit() -> None:
+        if breaker is None:
+            return
+        from clawagents.circuit_breaker import BreakerOpen
+
+        # Wait for half-open slots without consuming provider retries.
+        for _ in range(24):
             try:
                 breaker.check()
+                return
             except BreakerOpen as open_exc:
                 delay = max(0.05, float(open_exc.retry_after) or 0.05)
                 logger.warning(
                     "  [%s] circuit breaker open — backing off %.2fs",
-                    tag,
+                    bkey,
                     delay,
                 )
                 await asyncio.sleep(delay)
-                breaker.check()
+        breaker.check()
+
+    async def _guarded() -> T:
+        await _admit()
         try:
             result = await fn()
         except Exception as exc:
             if breaker is not None and _is_retryable(exc):
+                from clawagents.circuit_breaker import Outcome
+
                 breaker.record(Outcome.FAILURE)
             raise
         if breaker is not None:
+            from clawagents.circuit_breaker import Outcome
+
             breaker.record(Outcome.SUCCESS)
         return result
 
     if policy is None:
-        for attempt in range(_MAX_RETRIES + 1):
+        attempt = 0
+        while attempt <= _MAX_RETRIES:
             if attempt > 0:
                 delay = _jittered_delay(attempt - 1)
                 logger.warning(
@@ -308,12 +325,14 @@ async def _with_retry(
                         from clawagents.circuit_breaker import BreakerOpen as _BO
 
                         if isinstance(exc, _BO):
+                            # Already waited in _admit; do not burn a retry slot.
                             await asyncio.sleep(max(0.05, float(exc.retry_after) or 0.05))
                             continue
                     except Exception:
                         pass
                 if not _is_retryable(exc):
                     break
+                attempt += 1
         raise last_error  # type: ignore[misc]
 
     # Policy-driven path.
@@ -324,15 +343,15 @@ async def _with_retry(
             return await _guarded()
         except Exception as exc:
             last_error = exc
-            attempt += 1
             try:
                 from clawagents.circuit_breaker import BreakerOpen as _BO
 
                 if isinstance(exc, _BO):
-                    await asyncio.sleep(max(0.05, exc.retry_after))
-                    continue
+                    await asyncio.sleep(max(0.05, float(exc.retry_after) or 0.05))
+                    continue  # do not burn attempt
             except Exception:
                 pass
+            attempt += 1
             try:
                 descriptor = policy.classify(exc)
                 should = policy.should_retry(exc, attempt, descriptor=descriptor)
@@ -1051,6 +1070,15 @@ class OpenAIProvider(LLMProvider):
         formatted = _sanitize_openai_tool_pairs(_openai_chat_messages(messages))
         oai_tools = _to_openai_tools(tools) if tools else None
 
+        try:
+            from clawagents.circuit_breaker import breaker_key as _bk
+
+            _bkey = _bk("openai", base_url=self._base_url, model=self.model)
+            _bkey_resp = _bk("openai-responses", base_url=self._base_url, model=self.model)
+        except Exception:
+            _bkey = "openai"
+            _bkey_resp = "openai-responses"
+
         if self._should_use_responses(bool(oai_tools)):
             try:
                 if not on_chunk:
@@ -1058,6 +1086,7 @@ class OpenAIProvider(LLMProvider):
                         "openai-responses",
                         lambda: self._request_once_responses(formatted, oai_tools),
                         policy=getattr(self, "retry_policy", None),
+                        breaker_tag=_bkey_resp,
                     )
                 return await self._stream_with_retry_responses(
                     formatted, on_chunk, cancel_event, oai_tools,
@@ -1081,6 +1110,7 @@ class OpenAIProvider(LLMProvider):
                 "openai",
                 lambda: self._request_once(formatted, oai_tools),
                 policy=getattr(self, "retry_policy", None),
+                breaker_tag=_bkey,
             )
         return await self._stream_with_retry(formatted, on_chunk, cancel_event, oai_tools)
 
@@ -1353,8 +1383,24 @@ class OpenAIProvider(LLMProvider):
         oai_tools: list[dict[str, Any]] | None = None,
     ) -> LLMResponse:
         last_error: BaseException | None = None
+        breaker = None
+        try:
+            from clawagents.config.features import is_enabled as _feat_cb
+            from clawagents.circuit_breaker import (
+                breaker_key,
+                get_provider_breaker,
+                Outcome,
+            )
 
-        for attempt in range(_MAX_RETRIES + 1):
+            if _feat_cb("provider_circuit_breaker"):
+                breaker = get_provider_breaker(
+                    breaker_key("openai", base_url=self._base_url, model=self.model)
+                )
+        except Exception:
+            breaker = None
+
+        attempt = 0
+        while attempt <= _MAX_RETRIES:
             if attempt > 0:
                 delay = _jittered_delay(attempt - 1)
                 logger.warning(
@@ -1362,6 +1408,32 @@ class OpenAIProvider(LLMProvider):
                     attempt, _MAX_RETRIES, delay,
                 )
                 await asyncio.sleep(delay)
+
+            if breaker is not None:
+                try:
+                    from clawagents.circuit_breaker import BreakerOpen
+
+                    for _ in range(24):
+                        try:
+                            breaker.check()
+                            break
+                        except BreakerOpen as open_exc:
+                            await asyncio.sleep(
+                                max(0.05, float(open_exc.retry_after) or 0.05)
+                            )
+                    else:
+                        breaker.check()
+                except Exception as exc:
+                    last_error = exc
+                    try:
+                        from clawagents.circuit_breaker import BreakerOpen as _BO
+
+                        if isinstance(exc, _BO):
+                            await asyncio.sleep(max(0.05, float(exc.retry_after) or 0.05))
+                            continue
+                    except Exception:
+                        pass
+                    raise
 
             chunks: list[str] = []
             final_tokens = 0
@@ -1441,6 +1513,8 @@ class OpenAIProvider(LLMProvider):
                     except Exception:
                         pass  # malformed chunk — skip
 
+                if breaker is not None:
+                    breaker.record(Outcome.SUCCESS)
                 return LLMResponse(
                     content="".join(chunks),
                     model=self.model,
@@ -1452,6 +1526,8 @@ class OpenAIProvider(LLMProvider):
 
             except Exception as exc:
                 last_error = exc
+                if breaker is not None and _is_retryable(exc):
+                    breaker.record(Outcome.FAILURE)
                 # A mid-stream exception used to return the truncated text as a
                 # non-retried "final" answer. Retry retryable errors first; only
                 # surface a partial (now including any accumulated tool calls)
@@ -1461,6 +1537,7 @@ class OpenAIProvider(LLMProvider):
                         "  [openai] Stream interrupted after %d chars — retrying",
                         len("".join(chunks)),
                     )
+                    attempt += 1
                     continue
                 if chunks or tools_accumulation:
                     partial = "".join(chunks)

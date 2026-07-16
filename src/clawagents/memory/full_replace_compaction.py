@@ -435,8 +435,8 @@ async def apply_full_replace_compaction(
         return None
     older, last_query, recent = split
 
-    # HistoryThenSteps: fold recent tool steps into history summarization only
-    # when they exceed ~30% of history tokens (Grok graduated compaction).
+    # HistoryThenSteps: graduated shedding of recent tool steps into history.
+    # 15% → trim tool bodies; 30% → fold older half of recent; 50% → fold all.
     try:
         from clawagents.config.features import is_enabled
         from clawagents.memory.compaction_segments import should_compact_steps_after_history
@@ -449,9 +449,35 @@ async def apply_full_replace_compaction(
         if hts and recent:
             history_tokens = _rough_message_tokens(older)
             steps_tokens = _rough_message_tokens(recent)
-            if should_compact_steps_after_history(history_tokens, steps_tokens):
+            ratio = (steps_tokens / history_tokens) if history_tokens > 0 else 1.0
+            if ratio > 0.50 or should_compact_steps_after_history(
+                history_tokens, steps_tokens, steps_trigger_ratio=0.50
+            ):
                 older = list(older) + list(recent)
                 recent = []
+            elif ratio > 0.30 or should_compact_steps_after_history(
+                history_tokens, steps_tokens, steps_trigger_ratio=0.30
+            ):
+                mid = max(1, len(recent) // 2)
+                older = list(older) + list(recent[:mid])
+                recent = list(recent[mid:])
+            elif ratio > 0.15:
+                trimmed: list[LLMMessage] = []
+                for m in recent:
+                    if getattr(m, "role", None) == "tool":
+                        content = m.content if isinstance(m.content, str) else str(m.content)
+                        if len(content) > 800:
+                            content = content[:800] + "\n…[trimmed for HistoryThenSteps]"
+                            trimmed.append(
+                                LLMMessage(
+                                    role="tool",
+                                    content=content,
+                                    tool_call_id=getattr(m, "tool_call_id", None),
+                                )
+                            )
+                            continue
+                    trimmed.append(m)
+                recent = trimmed
     except Exception:
         pass
 

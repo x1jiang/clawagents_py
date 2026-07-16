@@ -51,7 +51,8 @@ def should_flush(
     if not cfg.enabled or context_window <= 0:
         return False
     key = str(Path(workspace or os.getcwd()).resolve())
-    if _LAST_FLUSH_CYCLE.get(key) == compaction_cycle and compaction_cycle > 0:
+    # Skip if we already flushed for this compaction cycle (incl. cycle 0).
+    if _LAST_FLUSH_CYCLE.get(key) == compaction_cycle:
         return False
     threshold = int(context_window * cfg.compact_pct) - cfg.soft_threshold_tokens
     return total_tokens >= max(1, threshold)

@@ -13,7 +13,8 @@ class MemorySearchTool:
     name = "memory_search"
     description = (
         "Search durable project memories (smart memory store): facts, decisions, "
-        "flush notes, and curated MEMORY.md chunks. Uses hybrid FTS5 + MMR ranking."
+        "flush notes, and curated MEMORY.md chunks. Uses FTS5 + Jaccard MMR "
+        "(exact blake2 dedup; no vector/cosine embeddings)."
     )
     parameters = {
         "query": {

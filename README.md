@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.17.6-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.17.7-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -22,8 +22,8 @@ This repo is the **Python framework** (`pip install clawagents`). Ready-made cli
 | Product | Latest | What it is | Link |
 |---------|--------|------------|------|
 | **ClawAgents Desktop** | **v0.2.4** | Native macOS app — project chats, file editor, SSH remotes, Settings (incl. AWS Bedrock), Developer ID signed + notarized | [Repo](https://github.com/x1jiang/clawagents-desktop) · [Download DMG](https://github.com/x1jiang/clawagents-desktop/releases/tag/v0.2.4) |
-| **ClawAgents for VS Code / Cursor** | **v1.0.50** | Editor extension — chat, tools, Goal redirect, hunk review, session rewind, voice dictation, Bedrock | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Release + VSIX](https://github.com/x1jiang/clawagents-vscode/releases/tag/v1.0.47) |
-| **Python package** | **v6.17.6** | This library — P1 security hardening (hooks RCE, seatbelt escape, SSRF, secrets) · `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/) · [Release](https://github.com/x1jiang/clawagents_py/releases) |
+| **ClawAgents for VS Code / Cursor** | **v1.0.51** | Editor extension — chat, tools, Goal redirect, hunk review, session rewind, voice dictation, Bedrock | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Release + VSIX](https://github.com/x1jiang/clawagents-vscode/releases/tag/v1.0.51) |
+| **Python package** | **v6.17.7** | This library — P2/P3 correctness (breaker, FTS5, doom-loop, dream lock, …) · `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/) · [Release](https://github.com/x1jiang/clawagents_py/releases) |
 | **TypeScript package** | **v6.12.13** | Node/TS sibling — `npm install git+https://github.com/x1jiang/clawagents.git` | [Repo](https://github.com/x1jiang/clawagents) |
 
 ## Installation
@@ -36,11 +36,21 @@ pip install -U 'clawagents[bedrock]'   # + Amazon Bedrock (Claude via IAM + Nova
 pip install -U 'clawagents[all]'       # All providers + tiktoken
 ```
 
+> **Version 6.17.7** — P2/P3 correctness hardening (July 2026).
+
 > **Version 6.17.6** — P1 security hardening (July 2026).
 
 > **Version 6.17.5** — Skill allowed-tools / grep / apply_patch tool-error fixes (July 2026).
 
 > **Version 6.17.4** — Act mode no longer inherits Goal verifier from a prior Goal run (July 2026).
+
+### New In v6.17.7
+- **Circuit breaker:** per-endpoint keys; streaming covered; `BreakerOpen` waits without burning retries
+- **Structured output:** `FallbackProvider` propagates schema to children
+- **Session FTS5:** triggers + backfill (MATCH no longer silently empty)
+- **Smart memory / docs:** FTS replace cleans orphans; hybrid = FTS5 + Jaccard MMR (not vectors)
+- **Memory flush / dream:** cycle-0 guard; lock always released; no orphan timeout task
+- **Doom-loop / HistoryThenSteps / PTY / interject:** response-channel + temp bump; graduated fold; to_thread+reaper; thread-safe export
 
 ### New In v6.17.6
 - **Hooks:** `hook_taxonomy` default off; taxonomy dispatcher also requires `external_hooks` (no SessionStart RCE from cloned `hooks.json`)
@@ -1540,6 +1550,12 @@ parity sweep.
 ---
 
 ## Changelog
+
+### v6.17.7 — P2/P3 correctness (July 2026)
+
+- Circuit breaker endpoint isolation + streaming + non-burning BreakerOpen waits
+- Session FTS5 populate; smart_store FTS replace; flush cycle guard; dream lock finally
+- Doom-loop response channel; HistoryThenSteps graduated; PTY reaper; interject export
 
 ### v6.17.6 — P1 security hardening (July 2026)
 

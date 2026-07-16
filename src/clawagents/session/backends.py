@@ -261,6 +261,12 @@ class SQLiteSession:
                 (self.session_id,),
             )
             next_ord = (cur.fetchone()[0] or -1) + 1
+            try:
+                from clawagents.session.search import ensure_fts5
+
+                ensure_fts5(conn)  # triggers must exist before INSERT
+            except Exception:
+                pass
             conn.executemany(
                 "INSERT INTO messages(session_id, ord, payload) VALUES (?, ?, ?)",
                 [

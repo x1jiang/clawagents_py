@@ -1,4 +1,4 @@
-__version__ = "6.17.6"
+__version__ = "6.17.7"
 
 from clawagents.agent import ClawAgent, create_claw_agent
 from clawagents.run_result import RunResult
@@ -119,6 +119,9 @@ from clawagents.commands import (
 )
 
 # ── Mid-run nudges (v6.5) ──────────────────────────────────────────────
+from clawagents.interjection import (
+    enqueue_interject, drain_interjects, take_stranded_interjects,
+)
 from clawagents.steer import (
     SteerMessage, SteerQueue, NextTurnQueue, SteerHook,
     steer, queue_message,

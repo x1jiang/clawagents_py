@@ -206,12 +206,26 @@ class CircuitBreaker:
         raise BreakerOpen(retry_after=min(0.05, self.config.open_duration))
 
 
-# Process-wide breakers keyed by provider tag (openai / anthropic / …)
+# Process-wide breakers keyed by endpoint identity (not bare provider class).
+# Ollama-via-OpenAI and cloud OpenAI must not share a breaker.
 _REGISTRY: dict[str, CircuitBreaker] = {}
 _REGISTRY_LOCK = threading.Lock()
 
 
+def breaker_key(tag: str, *, base_url: str | None = None, model: str | None = None) -> str:
+    """Stable breaker identity: tag + base_url + model."""
+    t = (tag or "default").strip().lower() or "default"
+    b = (base_url or "").strip().rstrip("/").lower()
+    m = (model or "").strip().lower()
+    return f"{t}|{b}|{m}"
+
+
 def get_provider_breaker(tag: str, config: BreakerConfig | None = None) -> CircuitBreaker:
+    """Return (or create) a breaker for ``tag``.
+
+    Prefer passing a key from :func:`breaker_key` so local OpenAI-compatible
+    endpoints do not trip the cloud OpenAI breaker.
+    """
     key = (tag or "default").strip().lower() or "default"
     with _REGISTRY_LOCK:
         if key not in _REGISTRY:
@@ -231,6 +245,7 @@ __all__ = [
     "BreakerOpen",
     "BreakerConfig",
     "CircuitBreaker",
+    "breaker_key",
     "get_provider_breaker",
     "reset_provider_breakers",
 ]

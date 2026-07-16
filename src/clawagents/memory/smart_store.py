@@ -57,7 +57,7 @@ class MemorySearchConfig:
     max_results: int = 6
     min_score: float = 0.15
     text_weight: float = 0.7
-    vector_weight: float = 0.3
+    vector_weight: float = 0.0  # reserved; hybrid_search is FTS+MMR (Jaccard), not vectors
     temporal_decay: bool = True
     half_life_days: float = 7.0
     access_boost_k: float = 0.05
@@ -142,6 +142,11 @@ class SmartMemoryStore:
             ),
         )
         if self._fts:
+            # REPLACE on chunks leaves orphan FTS rows; delete then insert.
+            self._conn.execute(
+                "DELETE FROM chunks_fts WHERE chunk_id = ?",
+                (chunk.chunk_id,),
+            )
             self._conn.execute(
                 "INSERT INTO chunks_fts(chunk_id, content, path) VALUES (?, ?, ?)",
                 (chunk.chunk_id, chunk.content, chunk.path),
