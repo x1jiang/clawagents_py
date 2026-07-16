@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import fnmatch
 import os
+import shlex
 import shutil
 import tempfile
 from dataclasses import dataclass
@@ -94,6 +96,32 @@ _BUILTIN: dict[str, OSSandboxProfile] = {
 
 def _default_secret_globs() -> tuple[str, ...]:
     return (".env", ".env.*", "**/credentials*", "**/secrets*", "**/*.pem")
+
+
+def _path_matches_secret_globs(
+    resolved: str,
+    cwd: str,
+    secret_globs: tuple[str, ...],
+) -> bool:
+    """True when ``resolved`` is a secret path under ``cwd`` (or basename match)."""
+    name = os.path.basename(resolved)
+    try:
+        rel = os.path.relpath(resolved, cwd)
+    except ValueError:
+        rel = name
+    rel_posix = rel.replace(os.sep, "/")
+    for pattern in secret_globs:
+        pat = pattern.replace("\\", "/")
+        if fnmatch.fnmatch(name, pat.lstrip("*/")) or fnmatch.fnmatch(rel_posix, pat):
+            return True
+        if pat in {".env", "credentials", "secrets"} and (
+            name == pat or name.startswith(pat + ".")
+        ):
+            return True
+    # Always treat workspace .env as secret when any secret globs are configured.
+    if secret_globs and name == ".env":
+        return True
+    return False
 
 
 def _resolve_secret_overlay_paths(
@@ -315,6 +343,12 @@ class ProfileBackend:
                 raise ValueError(
                     f"Path denied by profile {self._profile.name}: {user_path}"
                 )
+        # Secret deny applies to in-process reads too (not only bwrap/seatbelt exec).
+        secret_globs = getattr(self._profile, "secret_deny_paths", ()) or ()
+        if secret_globs and _path_matches_secret_globs(resolved, self.cwd, secret_globs):
+            raise ValueError(
+                f"Secret path denied by profile {self._profile.name}: {user_path}"
+            )
         if not self._path_allowed(resolved):
             raise ValueError(
                 f"Path outside allow_paths for profile {self._profile.name}: {user_path}"
@@ -322,9 +356,12 @@ class ProfileBackend:
         return resolved
 
     async def read_file(self, path: str) -> str:
+        # Enforce secret deny even if callers bypass safe_path.
+        self.safe_path(path)
         return await self._inner.read_file(path)
 
     async def read_file_bytes(self, path: str) -> bytes:
+        self.safe_path(path)
         return await self._inner.read_file_bytes(path)
 
     async def write_file(self, path: str, content: str) -> None:
@@ -389,8 +426,19 @@ class ProfileBackend:
                 try:
                     profile_path.parent.mkdir(parents=True, exist_ok=True)
                     profile_path.write_text(profile_text, encoding="utf-8")
-                    wrapped = (
-                        f"{binary} -f {profile_path!s} /bin/sh -c {command!r}"
+                    # Never interpolate the user command with !r — a single quote
+                    # in ``command`` flips Python's repr to double quotes and lets
+                    # $()/backticks expand in the outer shell BEFORE sandbox-exec.
+                    wrapped = " ".join(
+                        shlex.quote(p)
+                        for p in [
+                            binary,
+                            "-f",
+                            str(profile_path),
+                            "/bin/sh",
+                            "-c",
+                            command,
+                        ]
                     )
                 except OSError as exc:
                     self.profile_warnings.append(f"seatbelt profile write failed: {exc}")

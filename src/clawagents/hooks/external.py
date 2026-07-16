@@ -125,10 +125,17 @@ async def run_hook(
 def build_taxonomy_dispatcher(
     legacy: HooksConfig | None = None,
 ) -> Any | None:
-    """Load expanded hook taxonomy dispatcher when ``hook_taxonomy`` is enabled."""
+    """Load expanded hook taxonomy dispatcher when explicitly opted in.
+
+    Requires BOTH ``hook_taxonomy`` and ``external_hooks`` so a cloned
+    ``.clawagents/hooks.json`` cannot execute ``bash -lc`` on SessionStart
+    when the user never enabled external hooks.
+    """
     from clawagents.config.features import is_enabled
 
     if not is_enabled("hook_taxonomy"):
+        return None
+    if not is_enabled("external_hooks"):
         return None
 
     from clawagents.hooks.taxonomy import (

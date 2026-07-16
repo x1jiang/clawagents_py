@@ -218,7 +218,27 @@ class HunkWatcher:
             "build",
             ".tox",
         }
-        return any(p in ignore_dirs for p in parts)
+        if any(p in ignore_dirs for p in parts):
+            return True
+        name = Path(rel).name
+        # Never snapshot secrets into world-readable rewind JSON.
+        secret_names = {
+            ".env",
+            ".env.local",
+            ".env.production",
+            ".env.development",
+            "credentials.json",
+            "secrets.json",
+            "id_rsa",
+            "id_ed25519",
+        }
+        if name in secret_names or name.startswith(".env."):
+            return True
+        if name.endswith((".pem", ".key", ".p12", ".pfx")):
+            return True
+        if "credentials" in name.lower() or "secret" in name.lower():
+            return True
+        return False
 
     def poll_once(self) -> list[str]:
         """Scan watched files for external mtime changes; refresh hunks."""

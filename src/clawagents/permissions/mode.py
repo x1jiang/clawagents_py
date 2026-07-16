@@ -84,6 +84,10 @@ WRITE_CLASS_TOOLS: frozenset[str] = frozenset({
     "execute",
     "exec",
     "bash",
+    "pty_start",
+    "pty_keys",
+    "pty_wait",
+    "pty_stop",
     # Composite / sub-agent tools that may issue writes.
     # (Sub-agents inherit permission_mode in their own run_context, so
     # gating at the parent dispatch site is defensive.)

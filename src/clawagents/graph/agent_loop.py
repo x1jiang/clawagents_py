@@ -2825,6 +2825,9 @@ async def run_agent_graph(
                 else None
             )
             idx = int((meta_rw or {}).get("prompt_index") or 0) + 1
+            # RunContext is recreated every VS Code turn, so metadata alone always
+            # yields idx=1 and overwrites prompt_0001.json. Prefer the watcher.
+            idx = max(idx, int(getattr(w, "_prompt_index", 0) or 0) + 1)
             if meta_rw is not None:
                 meta_rw["prompt_index"] = idx
             _conv_marker: list[dict[str, str]] = []

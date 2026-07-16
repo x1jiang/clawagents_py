@@ -87,9 +87,9 @@ _FEATURE_DEFAULTS: dict[str, str] = {
     "compaction_segments":  "1",   # Greppable segment_NNN.md + INDEX.md
     "hunk_watcher":         "1",   # External edit attribution via mtime watch
     "session_rewind":       "1",   # Rewind to prompt N (files + conversation)
-    "hook_taxonomy":        "1",   # Expanded hook events + webhook SSRF guard
+    "hook_taxonomy":        "0",   # Opt-in; requires external_hooks too (was RCE default-on)
     "sandbox_fail_closed":  "0",   # Refuse soft-fallback; secret path deny binds
-    "provider_circuit_breaker": "1",  # Half-open probe-lease reclaim on LLM transport
+    "provider_circuit_breaker": "0",  # Off by default — concurrency burns retries on BreakerOpen
 }
 
 

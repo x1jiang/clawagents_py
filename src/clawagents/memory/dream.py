@@ -1,7 +1,8 @@
 """Dream consolidation — merge session logs into durable MEMORY.md.
 
 Grok Build parity (xai-grok-memory dream.rs): gated on elapsed time + session
-count; overwrites workspace MEMORY.md; cleans processed session files.
+count. Writes under ``.clawagents/MEMORY.md`` only — never overwrites a
+human-authored workspace-root MEMORY.md. Cleans processed session files.
 """
 
 from __future__ import annotations
@@ -192,11 +193,19 @@ async def run_dream(
     except OSError as exc:
         return DreamResult(ok=False, reason=f"lock_failed:{exc}")
 
-    memory_path = ws / "MEMORY.md"
+    memory_path = ws / ".clawagents" / "MEMORY.md"
+    # Never overwrite a human-authored workspace-root MEMORY.md.
+    legacy_root = ws / "MEMORY.md"
     existing = ""
     if memory_path.is_file():
         try:
             existing = memory_path.read_text(encoding="utf-8")
+        except OSError:
+            existing = ""
+    elif legacy_root.is_file():
+        # Read-only seed from root file; writes go under .clawagents/.
+        try:
+            existing = legacy_root.read_text(encoding="utf-8")
         except OSError:
             existing = ""
 
@@ -226,6 +235,7 @@ async def run_dream(
         return DreamResult(ok=False, reason="nothing_to_store")
 
     try:
+        memory_path.parent.mkdir(parents=True, exist_ok=True)
         memory_path.write_text(consolidated.rstrip() + "\n", encoding="utf-8")
     except OSError as exc:
         try:
@@ -264,7 +274,7 @@ async def run_dream(
 
         ingest_text(
             consolidated,
-            path="MEMORY.md",
+            path=".clawagents/MEMORY.md",
             source="curated",
             workspace=ws,
             chunk_id="memory_md",

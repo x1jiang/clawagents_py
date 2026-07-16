@@ -183,26 +183,63 @@ def _run_webhook(handler: HookHandler, payload: dict[str, Any]) -> HookDecision:
         return HookDecision(allowed=True, reason="no_url", source="skip")
     ok, reason = validate_hook_url(handler.url)
     if not ok:
-        # SSRF block = fail-open (do not deny the tool)
-        return HookDecision(allowed=True, reason=reason, source="ssrf_fail_open")
+        # Fail-closed: bad webhook must not silently allow the tool.
+        return HookDecision(allowed=False, reason=reason, source="ssrf_fail_closed")
+    from urllib.parse import urljoin
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: N802
+            return None  # force HTTPError so we re-validate Location ourselves
+
     data = json.dumps({"event": payload.get("event"), "payload": payload}).encode("utf-8")
-    req = urllib.request.Request(
-        handler.url,
-        data=data,
-        headers={"Content-Type": "application/json", "User-Agent": "clawagents-hooks/6.17"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=max(0.5, handler.timeout_s)) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-            return parse_blocking_result(body, 0)
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
-        if body.strip().startswith("{"):
-            return parse_blocking_result(body, DENY_EXIT_CODE if exc.code >= 400 else 0)
-        return HookDecision(allowed=True, reason=f"http_{exc.code}", source="fail_open")
-    except Exception as exc:  # noqa: BLE001
-        return HookDecision(allowed=True, reason=f"webhook_error:{exc}", source="fail_open")
+    # Manual redirect loop with re-validation (no urlopen auto-follow / DNS rebind).
+    url = handler.url
+    max_hops = 5
+    opener = urllib.request.build_opener(_NoRedirect())
+    for _ in range(max_hops):
+        ok, reason = validate_hook_url(url)
+        if not ok:
+            return HookDecision(allowed=False, reason=reason, source="ssrf_fail_closed")
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "clawagents-hooks/6.17",
+            },
+            method="POST",
+        )
+        try:
+            with opener.open(req, timeout=max(0.5, handler.timeout_s)) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+                return parse_blocking_result(body, 0)
+        except urllib.error.HTTPError as exc:
+            if 300 <= exc.code < 400:
+                loc = exc.headers.get("Location") if exc.headers else ""
+                if not loc:
+                    return HookDecision(
+                        allowed=False, reason="redirect_no_location", source="ssrf_fail_closed"
+                    )
+                next_url = urljoin(url, loc)
+                if str(next_url).startswith("http://"):
+                    return HookDecision(
+                        allowed=False,
+                        reason="https_only_redirect",
+                        source="ssrf_fail_closed",
+                    )
+                url = next_url
+                continue
+            body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
+            if body.strip().startswith("{"):
+                return parse_blocking_result(body, DENY_EXIT_CODE if exc.code >= 400 else 0)
+            return HookDecision(
+                allowed=False, reason=f"http_{exc.code}", source="fail_closed"
+            )
+        except Exception as exc:  # noqa: BLE001
+            return HookDecision(
+                allowed=False, reason=f"webhook_error:{exc}", source="fail_closed"
+            )
+    return HookDecision(allowed=False, reason="too_many_redirects", source="ssrf_fail_closed")
 
 
 @dataclass

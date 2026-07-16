@@ -25,6 +25,24 @@ def _pty_available() -> bool:
         return False
 
 
+def _sanitized_pty_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """Scrub secrets from the PTY environment (same floor as LocalBackend.exec)."""
+    from clawagents.redact import is_secret_name
+    from clawagents.sandbox.local import LocalBackend
+
+    base = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in LocalBackend._SENSITIVE_ENV_KEYS and not is_secret_name(k)
+    }
+    if extra:
+        for k, v in extra.items():
+            if k in LocalBackend._SENSITIVE_ENV_KEYS or is_secret_name(k):
+                continue
+            base[k] = v
+    return base
+
+
 @dataclass
 class WaitDiagnostics:
     screen: str
@@ -77,7 +95,7 @@ class PtySession:
         self._child = pexpect.spawn(
             cmd,
             cwd=cwd or os.getcwd(),
-            env={**os.environ, **(env or {})},
+            env=_sanitized_pty_env(env),
             encoding=None,
             dimensions=(rows, cols),
             timeout=None,
