@@ -1568,212 +1568,6 @@ parity sweep.
 - Deny-wins permission rules on by default; best-of-n skill; prefire compaction; mid-turn interject
 - Companion — VS Code **1.0.43**
 
-### Earlier headlines (from README)
-
-#### v6.13.1
-
-- **ATLAS fail-closed** — reflection-harvest and final-gate exceptions abort the run instead of silently releasing an answer.
-- **Pinned ATLAS revision** — install docs and hints pin `atlas-skill` to commit `3a917f3e0b993e3bfd77f652b013193aed167964`.
-- **Companion** — VS Code **1.0.36**.
-
-#### v6.13.0
-
-- **ATLAS harness** — optional `atlas=True` / `CLAW_ATLAS=1` supervision layer: runtime protocol, tool-failure / subagent checkpoints, blocking final gate, redacted `record_trace` + taxonomy learning via `atlas_runtime`.
-- **Install ATLAS runtime** — `pip install 'atlas-skill @ git+https://github.com/multi-agent-systems-failure-taxonomy/ATLAS.git@3a917f3e0b993e3bfd77f652b013193aed167964'` (marker extra `clawagents[atlas]` is a no-op on PyPI).
-- **Companion** — VS Code **1.0.35** Settings checkbox for ATLAS.
-
-#### v6.12.13
-
-- **Skill retrieval** — high-recall intent coverage (aliases / triggers / anti-triggers / morphology) instead of fixed token-saving cutoffs; short follow-ups inherit prior intent.
-- **Paged `use_skill`** — contiguous, content-hash-bound pages; no data-plane tools until every page is read.
-- **Composed `allowed-tools`** — intersecting boundaries only (cannot widen authority by loading another skill).
-- **Workshop hardening** — path/content validation on writes.
-- **Companion** — VS Code **1.0.32**; TypeScript **6.12.13**.
-
-#### v6.12.12
-
-- **`invoke(images=…)`** — attach vision images to the first user message (OpenAI `image_url` canonical; Anthropic / Responses / Bedrock / Gemini conversions).
-- **`invoke(files=…)`** — attach PDF (native `file` / `document` blocks) or DOCX (text-extracted) to the first user message.
-- **Companion** — VS Code **1.0.31** (image + PDF/DOCX attach UI); TypeScript **6.12.12**.
-
-#### v6.12.11
-
-- **Docs** — README aligned with the current skill loader, ACP schema fixes, and VS Code **1.0.30** companion.
-
-#### v6.12.10
-
-- **`disable-model-invocation`** — skills with `disable-model-invocation: true` stay out of the model catalog and refuse `use_skill` (user-invocation only).
-- **ACP tool_call schema** — required `title` / `kind`; tool content wrapped for spec-strict clients.
-
-#### v6.12.9
-
-- **Skill loader** — bundled dirs load first (user/workspace override); safer `requires` parsing; ineligibility reasons; resource disclosure in `use_skill`; size caps and frontmatter fallbacks.
-
-#### v6.12.8
-
-- **Per-turn skill ranking** — catalog re-ordered against the latest user message with a Recommended section.
-- **Stronger `use_skill`** — fuzzy / case-insensitive names; better YAML descriptions; injection upsert (no duplicate catalogs).
-
-#### v6.12.7
-
-- **Dynamic skill-catalog budget** — ~1.5% of context (floor 4k / ceiling 16k chars); description-first truncation; `CLAW_SKILL_LISTING_*` overrides.
-
-#### v6.12.6
-
-- **`list_skills` registered** alongside `use_skill` for overflow catalog discovery.
-
-#### v6.12.5 / v6.12.4
-
-- **`CLAWAGENTS_SKIP_DOTENV`** — long-lived hosts (VS Code sidecar) skip mid-process `.env` reloads.
-- **Host API keys** — workspace `.env` no longer clobbers SecretStorage / spawn-injected keys (`CLAWAGENTS_DOTENV_OVERRIDE=0`).
-
-#### v6.12.3
-
-- **`wire_api`** — `auto` | `responses` | `chat_completions` for OpenAI-compatible proxies (Codex Responses-only gateways that 404 `/chat/completions`).
-- **`ssl_verify`** — disable TLS verify for private-CA corporate endpoints.
-- **Auto Responses** — GPT-5.5/5.6/Codex prefer `/v1/responses` even on custom `base_url` (no longer limited to api.openai.com).
-- **SSE proxies** — non-stream Responses requests collect via streaming (gateways that ignore `stream=false`).
-
-#### v6.12.2
-
-- **Responses API** — `OpenAIProvider` auto-selects `/v1/responses` vs Chat Completions from model + endpoint (GPT-5.5/5.6/Codex on official OpenAI; Ollama/BAG/Azure stay on Chat Completions; sticky fallback if Responses is missing).
-- **Reasoning + tools** — Responses path keeps `reasoning.effort` with function tools (no more forced `none` on GPT-5.5/5.6 when Responses is available).
-
-#### v6.12.1
-
-- **`reasoning_effort`** on `create_claw_agent` / OpenAI provider (`none`|`low`|`medium`|`high`|`xhigh`|`max`; UI aliases Light→low, Extra High→xhigh)
-- Chat Completions + tools on GPT-5.5/5.6 force `none` when falling back from Responses
-
-#### v6.12.0
-
-- **Native AWS Bedrock** — Claude via `AsyncAnthropicBedrock` (IAM / HIPAA path); Nova and other models via Converse API. `pip install 'clawagents[bedrock]'`.
-- **Model routing** — Bedrock IDs (`us.anthropic.…`, `amazon.nova-…`, `bedrock/…`) use native providers when `base_url` is unset; OpenAI-compatible BAG/LiteLLM still works with `base_url`.
-- **Profiles** — `profile="bedrock"` (native) and `profile="bedrock-gateway"` (proxy).
-- **Config** — `AWS_REGION` / `AWS_PROFILE` / access keys + `BEDROCK_MODEL` / `PROVIDER=bedrock`.
-
-#### v6.11.2
-
-- **`web_search`** — Tavily-backed search tool (`TAVILY_API_KEY`). Ranked URLs + snippets; use `web_fetch` for full pages.
-
-#### v6.11.1
-
-- **CodeAct sandbox** — curated `__builtins__` + AST forbid-list so `open`/`__import__`/`eval` cannot bypass tool permissions.
-- **Checkpoint refs** — reject malformed SHAs before `git reset` / `diff`.
-- **Evals judge** — align `judge_run` call signature with the trajectory judge API.
-
-#### v6.11.0
-
-- **Shadow-git restore modes** — `files` / `conversation` / `both` with turn binding + `checkpoint_diff`.
-- **Always-on rules** — `CLAUDE.md` + `.clawagents/rules/**` re-injected every LLM round.
-- **Custom modes** — `.clawagents/modes.json` + builtins; CLI `--mode` / `--auto`.
-- **CodeAct** — `create_claw_agent(action_mode="code")` Python-as-action loop.
-- **Evals** — `python -m clawagents evals <suite.json>` + library `approval_handler`.
-
-#### v6.10.8
-
-- **Compaction budget** — `compress_messages_safe` re-measures after the safe tier and escalates to summarization when still over context (no more false “under budget”).
-- **Message identity** — reuse original message objects when role+content survive compression so session tracking and `tool_calls_meta` / `tool_call_id` stay intact.
-- **Judge usage** — LLM-as-Judge token spend flows into the run’s `Usage`.
-
-#### v6.10.7
-
-- **Repo map** — ranked symbol map tool (+ optional prompt inject).
-- **Context ledger** — commit-boundary restorable memory with `rehydrate_ledger`.
-- **Shadow-git checkpoints** — Cline-style undo without touching project git.
-- **`apply_patch`** — SEARCH/REPLACE and unified-diff surgical edits.
-- **Core memory / memory bank / live facts** — editable blocks + superseding facts.
-- **Git + worktree tools** — status/diff/commit/undo; isolated worktrees for parallel agents.
-- **Plan handoff** — `write_plan` → `.clawagents/plan.md`; harness clear-tool knobs; compaction thrash guard.
-
-#### v6.10.6
-
-- **Prompt-cache align** — normalize static system prefix; lessons sit *after* `__CACHE_BOUNDARY__`; tools listed alphabetically.
-- **Tiered `read_file`** — `tier=L0` outline/symbols, `L1` paginated body, `L2` large/full read.
-- **Compaction** — wire `compress_messages_safe` + `on_pre_compact` / `on_post_compact`; output-side trim; content budgets for tool results.
-- **Crushers** — HTML / diff / pytest-junit crushers; multimodal `sanitize_tool_output` on ingest.
-- **Recoverability** — micro-compact stubs keep artifact ids; `retrieve_tool_result(query=…)` searches local artifacts.
-- **Failure learn** — append durable lesson bullets into workspace `AGENTS.md`.
-
-#### v6.10.5
-
-- **Gemini 400 recovery** — on FR/FC / thought_signature `INVALID_ARGUMENT`, retry once with tool turns flattened to plain text.
-- **Signature fidelity** — do not copy `thought_signature` onto sibling parallel FCs.
-- **External hook skip** — close assistant+tool pair instead of a bare `[Tool Skipped]` user turn.
-
-#### v6.10.4
-
-- **Gemini FC/FR ids** — use API `function_call.id` (or a stable generated id stamped into both FC and FR).
-- **thought_signature** — base64 round-trip for session JSON; always prefer preserved `gemini_parts` when replaying tool turns.
-- **Sanitize rewrite** — strict FC→FR pairing, orphan FR drop, spacer model only when plain user text follows FR.
-
-#### v6.10.3
-
-- **Gemini FR purity** — keep `function_response` turns FR-only (do not coalesce with following user text); insert a spacer model turn when needed.
-- **Orphan FR drop** — remove `function_response` that does not follow a model `function_call`.
-- **gemini_parts safety** — if stored parts lack `function_call` but `tool_calls_meta` exists, rebuild the model turn from meta.
-
-#### v6.10.2
-
-- **Gemini conversation hygiene** — merge consecutive `user`/`model` turns (parallel tool results); insert synthetic `function_response` when a call was skipped; drop leading orphan model turns. Fixes `INVALID_ARGUMENT` about function-call turn ordering.
-- **Skipped-tool transcript** — `before_tool` / RunContext rejects now close the native assistant+tool pair instead of appending a bare `[Tool Skipped]` user message.
-
-#### v6.10.1
-
-- **Gemini / OpenAI tool schemas** — array parameters always declare `items.type` (fixes Gemini `400 INVALID_ARGUMENT` on tools).
-- **GPT-5.5 / GPT-5.6 + tools** — prefer Responses API; Chat Completions fallback still sets `reasoning_effort=none`.
-- **Orphan tool messages** — session preload and OpenAI formatting drop tool results without a matching `tool_calls` id (fixes provider 400 after limited history).
-- **MCP loop affinity** — stdio/SSE sessions reconnect when invoked from a different event loop than registration (VS Code / threaded hosts).
-- **`skills_exclude`** — `create_claw_agent(..., skills_exclude=[...])` drops named skills after load.
-- **Streaming telemetry** — `assistant_delta` / intermediate `assistant_message` on the typed event stream; OpenAI prompt-cache `cached_tokens` surfaced.
-- **Error taxonomy** — safer HTTP status coercion for google-genai string status enums; clearer API-key invalid classification.
-- **Worker-thread signals** — agent loop tolerates uvloop/asyncio refusing signal handlers off the main thread.
-
-#### v6.10.0
-
-- **Session persistence** — identity-based message tracking survives compaction and dangling-tool-call patching without losing or duplicating persisted turns.
-- **Parallel tool policy hooks** — external pre/post hooks and session writes apply in parallel batches; policy gates cannot be bypassed by batching a forbidden call with a safe one.
-- **History offload redaction** — compacted history files run through the same secret redaction as every other persistence surface.
-- **Provider reliability** — normalized `prompt_tokens` / `tokens_used` across OpenAI, Gemini, and Anthropic; mid-stream retry preserves accumulated tool calls; truncated JSON string recovery; Anthropic parallel `tool_result` coalescing and array `items` in tool schemas.
-- **Context & loop fixes** — accurate multimodal token counts; safe compaction split boundaries; deduped prompt injection; micro-compact gated on context usage; overflow recovery shrinks effective window; advisor duplicate-message and handoff transcript fixes; one iteration increment per loop round.
-- **Infrastructure** — command-queue barrier exclusivity and strong task refs; heartbeat cancels in-flight work on agent cancel; bounded gateway WebSocket session store; ACP tool-id matching for out-of-order completions; explicit PIL decompression-bomb guard.
-
-#### v6.9.2
-
-- **Bash validator hardening** — peels launcher wrappers (`env`, `sudo`, `timeout`, `eval`, …) so inner destructive commands can't bypass BLOCK rules; normalizes root-like paths; handles alias bypass (`\rm`).
-- **Gateway CORS safe defaults** — loopback-only origins by default instead of `*`; disables credentials when wildcard is explicitly configured.
-- **Plan-mode escape fix** — agent-as-tool subagents now inherit the parent's permission mode.
-- **Provider parity** — strips `__CACHE_BOUNDARY__` from OpenAI/Gemini prompts; Anthropic honours `temperature=0`; Gemini skips malformed image URLs; OpenAI handles empty `choices` arrays.
-- **Steer hook fix** — nudge messages use `LLMMessage` objects instead of raw dicts.
-- **Skill workshop** — blocks apply on any scanner finding (including malicious-pattern detections).
-- **Sandbox env redaction** — broad secret-name matcher catches `*_TOKEN`, `*_API_KEY`, `*PASSWORD*`, etc.
-
-#### v6.9.0
-
-```bash
-clawagents --task "summarize prior debugging runs" --output-format json
-clawagents --task "find where we discussed pytest timeouts"  # uses search_history tool
-```
-
-- **`search_history` tool** — cross-session archive search over `.clawagents/sessions.db` plus optional JSONL event logs; returns raw prior user/assistant/tool snippets (not summaries). Current-session search stays on the session backend.
-- **`--output-format`** — `text` (default), `json`, or `stream-json` on `clawagents --task` for automation-friendly stdout.
-- **PTRL → skill promotion** — recurring lesson bullets (≥3 occurrences) auto-create **pending** `skill_workshop` proposals in `.clawagents/lesson-index.json`.
-- **`skill_workshop` tool** — governed skill authoring (`create` / `update` / `apply` / `reject` / `rollback`) without writing live `SKILL.md` directly.
-- **Consolidated search stack** — shared SQLite LIKE helpers (`session/search`) and snippet formatting (`session/snippet`); lesson bullet utilities live in `trajectory/lessons`.
-
-#### v6.8.1
-
-```bash
-clawagents --dry-run --profile ollama --task "inspect this repo"
-```
-
-- **Shared prompt assembly** centralizes system prompt construction, lesson preambles, cache-boundary placement, and dynamic memory/skill injection in `clawagents.prompts`.
-- **Legacy hook compatibility** keeps dict-shaped `before_llm` messages working while exposing reusable prompt helpers for downstream integrations.
-- **OpenHarness comparison** adds [HKUDS/OpenHarness](https://github.com/HKUDS/OpenHarness) as a peer in the feature matrix with conservative full/partial markers.
-- **Dry-run previews** report provider resolution, auth readiness, inspectable tools, likely matching tools, and next actions without calling an LLM or executing tools.
-- **Provider profiles** give stable aliases for common backends while still letting explicit `create_claw_agent()` parameters override profile values.
-- **Background task tools** expose long-running command management (`task_create`, `task_status`, `task_output`, `task_stop`, `task_list`) through the normal tool registry.
-- **Plugin compatibility loading** reads `plugin.json` / `.claude-plugin/plugin.json` metadata, skills, commands, hooks, and MCP server declarations without executing plugin code.
-- **MCP auth refresh** lets agents update MCP server auth material and reconnect configured servers deliberately.
 
 ### v6.14.2 — Skill strategy (Grok-aligned) (July 2026)
 
@@ -2733,6 +2527,213 @@ await router.start_all({
 | ✂️ **Output Truncation** | `truncate_output()` to cap tool output size |
 
 ---
+
+### Earlier headlines (from README)
+
+#### v6.13.1
+
+- **ATLAS fail-closed** — reflection-harvest and final-gate exceptions abort the run instead of silently releasing an answer.
+- **Pinned ATLAS revision** — install docs and hints pin `atlas-skill` to commit `3a917f3e0b993e3bfd77f652b013193aed167964`.
+- **Companion** — VS Code **1.0.36**.
+
+#### v6.13.0
+
+- **ATLAS harness** — optional `atlas=True` / `CLAW_ATLAS=1` supervision layer: runtime protocol, tool-failure / subagent checkpoints, blocking final gate, redacted `record_trace` + taxonomy learning via `atlas_runtime`.
+- **Install ATLAS runtime** — `pip install 'atlas-skill @ git+https://github.com/multi-agent-systems-failure-taxonomy/ATLAS.git@3a917f3e0b993e3bfd77f652b013193aed167964'` (marker extra `clawagents[atlas]` is a no-op on PyPI).
+- **Companion** — VS Code **1.0.35** Settings checkbox for ATLAS.
+
+#### v6.12.13
+
+- **Skill retrieval** — high-recall intent coverage (aliases / triggers / anti-triggers / morphology) instead of fixed token-saving cutoffs; short follow-ups inherit prior intent.
+- **Paged `use_skill`** — contiguous, content-hash-bound pages; no data-plane tools until every page is read.
+- **Composed `allowed-tools`** — intersecting boundaries only (cannot widen authority by loading another skill).
+- **Workshop hardening** — path/content validation on writes.
+- **Companion** — VS Code **1.0.32**; TypeScript **6.12.13**.
+
+#### v6.12.12
+
+- **`invoke(images=…)`** — attach vision images to the first user message (OpenAI `image_url` canonical; Anthropic / Responses / Bedrock / Gemini conversions).
+- **`invoke(files=…)`** — attach PDF (native `file` / `document` blocks) or DOCX (text-extracted) to the first user message.
+- **Companion** — VS Code **1.0.31** (image + PDF/DOCX attach UI); TypeScript **6.12.12**.
+
+#### v6.12.11
+
+- **Docs** — README aligned with the current skill loader, ACP schema fixes, and VS Code **1.0.30** companion.
+
+#### v6.12.10
+
+- **`disable-model-invocation`** — skills with `disable-model-invocation: true` stay out of the model catalog and refuse `use_skill` (user-invocation only).
+- **ACP tool_call schema** — required `title` / `kind`; tool content wrapped for spec-strict clients.
+
+#### v6.12.9
+
+- **Skill loader** — bundled dirs load first (user/workspace override); safer `requires` parsing; ineligibility reasons; resource disclosure in `use_skill`; size caps and frontmatter fallbacks.
+
+#### v6.12.8
+
+- **Per-turn skill ranking** — catalog re-ordered against the latest user message with a Recommended section.
+- **Stronger `use_skill`** — fuzzy / case-insensitive names; better YAML descriptions; injection upsert (no duplicate catalogs).
+
+#### v6.12.7
+
+- **Dynamic skill-catalog budget** — ~1.5% of context (floor 4k / ceiling 16k chars); description-first truncation; `CLAW_SKILL_LISTING_*` overrides.
+
+#### v6.12.6
+
+- **`list_skills` registered** alongside `use_skill` for overflow catalog discovery.
+
+#### v6.12.5 / v6.12.4
+
+- **`CLAWAGENTS_SKIP_DOTENV`** — long-lived hosts (VS Code sidecar) skip mid-process `.env` reloads.
+- **Host API keys** — workspace `.env` no longer clobbers SecretStorage / spawn-injected keys (`CLAWAGENTS_DOTENV_OVERRIDE=0`).
+
+#### v6.12.3
+
+- **`wire_api`** — `auto` | `responses` | `chat_completions` for OpenAI-compatible proxies (Codex Responses-only gateways that 404 `/chat/completions`).
+- **`ssl_verify`** — disable TLS verify for private-CA corporate endpoints.
+- **Auto Responses** — GPT-5.5/5.6/Codex prefer `/v1/responses` even on custom `base_url` (no longer limited to api.openai.com).
+- **SSE proxies** — non-stream Responses requests collect via streaming (gateways that ignore `stream=false`).
+
+#### v6.12.2
+
+- **Responses API** — `OpenAIProvider` auto-selects `/v1/responses` vs Chat Completions from model + endpoint (GPT-5.5/5.6/Codex on official OpenAI; Ollama/BAG/Azure stay on Chat Completions; sticky fallback if Responses is missing).
+- **Reasoning + tools** — Responses path keeps `reasoning.effort` with function tools (no more forced `none` on GPT-5.5/5.6 when Responses is available).
+
+#### v6.12.1
+
+- **`reasoning_effort`** on `create_claw_agent` / OpenAI provider (`none`|`low`|`medium`|`high`|`xhigh`|`max`; UI aliases Light→low, Extra High→xhigh)
+- Chat Completions + tools on GPT-5.5/5.6 force `none` when falling back from Responses
+
+#### v6.12.0
+
+- **Native AWS Bedrock** — Claude via `AsyncAnthropicBedrock` (IAM / HIPAA path); Nova and other models via Converse API. `pip install 'clawagents[bedrock]'`.
+- **Model routing** — Bedrock IDs (`us.anthropic.…`, `amazon.nova-…`, `bedrock/…`) use native providers when `base_url` is unset; OpenAI-compatible BAG/LiteLLM still works with `base_url`.
+- **Profiles** — `profile="bedrock"` (native) and `profile="bedrock-gateway"` (proxy).
+- **Config** — `AWS_REGION` / `AWS_PROFILE` / access keys + `BEDROCK_MODEL` / `PROVIDER=bedrock`.
+
+#### v6.11.2
+
+- **`web_search`** — Tavily-backed search tool (`TAVILY_API_KEY`). Ranked URLs + snippets; use `web_fetch` for full pages.
+
+#### v6.11.1
+
+- **CodeAct sandbox** — curated `__builtins__` + AST forbid-list so `open`/`__import__`/`eval` cannot bypass tool permissions.
+- **Checkpoint refs** — reject malformed SHAs before `git reset` / `diff`.
+- **Evals judge** — align `judge_run` call signature with the trajectory judge API.
+
+#### v6.11.0
+
+- **Shadow-git restore modes** — `files` / `conversation` / `both` with turn binding + `checkpoint_diff`.
+- **Always-on rules** — `CLAUDE.md` + `.clawagents/rules/**` re-injected every LLM round.
+- **Custom modes** — `.clawagents/modes.json` + builtins; CLI `--mode` / `--auto`.
+- **CodeAct** — `create_claw_agent(action_mode="code")` Python-as-action loop.
+- **Evals** — `python -m clawagents evals <suite.json>` + library `approval_handler`.
+
+#### v6.10.8
+
+- **Compaction budget** — `compress_messages_safe` re-measures after the safe tier and escalates to summarization when still over context (no more false “under budget”).
+- **Message identity** — reuse original message objects when role+content survive compression so session tracking and `tool_calls_meta` / `tool_call_id` stay intact.
+- **Judge usage** — LLM-as-Judge token spend flows into the run’s `Usage`.
+
+#### v6.10.7
+
+- **Repo map** — ranked symbol map tool (+ optional prompt inject).
+- **Context ledger** — commit-boundary restorable memory with `rehydrate_ledger`.
+- **Shadow-git checkpoints** — Cline-style undo without touching project git.
+- **`apply_patch`** — SEARCH/REPLACE and unified-diff surgical edits.
+- **Core memory / memory bank / live facts** — editable blocks + superseding facts.
+- **Git + worktree tools** — status/diff/commit/undo; isolated worktrees for parallel agents.
+- **Plan handoff** — `write_plan` → `.clawagents/plan.md`; harness clear-tool knobs; compaction thrash guard.
+
+#### v6.10.6
+
+- **Prompt-cache align** — normalize static system prefix; lessons sit *after* `__CACHE_BOUNDARY__`; tools listed alphabetically.
+- **Tiered `read_file`** — `tier=L0` outline/symbols, `L1` paginated body, `L2` large/full read.
+- **Compaction** — wire `compress_messages_safe` + `on_pre_compact` / `on_post_compact`; output-side trim; content budgets for tool results.
+- **Crushers** — HTML / diff / pytest-junit crushers; multimodal `sanitize_tool_output` on ingest.
+- **Recoverability** — micro-compact stubs keep artifact ids; `retrieve_tool_result(query=…)` searches local artifacts.
+- **Failure learn** — append durable lesson bullets into workspace `AGENTS.md`.
+
+#### v6.10.5
+
+- **Gemini 400 recovery** — on FR/FC / thought_signature `INVALID_ARGUMENT`, retry once with tool turns flattened to plain text.
+- **Signature fidelity** — do not copy `thought_signature` onto sibling parallel FCs.
+- **External hook skip** — close assistant+tool pair instead of a bare `[Tool Skipped]` user turn.
+
+#### v6.10.4
+
+- **Gemini FC/FR ids** — use API `function_call.id` (or a stable generated id stamped into both FC and FR).
+- **thought_signature** — base64 round-trip for session JSON; always prefer preserved `gemini_parts` when replaying tool turns.
+- **Sanitize rewrite** — strict FC→FR pairing, orphan FR drop, spacer model only when plain user text follows FR.
+
+#### v6.10.3
+
+- **Gemini FR purity** — keep `function_response` turns FR-only (do not coalesce with following user text); insert a spacer model turn when needed.
+- **Orphan FR drop** — remove `function_response` that does not follow a model `function_call`.
+- **gemini_parts safety** — if stored parts lack `function_call` but `tool_calls_meta` exists, rebuild the model turn from meta.
+
+#### v6.10.2
+
+- **Gemini conversation hygiene** — merge consecutive `user`/`model` turns (parallel tool results); insert synthetic `function_response` when a call was skipped; drop leading orphan model turns. Fixes `INVALID_ARGUMENT` about function-call turn ordering.
+- **Skipped-tool transcript** — `before_tool` / RunContext rejects now close the native assistant+tool pair instead of appending a bare `[Tool Skipped]` user message.
+
+#### v6.10.1
+
+- **Gemini / OpenAI tool schemas** — array parameters always declare `items.type` (fixes Gemini `400 INVALID_ARGUMENT` on tools).
+- **GPT-5.5 / GPT-5.6 + tools** — prefer Responses API; Chat Completions fallback still sets `reasoning_effort=none`.
+- **Orphan tool messages** — session preload and OpenAI formatting drop tool results without a matching `tool_calls` id (fixes provider 400 after limited history).
+- **MCP loop affinity** — stdio/SSE sessions reconnect when invoked from a different event loop than registration (VS Code / threaded hosts).
+- **`skills_exclude`** — `create_claw_agent(..., skills_exclude=[...])` drops named skills after load.
+- **Streaming telemetry** — `assistant_delta` / intermediate `assistant_message` on the typed event stream; OpenAI prompt-cache `cached_tokens` surfaced.
+- **Error taxonomy** — safer HTTP status coercion for google-genai string status enums; clearer API-key invalid classification.
+- **Worker-thread signals** — agent loop tolerates uvloop/asyncio refusing signal handlers off the main thread.
+
+#### v6.10.0
+
+- **Session persistence** — identity-based message tracking survives compaction and dangling-tool-call patching without losing or duplicating persisted turns.
+- **Parallel tool policy hooks** — external pre/post hooks and session writes apply in parallel batches; policy gates cannot be bypassed by batching a forbidden call with a safe one.
+- **History offload redaction** — compacted history files run through the same secret redaction as every other persistence surface.
+- **Provider reliability** — normalized `prompt_tokens` / `tokens_used` across OpenAI, Gemini, and Anthropic; mid-stream retry preserves accumulated tool calls; truncated JSON string recovery; Anthropic parallel `tool_result` coalescing and array `items` in tool schemas.
+- **Context & loop fixes** — accurate multimodal token counts; safe compaction split boundaries; deduped prompt injection; micro-compact gated on context usage; overflow recovery shrinks effective window; advisor duplicate-message and handoff transcript fixes; one iteration increment per loop round.
+- **Infrastructure** — command-queue barrier exclusivity and strong task refs; heartbeat cancels in-flight work on agent cancel; bounded gateway WebSocket session store; ACP tool-id matching for out-of-order completions; explicit PIL decompression-bomb guard.
+
+#### v6.9.2
+
+- **Bash validator hardening** — peels launcher wrappers (`env`, `sudo`, `timeout`, `eval`, …) so inner destructive commands can't bypass BLOCK rules; normalizes root-like paths; handles alias bypass (`\rm`).
+- **Gateway CORS safe defaults** — loopback-only origins by default instead of `*`; disables credentials when wildcard is explicitly configured.
+- **Plan-mode escape fix** — agent-as-tool subagents now inherit the parent's permission mode.
+- **Provider parity** — strips `__CACHE_BOUNDARY__` from OpenAI/Gemini prompts; Anthropic honours `temperature=0`; Gemini skips malformed image URLs; OpenAI handles empty `choices` arrays.
+- **Steer hook fix** — nudge messages use `LLMMessage` objects instead of raw dicts.
+- **Skill workshop** — blocks apply on any scanner finding (including malicious-pattern detections).
+- **Sandbox env redaction** — broad secret-name matcher catches `*_TOKEN`, `*_API_KEY`, `*PASSWORD*`, etc.
+
+#### v6.9.0
+
+```bash
+clawagents --task "summarize prior debugging runs" --output-format json
+clawagents --task "find where we discussed pytest timeouts"  # uses search_history tool
+```
+
+- **`search_history` tool** — cross-session archive search over `.clawagents/sessions.db` plus optional JSONL event logs; returns raw prior user/assistant/tool snippets (not summaries). Current-session search stays on the session backend.
+- **`--output-format`** — `text` (default), `json`, or `stream-json` on `clawagents --task` for automation-friendly stdout.
+- **PTRL → skill promotion** — recurring lesson bullets (≥3 occurrences) auto-create **pending** `skill_workshop` proposals in `.clawagents/lesson-index.json`.
+- **`skill_workshop` tool** — governed skill authoring (`create` / `update` / `apply` / `reject` / `rollback`) without writing live `SKILL.md` directly.
+- **Consolidated search stack** — shared SQLite LIKE helpers (`session/search`) and snippet formatting (`session/snippet`); lesson bullet utilities live in `trajectory/lessons`.
+
+#### v6.8.1
+
+```bash
+clawagents --dry-run --profile ollama --task "inspect this repo"
+```
+
+- **Shared prompt assembly** centralizes system prompt construction, lesson preambles, cache-boundary placement, and dynamic memory/skill injection in `clawagents.prompts`.
+- **Legacy hook compatibility** keeps dict-shaped `before_llm` messages working while exposing reusable prompt helpers for downstream integrations.
+- **OpenHarness comparison** adds [HKUDS/OpenHarness](https://github.com/HKUDS/OpenHarness) as a peer in the feature matrix with conservative full/partial markers.
+- **Dry-run previews** report provider resolution, auth readiness, inspectable tools, likely matching tools, and next actions without calling an LLM or executing tools.
+- **Provider profiles** give stable aliases for common backends while still letting explicit `create_claw_agent()` parameters override profile values.
+- **Background task tools** expose long-running command management (`task_create`, `task_status`, `task_output`, `task_stop`, `task_list`) through the normal tool registry.
+- **Plugin compatibility loading** reads `plugin.json` / `.claude-plugin/plugin.json` metadata, skills, commands, hooks, and MCP server declarations without executing plugin code.
+- **MCP auth refresh** lets agents update MCP server auth material and reconnect configured servers deliberately.
 
 ## Trajectory Logging & RL-Inspired Scoring
 
