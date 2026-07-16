@@ -26,6 +26,7 @@ import hashlib
 import inspect
 import json
 import logging
+import os
 import re
 import signal
 import sys
@@ -1500,6 +1501,35 @@ def _reuse_messages_where_possible(
     return out
 
 
+def _goal_llm_complete(run_context: Any, llm: LLMProvider):
+    """Bind a prompt→text callable for goal planner/verifier/strategist."""
+
+    async def _complete(prompt: str) -> str:
+        meta = getattr(run_context, "_metadata", None) if run_context else None
+        if isinstance(meta, dict) and callable(meta.get("goal_llm_complete")):
+            return await meta["goal_llm_complete"](prompt)
+        resp = await llm.complete(
+            [LLMMessage(role="user", content=prompt)],
+            stream=False,
+        )
+        return str(getattr(resp, "content", "") or "")
+
+    return _complete
+
+
+def _drain_interject(run_context: Any) -> str | None:
+    if run_context is None:
+        return None
+    meta = getattr(run_context, "_metadata", None)
+    if not isinstance(meta, dict):
+        return None
+    pending = meta.pop("pending_interject", None)
+    if pending is None:
+        return None
+    text = str(pending).strip()
+    return text or None
+
+
 async def _compact_if_needed(
     messages: list[LLMMessage],
     context_window: int,
@@ -1561,6 +1591,31 @@ async def _compact_if_needed(
     if compacted:
         emit("context", {"message": "compacted oversized tool results before summarization"})
     current_tokens = _estimate_messages_tokens(messages, token_multiplier)
+
+    # Prefire / two-pass: summarize before the hard cliff (Grok two_pass).
+    try:
+        from clawagents.config.features import is_enabled as _feat_prefire
+
+        prefire_ratio = 0.85
+        if (
+            _feat_prefire("prefire_compaction")
+            and current_tokens > int(budget * prefire_ratio)
+            and current_tokens <= budget
+        ):
+            emit(
+                "context",
+                {
+                    "message": (
+                        f"prefire compaction ~{current_tokens}/{budget} "
+                        f"(>{int(prefire_ratio * 100)}% headroom)"
+                    )
+                },
+            )
+            # Force into the compaction path below by pretending we're over budget
+            # only for the summarize stage — callers still see a successful shrink.
+            current_tokens = budget + 1
+    except Exception:
+        logger.debug("prefire compaction probe failed", exc_info=True)
 
     if current_tokens <= budget:
         return messages
@@ -2300,9 +2355,55 @@ async def run_agent_graph(
         from clawagents.trajectory.recorder import TrajectoryRecorder
         recorder = TrajectoryRecorder(task=task, response_chars=response_chars)
 
-    # ATLAS failure-taxonomy supervision (parent runs only; optional extra)
+    # Bind workspace + goal LLM for tools / final gate (parent runs).
+    if run_context is not None:
+        meta = run_context._metadata
+        if not isinstance(meta.get("workspace"), str):
+            meta["workspace"] = os.getcwd()
+        if getattr(registry, "_permission_engine", None) is not None:
+            meta.setdefault("permission_engine", registry._permission_engine)
+
+        async def _bound_goal_llm(prompt: str) -> str:
+            resp = await llm.complete(
+                [LLMMessage(role="user", content=prompt)],
+                stream=False,
+            )
+            return str(getattr(resp, "content", "") or "")
+
+        meta["goal_llm_complete"] = _bound_goal_llm
+        try:
+            from clawagents.config.features import is_enabled as _feat_goal_bind
+            from clawagents.goal import (
+                GoalTracker,
+                attach_goal_to_run_context,
+                get_goal_tracker,
+            )
+
+            if _feat_goal_bind("goal_autopilot") and get_goal_tracker(run_context) is None:
+                attach_goal_to_run_context(
+                    run_context, GoalTracker(meta["workspace"])
+                )
+        except Exception:
+            logger.debug("goal tracker bind failed", exc_info=True)
+
+    # ATLAS failure-taxonomy supervision (parent runs only; optional extra).
+    # Skipped when an active Goal autopilot session owns the completion gate.
     atlas_adapter = None
-    if atlas and not getattr(run_context, "skip_memory", False) and getattr(run_context, "depth", 0) == 0:
+    _goal_owns_gate = False
+    try:
+        from clawagents.goal import get_goal_tracker as _ggt
+
+        _gt0 = _ggt(run_context)
+        _goal_owns_gate = _gt0 is not None and _gt0.is_active()
+    except Exception:
+        _goal_owns_gate = False
+
+    if (
+        atlas
+        and not _goal_owns_gate
+        and not getattr(run_context, "skip_memory", False)
+        and getattr(run_context, "depth", 0) == 0
+    ):
         try:
             from clawagents.atlas import AtlasAdapter
 
@@ -2375,6 +2476,20 @@ async def run_agent_graph(
         if preamble:
             dynamic_parts.append(preamble)
             emit("context", {"message": "PTRL: injected lessons from past runs"})
+
+    # Goal autopilot standing reminder (preferred long-horizon gate).
+    try:
+        from clawagents.config.features import is_enabled as _feat_goal_sys
+        from clawagents.goal import get_goal_tracker, goal_system_reminder
+
+        if _feat_goal_sys("goal_autopilot"):
+            _gt_sys = get_goal_tracker(run_context)
+            _rem = goal_system_reminder(_gt_sys.state if _gt_sys else None)
+            if _rem:
+                dynamic_parts.append(_rem)
+                emit("context", {"message": "goal: injected active goal reminder"})
+    except Exception:
+        logger.debug("goal system reminder failed", exc_info=True)
 
     # ATLAS standing protocol (taxonomy itself is NOT dumped into ordinary context).
     if atlas_adapter is not None:
@@ -2629,6 +2744,23 @@ async def run_agent_graph(
             # a handful of exit paths bumped this, so normal multi-round runs
             # reported "1 iteration" in events and the session writer.
             state.iterations += 1
+
+            # Mid-turn user redirect (VS Code / host sets pending_interject).
+            try:
+                from clawagents.config.features import is_enabled as _feat_ij
+
+                if _feat_ij("mid_turn_interject"):
+                    _ij = _drain_interject(run_context)
+                    if _ij:
+                        messages.append(
+                            LLMMessage(
+                                role="user",
+                                content=f"[User redirect mid-turn]\n{_ij}",
+                            )
+                        )
+                        emit("context", {"message": "mid-turn interjection applied"})
+            except Exception:
+                logger.debug("mid-turn interject drain failed", exc_info=True)
 
             # Session: mark turn start
             if session_writer:
@@ -2986,8 +3118,19 @@ async def run_agent_graph(
                         continue
 
                 # ── ATLAS final submission gate (after advisor) ──
+                # Prefer Goal autopilot when an active goal owns completion.
+                _skip_atlas_gate = False
+                try:
+                    from clawagents.goal import get_goal_tracker as _ggt_gate
+
+                    _gtg = _ggt_gate(run_context)
+                    _skip_atlas_gate = _gtg is not None and _gtg.is_active()
+                except Exception:
+                    _skip_atlas_gate = False
+
                 if (
-                    atlas_adapter is not None
+                    not _skip_atlas_gate
+                    and atlas_adapter is not None
                     and atlas_adapter.run is not None
                     and atlas_adapter.run.final_gate_allowed is None
                 ):
@@ -3011,6 +3154,47 @@ async def run_agent_graph(
                         messages.append(LLMMessage(role="user", content=_atlas_gate.inject))
                         emit("context", {"message": "ATLAS: final submission gate"})
                         continue
+
+                # ── Goal autopilot final gate (preferred over ATLAS when active) ──
+                try:
+                    from clawagents.config.features import is_enabled as _feat_goal
+                    from clawagents.goal import GoalOrchestrator, get_goal_tracker
+
+                    _goal_tracker = get_goal_tracker(run_context)
+                    if (
+                        _feat_goal("goal_autopilot")
+                        and _goal_tracker is not None
+                        and _goal_tracker.is_active()
+                        and _goal_tracker.state is not None
+                        and _goal_tracker.state.status.value
+                        not in ("done", "failed", "paused")
+                    ):
+                        if not _final_assistant_appended:
+                            messages.append(LLMMessage(
+                                role="assistant",
+                                content=response.content,
+                                thinking=_thinking_content,
+                            ))
+                            _final_assistant_appended = True
+                        evidence = (response.content or "")[:6000]
+                        orch = GoalOrchestrator(
+                            _goal_tracker,
+                            _goal_llm_complete(run_context, llm),
+                        )
+                        ok, gst = await orch.verify(evidence)
+                        if not ok:
+                            inject = (
+                                "[Goal Verifier] Completion rejected. Continue the plan.\n"
+                                f"Consecutive misses: {gst.consecutive_not_achieved}.\n"
+                            )
+                            if gst.strategy_text:
+                                inject += f"Strategy note:\n{gst.strategy_text[:2000]}\n"
+                            messages.append(LLMMessage(role="user", content=inject))
+                            emit("context", {"message": "goal verifier rejected completion"})
+                            continue
+                        emit("context", {"message": "goal verifier accepted — DONE"})
+                except Exception:
+                    logger.debug("goal final gate failed", exc_info=True)
 
                 if recorder:
                     recorder.record_turn(

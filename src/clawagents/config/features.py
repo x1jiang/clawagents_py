@@ -36,7 +36,7 @@ _FEATURE_DEFAULTS: dict[str, str] = {
     # Medium effort — opt-in
     "typed_memory":         "0",   # Parse frontmatter in memory files for type-based recall
     "wal":                  "0",   # Write-ahead logging for crash recovery
-    "permission_rules":     "0",   # Declarative tool permission rules
+    "permission_rules":     "1",   # Declarative tool permission rules (deny wins)
     "background_memory":    "0",   # Continuous memory extraction every N turns
 
     # New features (inspired by claw-code-main)
@@ -69,6 +69,11 @@ _FEATURE_DEFAULTS: dict[str, str] = {
     "skill_substitutions":  "1",   # $ARGUMENTS / ${SKILL_DIR} / ${SESSION_ID} in bodies
     "skill_hot_reload":     "1",   # Rescan skill dirs on mtime / workshop apply
     "skill_auto_suggest":   "1",   # High-confidence use_skill nudge (no auto-load)
+
+    # v6.15 product surfaces
+    "goal_autopilot":       "1",   # Grok-style /goal planner→verify→strategist
+    "prefire_compaction":   "1",   # Two-pass: summarize before hard cliff
+    "mid_turn_interject":   "1",   # Accept queued user redirect mid-loop
 }
 
 # Env var prefix: CLAW_FEATURE_MICRO_COMPACT=1

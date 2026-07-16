@@ -1,32 +1,20 @@
-"""Granular tool permission rules (learned from Claude Code: useCanUseTool).
-
-Provides a declarative permission system that wraps the existing before_tool hook
-with Allow/Deny/Ask rules based on tool name, argument patterns, and file paths.
+"""Granular tool permission rules — Grok-style deny-wins evaluation.
 
 Usage:
-    from clawagents.tools.permissions import PermissionEngine, PermissionRule
+    from clawagents.tools.permissions import PermissionEngine, PermissionRule, load_permission_engine
 
-    engine = PermissionEngine()
-    engine.add_rule(PermissionRule(
-        tool="execute*",          # glob match
-        decision="deny",
-        message="Shell execution is disabled",
-    ))
-    engine.add_rule(PermissionRule(
-        tool="write_file",
-        path_pattern="*.py",     # only allow writing Python files
-        decision="allow",
-    ))
-
-    # Use as before_tool hook:
-    agent = create_claw_agent(before_tool=engine.check)
+    engine = load_permission_engine(workspace)
+    # before_tool / registry gate
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import json
+import os
+from dataclasses import dataclass
 from fnmatch import fnmatch
-from typing import Any, List, Optional
+from pathlib import Path
+from typing import Any, List
 
 
 @dataclass
@@ -34,105 +22,181 @@ class PermissionRule:
     """A single permission rule for a tool.
 
     Attributes:
-        tool: Glob pattern for tool name (e.g., "execute*", "write_file")
-        path_pattern: Glob pattern for file paths in tool args (e.g., "*.py", "/tmp/*")
-        arg_pattern: Glob pattern matched against JSON-serialized args
+        tool: Glob pattern for tool name (e.g., "execute*", "write_file", "Bash(*)")
+        path_pattern: Glob for file paths in tool args
+        arg_pattern: Glob matched against JSON-serialized args
         decision: "allow" | "deny" | "ask"
-        message: Optional message to display when this rule triggers
-        priority: Higher priority rules are evaluated first (default: 0)
+        message: Optional message when this rule triggers
+        priority: Higher priority sorts first within the same decision class
     """
+
     tool: str = "*"
     path_pattern: str = "*"
     arg_pattern: str = "*"
-    decision: str = "allow"  # "allow" | "deny" | "ask"
+    decision: str = "allow"
     message: str = ""
     priority: int = 0
 
 
-class PermissionEngine:
-    """Declarative permission engine for tool execution.
+_DECISION_RANK = {"deny": 3, "ask": 2, "allow": 1}
 
-    Evaluates rules in priority order (highest first). The first matching
-    rule determines the decision. If no rule matches, the default is "allow".
+
+class PermissionEngine:
+    """Declarative permission engine.
+
+    Matching rules are collected; **deny wins** over ask over allow (Grok
+    parity). Among the winning decision class, highest priority message is kept.
     """
 
     def __init__(self, default_decision: str = "allow"):
         self._rules: List[PermissionRule] = []
         self._default = default_decision
-        self._sorted = False
 
     def add_rule(self, rule: PermissionRule) -> "PermissionEngine":
-        """Add a permission rule. Returns self for chaining."""
         self._rules.append(rule)
-        self._sorted = False
         return self
 
     def add_rules(self, rules: List[PermissionRule]) -> "PermissionEngine":
-        """Add multiple permission rules."""
         self._rules.extend(rules)
-        self._sorted = False
         return self
 
-    def _ensure_sorted(self) -> None:
-        if not self._sorted:
-            self._rules.sort(key=lambda r: r.priority, reverse=True)
-            self._sorted = True
-
     def _extract_path(self, args: dict[str, Any]) -> str:
-        """Extract file path from tool args for path-based matching."""
-        return str(args.get("path") or args.get("file_path") or args.get("target_path") or "")
+        return str(
+            args.get("path")
+            or args.get("file_path")
+            or args.get("target_path")
+            or args.get("filePath")
+            or ""
+        )
 
-    def evaluate(self, tool_name: str, args: dict[str, Any]) -> tuple[str, str]:
-        """Evaluate permissions for a tool call.
+    def _tool_aliases(self, tool_name: str) -> list[str]:
+        """Accept Grok-style Bash(git *) patterns as execute aliases."""
+        names = [tool_name]
+        if tool_name in {"execute", "bash", "shell"}:
+            names.extend(["execute", "Bash", "bash", "shell"])
+        if tool_name in {"write_file", "edit_file", "apply_patch"}:
+            names.extend(["Edit", "Write", "edit_file", "write_file"])
+        return names
 
-        Returns:
-            (decision, message) tuple where decision is "allow", "deny", or "ask"
-        """
-        self._ensure_sorted()
+    def _rule_matches(self, rule: PermissionRule, tool_name: str, args: dict[str, Any]) -> bool:
+        aliases = self._tool_aliases(tool_name)
+        tool_ok = any(fnmatch(alias, rule.tool) or fnmatch(tool_name, rule.tool) for alias in aliases)
+        # Also allow rule.tool like "Bash(git *)" → treat outer as execute + arg pattern
+        if not tool_ok and rule.tool.startswith("Bash(") and rule.tool.endswith(")"):
+            inner = rule.tool[5:-1].strip()
+            if tool_name in {"execute", "bash", "shell"}:
+                cmd = str(args.get("command") or "")
+                tool_ok = fnmatch(cmd, inner) or fnmatch(cmd, inner.replace(" ", "*"))
+        if not tool_ok:
+            return False
 
         file_path = self._extract_path(args)
+        if rule.path_pattern != "*" and file_path:
+            if not (
+                fnmatch(file_path, rule.path_pattern)
+                or fnmatch(os.path.basename(file_path), rule.path_pattern)
+            ):
+                return False
+        elif rule.path_pattern != "*" and not file_path:
+            return False
 
-        for rule in self._rules:
-            # Match tool name
-            if not fnmatch(tool_name, rule.tool):
-                continue
+        if rule.arg_pattern != "*":
+            args_str = json.dumps(args, default=str)
+            if not fnmatch(args_str, rule.arg_pattern):
+                return False
+        return True
 
-            # Match file path pattern
-            if rule.path_pattern != "*" and file_path:
-                if not fnmatch(file_path, rule.path_pattern):
-                    continue
+    def evaluate(self, tool_name: str, args: dict[str, Any]) -> tuple[str, str]:
+        matches: list[PermissionRule] = [
+            rule for rule in self._rules if self._rule_matches(rule, tool_name, args)
+        ]
+        if not matches:
+            return self._default, ""
 
-            # Match arg pattern (against JSON-serialized args)
-            if rule.arg_pattern != "*":
-                import json
-                args_str = json.dumps(args)
-                if not fnmatch(args_str, rule.arg_pattern):
-                    continue
-
-            return rule.decision, rule.message
-
-        return self._default, ""
+        # Deny wins, then ask, then allow; within class, highest priority.
+        matches.sort(
+            key=lambda r: (_DECISION_RANK.get(r.decision, 0), r.priority),
+            reverse=True,
+        )
+        winner = matches[0]
+        return winner.decision, winner.message
 
     def check(self, tool_name: str, args: dict[str, Any]) -> bool:
-        """Check if a tool call is allowed.
-
-        Compatible with the before_tool hook signature.
-        Returns True if allowed, False if denied.
-        """
-        decision, message = self.evaluate(tool_name, args)
+        """before_tool-compatible: True only for allow (ask treated as deny here)."""
+        decision, _ = self.evaluate(tool_name, args)
         return decision == "allow"
+
+    def gate(self, tool_name: str, args: dict[str, Any]) -> tuple[bool, str]:
+        """Registry gate: (allowed, error_message). ask → not allowed without host."""
+        decision, message = self.evaluate(tool_name, args)
+        if decision == "allow":
+            return True, ""
+        if decision == "ask":
+            return False, message or f"Permission ask required for {tool_name}"
+        return False, message or f"Denied by permission rule: {tool_name}"
 
     @classmethod
     def from_config(cls, rules_data: list[dict[str, Any]]) -> "PermissionEngine":
-        """Create a PermissionEngine from a list of rule dicts (e.g., from YAML/JSON config).
-
-        Example config:
-            [
-                {"tool": "execute*", "decision": "deny"},
-                {"tool": "write_file", "path_pattern": "/etc/*", "decision": "deny"},
-            ]
-        """
         engine = cls()
         for data in rules_data:
-            engine.add_rule(PermissionRule(**data))
+            engine.add_rule(PermissionRule(**{k: v for k, v in data.items() if k in PermissionRule.__dataclass_fields__}))
         return engine
+
+
+_DEFAULT_SECURE_RULES = [
+    PermissionRule(tool="execute", arg_pattern="*rm -rf /**", decision="deny", priority=100, message="Refused destructive rm"),
+    PermissionRule(tool="execute", arg_pattern="*sudo *", decision="ask", priority=50, message="sudo requires approval"),
+    PermissionRule(tool="write_file", path_pattern="*.env", decision="ask", priority=40, message="Writing .env requires approval"),
+    PermissionRule(tool="write_file", path_pattern="**/.env", decision="ask", priority=40),
+    PermissionRule(tool="write_file", path_pattern="**/credentials*", decision="deny", priority=80),
+    PermissionRule(tool="edit_file", path_pattern="**/credentials*", decision="deny", priority=80),
+]
+
+
+def load_permission_engine(
+    workspace: str | Path | None = None,
+    *,
+    extra_rules: list[PermissionRule] | None = None,
+    include_defaults: bool = True,
+) -> PermissionEngine:
+    """Load rules from ``.clawagents/permissions.json`` plus secure defaults."""
+    from clawagents.config.features import is_enabled
+
+    engine = PermissionEngine(default_decision="allow")
+    if not is_enabled("permission_rules"):
+        return engine
+
+    if include_defaults:
+        engine.add_rules(list(_DEFAULT_SECURE_RULES))
+
+    ws = Path(workspace or os.getcwd())
+    for candidate in (
+        ws / ".clawagents" / "permissions.json",
+        ws / "permissions.json",
+    ):
+        if not candidate.is_file():
+            continue
+        try:
+            raw = json.loads(candidate.read_text(encoding="utf-8"))
+            rules = raw if isinstance(raw, list) else raw.get("rules") or []
+            if isinstance(rules, list):
+                engine.add_rules(
+                    [
+                        PermissionRule(**{k: v for k, v in row.items() if k in PermissionRule.__dataclass_fields__})
+                        for row in rules
+                        if isinstance(row, dict)
+                    ]
+                )
+        except Exception:
+            continue
+
+    if extra_rules:
+        engine.add_rules(extra_rules)
+    return engine
+
+
+__all__ = [
+    "PermissionRule",
+    "PermissionEngine",
+    "load_permission_engine",
+]

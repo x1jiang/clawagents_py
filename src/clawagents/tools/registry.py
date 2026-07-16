@@ -475,6 +475,17 @@ class ToolRegistry:
                     ),
                 )
 
+        # Declarative permission rules (deny wins)
+        engine = getattr(self, "_permission_engine", None)
+        if engine is not None and hasattr(engine, "gate"):
+            ok, msg = engine.gate(tool_name, args if isinstance(args, dict) else {})
+            if not ok:
+                return ToolResult(
+                    success=False,
+                    output="",
+                    error=msg or f"Denied by permission rule: {tool_name}",
+                )
+
         # Parameter validation with lenient coercion
         effective_args = args
         if self._validate_args:

@@ -1,18 +1,12 @@
-"""Named OS sandbox profiles (Grok Build-inspired abstraction).
-
-Profiles describe intended isolation. Enforcement today:
-  - ``local`` / ``read-only`` / ``workspace`` / ``strict`` → LocalBackend with
-    optional write denial via ProfileBackend wrapper
-  - ``docker`` → DockerBackend when available
-  - ``seatbelt`` / ``bwrap`` → LocalBackend + exec wrapper when the binary exists,
-    otherwise soft-fallback to local with a warning flag
-"""
+"""Named OS sandbox profiles with real path/network/exec enforcement."""
 
 from __future__ import annotations
 
 import os
 import shutil
-from dataclasses import dataclass, field
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
 
 BackendName = Literal["local", "docker", "seatbelt", "bwrap"]
@@ -28,6 +22,8 @@ class OSSandboxProfile:
     deny_paths: tuple[str, ...] = ()
     env_allow: tuple[str, ...] = ()
     description: str = ""
+    # When True, missing seatbelt/bwrap raises instead of soft-fallback.
+    require_binary: bool = False
 
 
 _BUILTIN: dict[str, OSSandboxProfile] = {
@@ -46,6 +42,7 @@ _BUILTIN: dict[str, OSSandboxProfile] = {
         name="read-only",
         backend="local",
         read_only=True,
+        allow_paths=(".",),
         description="Filesystem writes blocked; exec still allowed.",
     ),
     "strict": OSSandboxProfile(
@@ -53,6 +50,7 @@ _BUILTIN: dict[str, OSSandboxProfile] = {
         backend="local",
         read_only=True,
         network=False,
+        allow_paths=(".",),
         description="Read-only FS + network denied for child exec.",
     ),
     "docker": OSSandboxProfile(
@@ -64,17 +62,24 @@ _BUILTIN: dict[str, OSSandboxProfile] = {
     "seatbelt": OSSandboxProfile(
         name="seatbelt",
         backend="seatbelt",
-        description="macOS sandbox-exec wrapper when available.",
+        allow_paths=(".",),
+        network=False,
+        require_binary=False,
+        description="macOS sandbox-exec: workspace write, network deny when available.",
     ),
     "bwrap": OSSandboxProfile(
         name="bwrap",
         backend="bwrap",
-        description="Linux bubblewrap wrapper when available.",
+        allow_paths=(".",),
+        network=False,
+        require_binary=False,
+        description="Linux bubblewrap: bind workspace, optional --unshare-net.",
     ),
     "devbox": OSSandboxProfile(
         name="devbox",
         backend="local",
         network=True,
+        allow_paths=(".",),
         description="Developer box — writable workspace, network on.",
     ),
 }
@@ -95,8 +100,37 @@ def list_profiles() -> list[OSSandboxProfile]:
     return [_BUILTIN[k] for k in sorted(_BUILTIN)]
 
 
+def _seatbelt_profile_text(
+    *,
+    cwd: str,
+    network: bool,
+    read_only: bool,
+) -> str:
+    """Seatbelt profile with write confinement (deny file-write*, then allow workspace).
+
+    ``(allow default)`` alone would still permit arbitrary writes — we always
+    deny ``file-write*`` first, then re-allow only workspace (+ temp), matching
+    Grok-style path enforcement rather than soft allow-default writes.
+    """
+    safe = cwd.replace("\\", "\\\\").replace('"', '\\"')
+    tmp = tempfile.gettempdir().replace("\\", "\\\\").replace('"', '\\"')
+    lines = [
+        "(version 1)",
+        "(allow default)",
+        "(deny file-write*)",
+    ]
+    if not network:
+        lines.append("(deny network*)")
+    if read_only:
+        lines.append('(allow file-write-data (literal "/dev/null"))')
+    else:
+        lines.append(f'(allow file-write* (subpath "{safe}"))')
+        lines.append(f'(allow file-write* (subpath "{tmp}"))')
+    return "\n".join(lines) + "\n"
+
+
 class ProfileBackend:
-    """Wrap a SandboxBackend applying read_only / path policy."""
+    """Wrap a SandboxBackend applying read_only / allow / deny / network policy."""
 
     def __init__(self, inner: Any, profile: OSSandboxProfile):
         self._inner = inner
@@ -127,12 +161,31 @@ class ProfileBackend:
     def join(self, *segments: str) -> str:
         return self._inner.join(*segments)
 
+    def _path_allowed(self, resolved: str) -> bool:
+        allows = self._profile.allow_paths
+        if not allows:
+            return True
+        for allow in allows:
+            if allow in (".", ""):
+                root = os.path.abspath(self.cwd)
+            else:
+                root = os.path.abspath(os.path.join(self.cwd, allow))
+            if resolved == root or resolved.startswith(root + os.sep):
+                return True
+        return False
+
     def safe_path(self, user_path: str) -> str:
         resolved = self._inner.safe_path(user_path)
         for deny in self._profile.deny_paths:
             deny_abs = os.path.abspath(os.path.join(self.cwd, deny))
             if resolved == deny_abs or resolved.startswith(deny_abs + os.sep):
-                raise ValueError(f"Path denied by profile {self._profile.name}: {user_path}")
+                raise ValueError(
+                    f"Path denied by profile {self._profile.name}: {user_path}"
+                )
+        if not self._path_allowed(resolved):
+            raise ValueError(
+                f"Path outside allow_paths for profile {self._profile.name}: {user_path}"
+            )
         return resolved
 
     async def read_file(self, path: str) -> str:
@@ -164,6 +217,19 @@ class ProfileBackend:
     async def stat(self, path: str):
         return await self._inner.stat(path)
 
+    def _merge_env(self, env: dict[str, str] | None) -> dict[str, str] | None:
+        if env is None and self._profile.network:
+            return None
+        base = dict(env or {})
+        if not self._profile.network:
+            base["CLAW_SANDBOX_NETWORK"] = "0"
+            # Soft hints for common HTTP libs
+            base.setdefault("HTTP_PROXY", "")
+            base.setdefault("HTTPS_PROXY", "")
+            base.setdefault("ALL_PROXY", "")
+            base.setdefault("NO_PROXY", "*")
+        return base
+
     async def exec(
         self,
         command: str,
@@ -171,37 +237,94 @@ class ProfileBackend:
         cwd: str | None = None,
         env: dict[str, str] | None = None,
     ):
+        merged_env = self._merge_env(env)
         wrapped = command
-        if self._profile.backend == "seatbelt" and shutil.which("sandbox-exec"):
-            # Minimal allow-default profile inline — hosts can replace later.
-            wrapped = f"sandbox-exec -p '(version 1)(allow default)' /bin/sh -c {command!r}"
-        elif self._profile.backend == "bwrap" and shutil.which("bwrap"):
-            net = [] if self._profile.network else ["--unshare-net"]
-            wrapped = (
-                "bwrap --die-with-parent --ro-bind / / "
-                + " ".join(net)
-                + f" --bind {self.cwd} {self.cwd} --chdir {cwd or self.cwd} "
-                + f"/bin/sh -c {command!r}"
-            )
-        elif self._profile.backend in ("seatbelt", "bwrap"):
-            self.profile_warnings.append(
-                f"{self._profile.backend} binary unavailable; falling back to local exec"
-            )
-        if not self._profile.network and env is not None:
-            env = {**env, "CLAW_SANDBOX_NETWORK": "0"}
-        return await self._inner.exec(wrapped, timeout=timeout, cwd=cwd, env=env)
+        backend = self._profile.backend
+
+        if backend == "seatbelt":
+            binary = shutil.which("sandbox-exec")
+            if binary:
+                profile_text = _seatbelt_profile_text(
+                    cwd=self.cwd,
+                    network=self._profile.network,
+                    read_only=self._profile.read_only,
+                )
+                profile_path = Path(self.cwd) / ".clawagents" / "seatbelt.sb"
+                try:
+                    profile_path.parent.mkdir(parents=True, exist_ok=True)
+                    profile_path.write_text(profile_text, encoding="utf-8")
+                    wrapped = (
+                        f"{binary} -f {profile_path!s} /bin/sh -c {command!r}"
+                    )
+                except OSError as exc:
+                    self.profile_warnings.append(f"seatbelt profile write failed: {exc}")
+                    if self._profile.require_binary:
+                        raise
+            else:
+                msg = "sandbox-exec unavailable; falling back to local exec"
+                self.profile_warnings.append(msg)
+                if self._profile.require_binary:
+                    raise RuntimeError(msg)
+
+        elif backend == "bwrap":
+            binary = shutil.which("bwrap")
+            if binary:
+                net = [] if self._profile.network else ["--unshare-net"]
+                ro = ["--ro-bind", "/", "/"]
+                # Remount workspace writable unless read_only
+                bind = ["--bind", self.cwd, self.cwd]
+                if self._profile.read_only:
+                    bind = ["--ro-bind", self.cwd, self.cwd]
+                parts = [
+                    binary,
+                    "--die-with-parent",
+                    *ro,
+                    *net,
+                    *bind,
+                    "--chdir",
+                    cwd or self.cwd,
+                    "/bin/sh",
+                    "-c",
+                    command,
+                ]
+                # Pass as a shell-escaped single command for LocalBackend.exec
+                import shlex
+
+                wrapped = " ".join(shlex.quote(p) for p in parts)
+            else:
+                msg = "bwrap unavailable; falling back to local exec"
+                self.profile_warnings.append(msg)
+                if self._profile.require_binary:
+                    raise RuntimeError(msg)
+
+        return await self._inner.exec(
+            wrapped, timeout=timeout, cwd=cwd, env=merged_env
+        )
 
 
 def resolve_sandbox(
     profile: str | OSSandboxProfile | None = None,
     *,
     workspace: str | None = None,
+    default: str | None = None,
 ) -> Any:
-    """Build a SandboxBackend for the named profile."""
+    """Build a SandboxBackend for the named profile.
+
+    ``default`` is used when ``profile`` is None (e.g. ``workspace`` for
+    create_claw_agent). Feature flag ``os_sandbox_profiles`` forces ``off``
+    when disabled.
+    """
     from clawagents.config.features import is_enabled
     from clawagents.sandbox.local import LocalBackend
 
-    prof = get_profile(profile if is_enabled("os_sandbox_profiles") else "off")
+    if not is_enabled("os_sandbox_profiles"):
+        chosen: str | OSSandboxProfile | None = "off"
+    elif profile is not None:
+        chosen = profile
+    else:
+        chosen = default or "off"
+
+    prof = get_profile(chosen)
     if prof.backend == "docker":
         try:
             from clawagents.sandbox.docker import DockerBackend
@@ -215,7 +338,45 @@ def resolve_sandbox(
     else:
         inner = LocalBackend(root=workspace)
 
-    if prof.name == "off" and not prof.read_only and not prof.deny_paths:
+    # Auto-upgrade path-confined / network-deny local profiles onto real OS
+    # sandboxes when binaries exist (workspace writes stay confined).
+    _wants_os = (
+        prof.backend == "local"
+        and prof.name != "off"
+        and (bool(prof.allow_paths) or not prof.network or prof.read_only)
+    )
+    if (
+        _wants_os
+        and shutil.which("sandbox-exec")
+        and os.uname().sysname == "Darwin"
+    ):
+        prof = OSSandboxProfile(
+            name=prof.name,
+            backend="seatbelt",
+            read_only=prof.read_only,
+            network=prof.network,
+            allow_paths=prof.allow_paths or (".",),
+            deny_paths=prof.deny_paths,
+            env_allow=prof.env_allow,
+            description=prof.description,
+        )
+    elif (
+        _wants_os
+        and shutil.which("bwrap")
+        and os.uname().sysname == "Linux"
+    ):
+        prof = OSSandboxProfile(
+            name=prof.name,
+            backend="bwrap",
+            read_only=prof.read_only,
+            network=prof.network,
+            allow_paths=prof.allow_paths or (".",),
+            deny_paths=prof.deny_paths,
+            env_allow=prof.env_allow,
+            description=prof.description,
+        )
+
+    if prof.name == "off" and not prof.read_only and not prof.deny_paths and not prof.allow_paths:
         return inner
     return ProfileBackend(inner, prof)
 

@@ -1,4 +1,4 @@
-__version__ = "6.14.2"
+__version__ = "6.15.0"
 
 from clawagents.agent import ClawAgent, create_claw_agent
 from clawagents.run_result import RunResult
@@ -319,7 +319,9 @@ from clawagents.rl import (
     ATROPOS_AVAILABLE,
 )
 
-# ── Grok-Build parity (v6.14) ──────────────────────────────────────────
+from clawagents.goal.product import run_goal as run_goal
+
+# ── Grok-Build parity (v6.14+) ─────────────────────────────────────────
 from clawagents.autopilot.loop import run_autopilot
 from clawagents.marketplace import install_from_source, list_installed
 from clawagents.sandbox.profiles import (

@@ -41,6 +41,10 @@ async def run_autopilot(
 ) -> AutopilotTask:
     """Drive a goal through PLANNING → (approve) → EXECUTING → VERIFYING → DONE.
 
+    For the full Grok /goal product (majority verifier + strategist + disk
+    plan.md), prefer ``clawagents.goal.run_goal`` / ``create_claw_agent(goal_mode=True)``.
+    This helper remains the thin library loop for custom plan/execute hooks.
+
     Callers supply ``plan_fn`` / ``execute_fn`` (typically wrapping an agent).
     ``approve_plan`` gates the transition out of planning unless
     ``auto_approve=True``.

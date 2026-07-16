@@ -547,6 +547,7 @@ def create_claw_agent(
     fallback_models: Optional[List[str]] = None,
     memory: Union[str, List[Union[str, os.PathLike]], None] = None,
     sandbox: Any = None,
+    sandbox_profile: str | None = None,
     streaming: bool = True,
     context_window: Optional[int] = None,
     max_tokens: Optional[int] = None,
@@ -578,6 +579,8 @@ def create_claw_agent(
     approval_handler: Any = None,
     require_approval_tools: Optional[List[str]] = None,
     on_exit_plan_mode: Any = None,
+    permission_rules: list | None = None,
+    goal_mode: bool = False,
 ) -> ClawAgent:
     """
     Create a ClawAgent with full-stack capabilities.
@@ -658,6 +661,16 @@ def create_claw_agent(
         tool_discovery: Register compact tool discovery helpers by default.
         tool_discovery_max_results: Default result cap for tool_discover.
         tool_discovery_max_profile: Maximum profile exposed through discovery helpers.
+        sandbox_profile: Named OS sandbox profile (``workspace``, ``strict``,
+                        ``seatbelt``, ``bwrap``, …). Default: ``CLAW_SANDBOX_PROFILE``
+                        or ``workspace`` (path-confined; upgrades to seatbelt/bwrap
+                        when available). Pass ``sandbox=`` to inject a custom backend.
+        permission_rules: Extra declarative allow/deny/ask rules (deny wins).
+                        Defaults load from ``.clawagents/permissions.json`` when
+                        ``permission_rules`` feature is on.
+        goal_mode:      Prefer Goal autopilot (planner→verify→strategist) over ATLAS.
+                        Forces ``atlas=False``. Register ``start_goal`` / ``update_goal``
+                        tools when ``goal_autopilot`` is enabled.
 
     Examples:
         # Zero-config (uses env vars)
@@ -700,6 +713,8 @@ def create_claw_agent(
     if learn is None:
         learn = os.environ.get("CLAW_LEARN", "").lower() in ("1", "true", "yes")
     if atlas is None:
+        # Default off — goal_autopilot is the preferred long-horizon gate.
+        # Opt in with CLAW_ATLAS=1 or atlas=True.
         atlas = os.environ.get("CLAW_ATLAS", "").lower() in ("1", "true", "yes")
     if atlas_config is None:
         atlas_config = os.environ.get("CLAW_ATLAS_CONFIG") or None
@@ -763,13 +778,37 @@ def create_claw_agent(
         resolved_advisor_llm = _resolve_model(advisor_spec, streaming, adv_key, context_window)
 
     # ── Resolve sandbox backend ────────────────────────────────────────
-    if sandbox is None:
-        from clawagents.sandbox.local import LocalBackend
-        sb = LocalBackend()
-    else:
+    workspace_root = os.getcwd()
+    if sandbox is not None:
         sb = sandbox
+    else:
+        from clawagents.sandbox.profiles import resolve_sandbox
+
+        # Default workspace confinement when profiles enabled; honor explicit profile.
+        env_profile = (os.environ.get("CLAW_SANDBOX_PROFILE") or "").strip() or None
+        chosen = sandbox_profile or env_profile
+        sb = resolve_sandbox(
+            chosen,
+            workspace=workspace_root,
+            default="workspace",
+        )
 
     registry = ToolRegistry()
+
+    # Declarative permission rules (deny wins) — attach to registry metadata.
+    from clawagents.tools.permissions import PermissionRule, load_permission_engine
+
+    _perm_engine = load_permission_engine(workspace_root)
+    if permission_rules:
+        for row in permission_rules:
+            if isinstance(row, PermissionRule):
+                _perm_engine.add_rule(row)
+            elif isinstance(row, dict):
+                _perm_engine.add_rule(PermissionRule(**{
+                    k: v for k, v in row.items()
+                    if k in PermissionRule.__dataclass_fields__
+                }))
+    registry._permission_engine = _perm_engine  # type: ignore[attr-defined]
 
     # ── Built-in tools (lazy where possible) ─────────────────────────
     # Eager: cheap, no sandbox dependency
@@ -861,6 +900,13 @@ def create_claw_agent(
     # name collisions, so user/workspace skills must override bundled ones
     # (openclaw/deepagents precedence order), not the other way around.
     skill_dirs = ([_bundled] + base_skill_dirs) if (_bundled and os.path.isdir(_bundled)) else base_skill_dirs
+    if _bundled:
+        try:
+            from clawagents.skills.best_of_n import ensure_best_of_n_skill
+
+            ensure_best_of_n_skill(Path(_bundled))
+        except Exception:
+            pass
     if skill_dirs:
         from clawagents.tools.skills import SkillStore, create_skill_tools
 
@@ -958,6 +1004,18 @@ def create_claw_agent(
         if registry.get(t.name) is None:
             registry.register(t)
 
+    from clawagents.config.features import is_enabled as _feat_on
+    from clawagents.goal.tools import create_goal_tools
+
+    if _feat_on("goal_autopilot"):
+        for t in create_goal_tools():
+            if registry.get(t.name) is None:
+                registry.register(t)
+
+    # Goal autopilot is the long-horizon product; ATLAS stays opt-in legacy.
+    if goal_mode:
+        atlas = False
+
     # ── Auto-discover memory from default locations ────────────────────
     memory_paths = _to_list(memory) if memory is not None else _auto_discover_memory()
     composed_before_llm = _compose_before_llm(
@@ -1017,8 +1075,18 @@ def create_claw_agent(
     )
     if skill_store is not None:
         agent.skill_store = skill_store  # type: ignore[attr-defined]
-    if mode_before is not None:
-        agent.before_tool = mode_before
+    agent._permission_engine = _perm_engine  # type: ignore[attr-defined]
+    agent._sandbox_backend = sb  # type: ignore[attr-defined]
+
+    # Compose permission deny-gate with mode before_tool (HookResult-aware).
+    from clawagents.graph.agent_loop import HookResult
+    from clawagents.modes import compose_before_tool
+
+    def _perm_before(tool_name: str, args: dict):
+        ok, msg = _perm_engine.gate(tool_name, args if isinstance(args, dict) else {})
+        return HookResult(allowed=ok, reason=msg or ("denied" if not ok else ""))
+
+    agent.before_tool = compose_before_tool(_perm_before, mode_before)
     if permission_mode_override is not None:
         agent._default_permission_mode = permission_mode_override  # type: ignore[attr-defined]
 

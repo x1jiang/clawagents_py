@@ -22,8 +22,8 @@ This repo is the **Python framework** (`pip install clawagents`). Ready-made cli
 | Product | Latest | What it is | Link |
 |---------|--------|------------|------|
 | **ClawAgents Desktop** | **v0.2.4** | Native macOS app — project chats, file editor, SSH remotes, Settings (incl. AWS Bedrock), Developer ID signed + notarized | [Repo](https://github.com/x1jiang/clawagents-desktop) · [Download DMG](https://github.com/x1jiang/clawagents-desktop/releases/tag/v0.2.4) |
-| **ClawAgents for VS Code / Cursor** | **v1.0.36** | Editor extension — chat, tools, Bedrock, ATLAS opt-in, Effort / Wire API | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Release + VSIX](https://github.com/x1jiang/clawagents-vscode/releases/tag/v1.0.36) |
-| **Python package** | **v6.14.2** | This library — `pip install -U 'clawagents[bedrock]'` · ATLAS via `atlas-skill` (GitHub) | [PyPI](https://pypi.org/project/clawagents/) · [Release](https://github.com/x1jiang/clawagents_py/releases) |
+| **ClawAgents for VS Code / Cursor** | **v1.0.43** | Editor extension — chat, tools, Goal redirect, hunk review, Bedrock | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Release + VSIX](https://github.com/x1jiang/clawagents-vscode/releases/tag/v1.0.43) |
+| **Python package** | **v6.15.0** | This library — Goal autopilot, OS sandbox, deny-wins permissions · `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/) · [Release](https://github.com/x1jiang/clawagents_py/releases) |
 | **TypeScript package** | **v6.12.13** | Node/TS sibling — `npm install git+https://github.com/x1jiang/clawagents.git` | [Repo](https://github.com/x1jiang/clawagents) |
 
 ## Installation
@@ -39,7 +39,15 @@ pip install -U 'clawagents[all]'       # All providers + tiktoken
 pip install 'atlas-skill @ git+https://github.com/multi-agent-systems-failure-taxonomy/ATLAS.git@3a917f3e0b993e3bfd77f652b013193aed167964'
 ```
 
-> **Version 6.13.1** — ATLAS completion authority hardened (July 2026).
+> **Version 6.15.0** — Goal autopilot product + OS sandbox enforce (July 2026).
+
+### New In v6.15.0
+
+- **Goal autopilot** (Grok `/goal` class): planner → execute → majority verifier → strategist; prefer over ATLAS (`create_claw_agent(goal_mode=True)`, `run_goal`, `start_goal` tools)
+- **OS sandbox**: workspace profile wired by default; seatbelt/bwrap auto-upgrade; write deny-then-allow confinement
+- **Permission rules**: deny-wins, on by default (`.clawagents/permissions.json`)
+- **Best-of-N** bundled skill (worktree isolation tournament)
+- **Prefire compaction** before the hard context cliff; mid-turn `pending_interject`
 
 ### New In v6.13.1
 
