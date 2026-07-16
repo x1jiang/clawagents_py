@@ -149,6 +149,22 @@ class LLMProvider(ABC):
     ) -> LLMResponse:
         pass
 
+    async def complete(
+        self,
+        messages: list[LLMMessage],
+        *args: Any,
+        stream: bool = False,
+        **kwargs: Any,
+    ) -> LLMResponse:
+        """Non-tool convenience alias for ``chat``.
+
+        Goal / memory-flush / dream helpers historically called ``complete``.
+        Providers only implement ``chat``; this default forwards and accepts
+        (then ignores) ``stream=`` so those call sites don't AttributeError.
+        Non-streaming is the default when ``on_chunk`` is omitted.
+        """
+        return await self.chat(messages)
+
 
 # ─── Streaming Robustness Internals ───────────────────────────────────────
 

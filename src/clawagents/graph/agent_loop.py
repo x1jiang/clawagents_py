@@ -1508,10 +1508,7 @@ def _goal_llm_complete(run_context: Any, llm: LLMProvider):
         meta = getattr(run_context, "_metadata", None) if run_context else None
         if isinstance(meta, dict) and callable(meta.get("goal_llm_complete")):
             return await meta["goal_llm_complete"](prompt)
-        resp = await llm.complete(
-            [LLMMessage(role="user", content=prompt)],
-            stream=False,
-        )
+        resp = await llm.chat([LLMMessage(role="user", content=prompt)])
         return str(getattr(resp, "content", "") or "")
 
     return _complete
@@ -1667,10 +1664,7 @@ async def _compact_if_needed(
             current_tokens, budget, compaction_cycle=cycle, workspace=ws
         ):
             async def _flush_llm(prompt: str) -> str:
-                resp = await llm.complete(
-                    [LLMMessage(role="user", content=prompt)],
-                    stream=False,
-                )
+                resp = await llm.chat([LLMMessage(role="user", content=prompt)])
                 return str(getattr(resp, "content", "") or "")
 
             flush_out = await run_memory_flush(
@@ -2526,10 +2520,7 @@ async def run_agent_graph(
             meta["approval_handler"] = approval_handler
 
         async def _bound_goal_llm(prompt: str) -> str:
-            resp = await llm.complete(
-                [LLMMessage(role="user", content=prompt)],
-                stream=False,
-            )
+            resp = await llm.chat([LLMMessage(role="user", content=prompt)])
             return str(getattr(resp, "content", "") or "")
 
         meta["goal_llm_complete"] = _bound_goal_llm
@@ -4756,7 +4747,6 @@ async def run_agent_graph(
                 async def _dream_llm(prompt: str) -> str:
                     resp = await llm.chat(
                         [LLMMessage(role="user", content=prompt)],
-                        stream=False,
                     )
                     return str(getattr(resp, "content", "") or "")
 

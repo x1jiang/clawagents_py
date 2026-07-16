@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.17.1-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.17.2-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -22,8 +22,8 @@ This repo is the **Python framework** (`pip install clawagents`). Ready-made cli
 | Product | Latest | What it is | Link |
 |---------|--------|------------|------|
 | **ClawAgents Desktop** | **v0.2.4** | Native macOS app — project chats, file editor, SSH remotes, Settings (incl. AWS Bedrock), Developer ID signed + notarized | [Repo](https://github.com/x1jiang/clawagents-desktop) · [Download DMG](https://github.com/x1jiang/clawagents-desktop/releases/tag/v0.2.4) |
-| **ClawAgents for VS Code / Cursor** | **v1.0.46** | Editor extension — chat, tools, Goal redirect, hunk review, session rewind, voice dictation, Bedrock | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Release + VSIX](https://github.com/x1jiang/clawagents-vscode/releases/tag/v1.0.46) |
-| **Python package** | **v6.17.1** | This library — smart memory, PTY, structured output, provider circuit breaker · `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/) · [Release](https://github.com/x1jiang/clawagents_py/releases) |
+| **ClawAgents for VS Code / Cursor** | **v1.0.47** | Editor extension — chat, tools, Goal redirect, hunk review, session rewind, voice dictation, Bedrock | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Release + VSIX](https://github.com/x1jiang/clawagents-vscode/releases/tag/v1.0.47) |
+| **Python package** | **v6.17.2** | This library — smart memory, PTY, structured output, provider circuit breaker · `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/) · [Release](https://github.com/x1jiang/clawagents_py/releases) |
 | **TypeScript package** | **v6.12.13** | Node/TS sibling — `npm install git+https://github.com/x1jiang/clawagents.git` | [Repo](https://github.com/x1jiang/clawagents) |
 
 ## Installation
@@ -36,12 +36,11 @@ pip install -U 'clawagents[bedrock]'   # + Amazon Bedrock (Claude via IAM + Nova
 pip install -U 'clawagents[all]'       # All providers + tiktoken
 ```
 
-> **Version 6.17.1** — Circuit-breaker probe-lease + interject synthetic turns (July 2026).
+> **Version 6.17.2** — Fix goal/flush/dream LLM helpers (`complete` → `chat`) (July 2026).
 
-### New In v6.17.1
+### New In v6.17.2
 
-- **Provider circuit breaker** — half-open probe limiting with abandoned-probe lease reclamation (Grok `xai-circuit-breaker`)
-- **Interject** — each redirect is a standalone synthetic user turn (`<user_query>` envelope); stranded undrained redirects become queued prompts
+- **Fix:** `LLMProvider.complete()` now aliases `chat()`; goal / memory-flush / dream helpers no longer `AttributeError` or pass invalid `stream=`
 
 > Older release notes live in [Changelog](#changelog).
 
@@ -1519,6 +1518,11 @@ parity sweep.
 ---
 
 ## Changelog
+
+### v6.17.2 — Fix LLM complete/chat contract (July 2026)
+
+- `LLMProvider.complete()` aliases `chat()`; goal/flush/dream use `chat()` (no `stream=`)
+- Companion — VS Code **1.0.47**
 
 ### v6.17.1 — Circuit-breaker + interject synthetic turns (July 2026)
 
