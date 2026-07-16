@@ -392,6 +392,10 @@ class TaskTool:
                         ]
                 if parent_meta.get("approval_handler") is not None:
                     run_kwargs["approval_handler"] = parent_meta["approval_handler"]
+                if parent_meta.get("taxonomy_dispatcher") is not None:
+                    child_ctx._metadata["taxonomy_dispatcher"] = parent_meta[
+                        "taxonomy_dispatcher"
+                    ]
             run_kwargs["run_context"] = child_ctx
 
             parent_name = "ClawAgent"
@@ -400,6 +404,26 @@ class TaskTool:
                 parent_name = str(
                     run_context._metadata.get("agent_name") or parent_name
                 )
+            taxonomy_dispatcher = None
+            if run_context is not None and isinstance(run_context._metadata, dict):
+                taxonomy_dispatcher = run_context._metadata.get("taxonomy_dispatcher")
+            if taxonomy_dispatcher is not None:
+                try:
+                    from clawagents.hooks.external import dispatch_taxonomy_hook
+                    from clawagents.hooks.taxonomy import HookEvent
+
+                    await dispatch_taxonomy_hook(
+                        taxonomy_dispatcher,
+                        HookEvent.SUBAGENT_START,
+                        {
+                            "parent": parent_name,
+                            "subagent": child_label,
+                            "description": description[:500],
+                        },
+                        blocking=False,
+                    )
+                except Exception:
+                    pass
             await _fire_parent_hook(
                 run_context,
                 "on_subagent_start",
@@ -436,6 +460,30 @@ class TaskTool:
                         # there are overrides), but keep the cleanup symmetric.
                         proxy.stop()
             finally:
+                if taxonomy_dispatcher is not None:
+                    try:
+                        from clawagents.hooks.external import dispatch_taxonomy_hook
+                        from clawagents.hooks.taxonomy import HookEvent
+
+                        await dispatch_taxonomy_hook(
+                            taxonomy_dispatcher,
+                            HookEvent.SUBAGENT_STOP,
+                            {
+                                "parent": parent_name,
+                                "subagent": child_label,
+                                "status": (
+                                    "error"
+                                    if state is None or state.status == "error"
+                                    else state.status if state is not None else "error"
+                                ),
+                                "result_preview": (
+                                    (state.result or "")[:500] if state is not None else ""
+                                ),
+                            },
+                            blocking=False,
+                        )
+                    except Exception:
+                        pass
                 await _fire_parent_hook(
                     run_context,
                     "on_subagent_end",

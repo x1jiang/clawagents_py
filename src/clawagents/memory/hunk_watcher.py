@@ -36,6 +36,8 @@ class RewindSnapshot:
     prompt_index: int
     user_text: str
     file_states: dict[str, str] = field(default_factory=dict)
+    message_count: int | None = None
+    conversation_marker: list[dict[str, str]] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
 
 
@@ -77,22 +79,38 @@ class HunkWatcher:
         )
         # Seed hunk baseline
         try:
-            from clawagents.memory.attributed_hunks import refresh_file_hunks
+            from clawagents.memory.attributed_hunks import (
+                agent_edit_attribution,
+                refresh_file_hunks,
+            )
 
             refresh_file_hunks(
                 rel,
                 workspace=self.workspace,
                 turn_index=idx,
                 tool="agent_write",
+                source="agent",
+                attribution=agent_edit_attribution(idx),
                 seed_baseline_if_missing=True,
             )
         except Exception:
             pass
 
-    def snapshot_turn(self, prompt_index: int, user_text: str = "") -> RewindSnapshot:
+    def snapshot_turn(
+        self,
+        prompt_index: int,
+        user_text: str = "",
+        *,
+        message_count: int | None = None,
+        conversation_marker: list[dict[str, str]] | None = None,
+    ) -> RewindSnapshot:
         states = {p: b.content for p, b in self._files.items()}
         snap = RewindSnapshot(
-            prompt_index=prompt_index, user_text=user_text, file_states=dict(states)
+            prompt_index=prompt_index,
+            user_text=user_text,
+            file_states=dict(states),
+            message_count=message_count,
+            conversation_marker=list(conversation_marker or []),
         )
         delta = HunkTurnDelta(prompt_index=prompt_index, file_states=dict(states))
         self._deltas.append(delta)
@@ -110,6 +128,7 @@ class HunkWatcher:
                     {
                         "prompt_index": data.get("prompt_index"),
                         "user_text": (data.get("user_text") or "")[:200],
+                        "message_count": data.get("message_count"),
                         "files": len(data.get("file_states") or {}),
                         "path": str(p),
                     }
@@ -134,11 +153,24 @@ class HunkWatcher:
 
         # Prefer on-disk snapshot if present
         snap_path = self._store_dir / f"prompt_{prompt_index:04d}.json"
+        snap_user_text = ""
+        snap_message_count: int | None = None
+        snap_marker: list[dict[str, str]] = []
         if snap_path.is_file():
             try:
                 data = json.loads(snap_path.read_text(encoding="utf-8"))
                 composed = dict(data.get("file_states") or composed)
-            except (OSError, json.JSONDecodeError):
+                snap_user_text = str(data.get("user_text") or "")
+                raw_mc = data.get("message_count")
+                snap_message_count = int(raw_mc) if raw_mc is not None else None
+                raw_marker = data.get("conversation_marker")
+                if isinstance(raw_marker, list):
+                    snap_marker = [
+                        {"role": str(m.get("role") or ""), "preview": str(m.get("preview") or "")[:120]}
+                        for m in raw_marker
+                        if isinstance(m, dict)
+                    ]
+            except (OSError, json.JSONDecodeError, TypeError, ValueError):
                 pass
 
         restored = []
@@ -163,7 +195,15 @@ class HunkWatcher:
         # Drop later deltas
         self._deltas = [d for d in self._deltas if d.prompt_index <= prompt_index]
         self._prompt_index = prompt_index
-        return {"ok": True, "prompt_index": prompt_index, "restored": restored}
+        return {
+            "ok": True,
+            "prompt_index": prompt_index,
+            "restored": restored,
+            "user_text": snap_user_text,
+            "truncate_to_user_text": snap_user_text,
+            "message_count": snap_message_count,
+            "conversation_marker": snap_marker,
+        }
 
     def _should_ignore(self, rel: str) -> bool:
         parts = Path(rel).parts
@@ -221,19 +261,22 @@ class HunkWatcher:
             if st.st_mtime <= prev.mtime and text == prev.content:
                 continue
             # External change
-            source = "external"
-            tool = "external"
-            if prev.agent_touched:
-                source = "external"  # attributed as external-on-agent via tool label
-                tool = "external_on_agent"
+            on_agent_file = bool(prev.agent_touched)
+            source = "external_on_agent" if on_agent_file else "external"
+            tool = "external_on_agent" if on_agent_file else "external"
             try:
-                from clawagents.memory.attributed_hunks import refresh_file_hunks
+                from clawagents.memory.attributed_hunks import (
+                    external_edit_attribution,
+                    refresh_file_hunks,
+                )
 
                 refresh_file_hunks(
                     rel,
                     workspace=self.workspace,
                     turn_index=prev.prompt_index,
                     tool=tool,
+                    source=source,  # type: ignore[arg-type]
+                    attribution=external_edit_attribution(on_agent_file=on_agent_file),
                     seed_baseline_if_missing=False,
                 )
             except Exception:

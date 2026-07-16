@@ -2568,6 +2568,60 @@ async def run_agent_graph(
     except Exception:
         logger.debug("hook taxonomy load failed", exc_info=True)
 
+    if taxonomy_dispatcher is not None and isinstance(
+        getattr(run_context, "_metadata", None), dict
+    ):
+        run_context._metadata["taxonomy_dispatcher"] = taxonomy_dispatcher
+
+    _base_emit = emit
+
+    async def _fire_taxonomy(
+        event: Any,
+        payload: dict[str, Any] | None = None,
+        *,
+        blocking: bool = False,
+    ) -> None:
+        if taxonomy_dispatcher is None:
+            return
+        try:
+            from clawagents.hooks.external import dispatch_taxonomy_hook
+
+            await dispatch_taxonomy_hook(
+                taxonomy_dispatcher,
+                event,
+                payload or {},
+                blocking=blocking,
+            )
+        except Exception:
+            pass
+
+    async def _tax_permission_denied(
+        tool: str, reason: str, *, source: str,
+    ) -> None:
+        from clawagents.hooks.taxonomy import HookEvent
+
+        await _fire_taxonomy(
+            HookEvent.PERMISSION_DENIED,
+            {"tool": tool, "reason": reason, "source": source},
+        )
+
+    def emit(kind: EventKind, data: dict[str, Any] | None = None) -> None:
+        payload = data or {}
+        _base_emit(kind, payload)
+        if kind == "warn" and taxonomy_dispatcher is not None:
+            from clawagents.hooks.taxonomy import HookEvent
+
+            msg = str(payload.get("message") or payload)
+            try:
+                asyncio.get_running_loop().create_task(
+                    _fire_taxonomy(
+                        HookEvent.NOTIFICATION,
+                        {"message": msg, "kind": "warn"},
+                    )
+                )
+            except RuntimeError:
+                pass
+
     token_multiplier = 1.0
     resolved_model_name: Optional[str] = None
     _cached_sys_tokens: int = 0  # Feature D: cache system prompt token count
@@ -2759,7 +2813,23 @@ async def run_agent_graph(
             idx = int((meta_rw or {}).get("prompt_index") or 0) + 1
             if meta_rw is not None:
                 meta_rw["prompt_index"] = idx
-            w.snapshot_turn(idx, user_text=(task or "")[:2000])
+            _conv_marker: list[dict[str, str]] = []
+            for _m in messages[-6:]:
+                if _m.role in ("user", "assistant"):
+                    _preview = (
+                        _m.content
+                        if isinstance(_m.content, str)
+                        else str(_m.content)
+                    )
+                    _conv_marker.append(
+                        {"role": _m.role, "preview": _preview[:120]}
+                    )
+            w.snapshot_turn(
+                idx,
+                user_text=(task or "")[:2000],
+                message_count=len(messages),
+                conversation_marker=_conv_marker,
+            )
     except Exception:
         logger.debug("rewind snapshot failed", exc_info=True)
 
@@ -3641,6 +3711,11 @@ async def run_agent_graph(
                         ext_allowed, ext_args = await ext_hook_runner.pre_tool_use(call.tool_name, call.args)
                         if not ext_allowed:
                             emit("tool_skipped", {"name": call.tool_name, "reason": "blocked by external hook"})
+                            await _tax_permission_denied(
+                                call.tool_name,
+                                "blocked by external hook",
+                                source="external_hook",
+                            )
                             if use_native_tools and native_tc and native_tc.tool_call_id:
                                 messages.append(LLMMessage(
                                     role="assistant",
@@ -3682,6 +3757,9 @@ async def run_agent_graph(
                         if not tax_allowed:
                             reason = tax_reason or "blocked by taxonomy hook"
                             emit("tool_skipped", {"name": call.tool_name, "reason": reason})
+                            await _tax_permission_denied(
+                                call.tool_name, reason, source="taxonomy",
+                            )
                             if use_native_tools and native_tc and native_tc.tool_call_id:
                                 messages.append(LLMMessage(
                                     role="assistant",
@@ -3728,6 +3806,9 @@ async def run_agent_graph(
                         hook_approved = False
                     if not hook_approved:
                         emit("tool_skipped", {"name": call.tool_name, "reason": hook_reason})
+                        await _tax_permission_denied(
+                            call.tool_name, hook_reason, source="before_tool",
+                        )
                         # Close the native tool pair so Gemini sees
                         # model(function_call) → user(function_response), not a bare
                         # "[Tool Skipped]" user turn that breaks turn alternation.
@@ -3921,6 +4002,17 @@ async def run_agent_graph(
                             },
                             blocking=False,
                         )
+                        if not tool_result.success:
+                            await dispatch_taxonomy_hook(
+                                taxonomy_dispatcher,
+                                HookEvent.POST_TOOL_USE_FAILURE,
+                                {
+                                    "tool": call.tool_name,
+                                    "args": call.args,
+                                    "error": tool_result.error or str(tool_result.output)[:500],
+                                },
+                                blocking=False,
+                            )
                     except Exception as hook_err:
                         emit("warn", {"message": f"taxonomy post_tool_use hook error: {hook_err}"})
 
@@ -4087,6 +4179,11 @@ async def run_agent_graph(
                             ext_allowed, ext_args = await ext_hook_runner.pre_tool_use(_c.tool_name, _c.args)
                             if not ext_allowed:
                                 emit("tool_skipped", {"name": _c.tool_name, "reason": "blocked by external hook"})
+                                await _tax_permission_denied(
+                                    _c.tool_name,
+                                    "blocked by external hook",
+                                    source="external_hook",
+                                )
                                 messages.append(LLMMessage(role="user", content=f"[Tool Skipped] {_c.tool_name} was blocked by external hook."))
                                 continue
                             _c = ParsedToolCall(tool_name=_c.tool_name, args=ext_args)
@@ -4113,6 +4210,9 @@ async def run_agent_graph(
                             if not tax_allowed:
                                 reason = tax_reason or "blocked by taxonomy hook"
                                 emit("tool_skipped", {"name": _c.tool_name, "reason": reason})
+                                await _tax_permission_denied(
+                                    _c.tool_name, reason, source="taxonomy",
+                                )
                                 messages.append(
                                     LLMMessage(
                                         role="user",
@@ -4159,6 +4259,9 @@ async def run_agent_graph(
                         result_call, reason = _apply_hook(c)
                         if result_call is None:
                             emit("tool_skipped", {"name": c.tool_name, "reason": reason})
+                            await _tax_permission_denied(
+                                c.tool_name, reason, source="before_tool",
+                            )
                         else:
                             approved_calls.append(result_call)
                             _approved_orig_indices.append(_orig_i)
@@ -4299,6 +4402,17 @@ async def run_agent_graph(
                                 },
                                 blocking=False,
                             )
+                            if not _r.success:
+                                await dispatch_taxonomy_hook(
+                                    taxonomy_dispatcher,
+                                    HookEvent.POST_TOOL_USE_FAILURE,
+                                    {
+                                        "tool": _c.tool_name,
+                                        "args": _c.args,
+                                        "error": _r.error or str(_r.output)[:500],
+                                    },
+                                    blocking=False,
+                                )
                         except Exception as hook_err:
                             emit("warn", {"message": f"taxonomy post_tool_use hook error: {hook_err}"})
 
@@ -4780,6 +4894,31 @@ async def run_agent_graph(
                 },
                 blocking=False,
             )
+            _result_text = state.result or ""
+            _stop_failed = (
+                state.status in ("error", "max_iterations")
+                or _result_text.startswith("[cancelled]")
+                or _result_text.startswith("[interrupted]")
+            )
+            if _stop_failed:
+                await dispatch_taxonomy_hook(
+                    taxonomy_dispatcher,
+                    HookEvent.STOP_FAILURE,
+                    {
+                        "status": state.status,
+                        "message": _result_text or state.status,
+                    },
+                    blocking=False,
+                )
+                await dispatch_taxonomy_hook(
+                    taxonomy_dispatcher,
+                    HookEvent.NOTIFICATION,
+                    {
+                        "message": _result_text or state.status,
+                        "kind": "stop_failure",
+                    },
+                    blocking=False,
+                )
             await dispatch_taxonomy_hook(
                 taxonomy_dispatcher,
                 HookEvent.STOP,

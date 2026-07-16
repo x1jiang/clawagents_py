@@ -96,6 +96,38 @@ def _default_secret_globs() -> tuple[str, ...]:
     return (".env", ".env.*", "**/credentials*", "**/secrets*", "**/*.pem")
 
 
+def _resolve_secret_overlay_paths(
+    workspace: str,
+    secret_globs: tuple[str, ...],
+) -> list[str]:
+    """Expand secret deny globs to absolute paths for bwrap --ro-bind /dev/null overlays."""
+    if not secret_globs:
+        return []
+    ws = Path(workspace).resolve()
+    found: set[str] = set()
+    for pattern in secret_globs:
+        pat = (pattern or "").strip()
+        if not pat:
+            continue
+        if "*" in pat or "?" in pat or "**" in pat:
+            for hit in ws.glob(pat):
+                if hit.is_file():
+                    found.add(str(hit.resolve()))
+            # Fail-closed: bind missing .env even when absent
+            if pat in {".env", ".env.*"} or pat.startswith(".env"):
+                env_candidate = ws / ".env"
+                found.add(str(env_candidate.resolve()))
+            continue
+        target = (ws / pat).resolve()
+        if target.is_file():
+            found.add(str(target))
+        elif target.parent.exists():
+            found.add(str(target))
+    # Always overlay workspace .env when secret deny is enabled
+    found.add(str((ws / ".env").resolve()))
+    return sorted(found)
+
+
 def load_project_sandbox_toml(workspace: str | Path | None = None) -> dict[str, OSSandboxProfile]:
     """Load add-only custom profiles from ``.clawagents/sandbox.toml`` (JSON-compatible).
 
@@ -379,12 +411,22 @@ class ProfileBackend:
                 bind = ["--bind", self.cwd, self.cwd]
                 if self._profile.read_only:
                     bind = ["--ro-bind", self.cwd, self.cwd]
+                secret_overlays: list[str] = []
+                secret_globs = getattr(self._profile, "secret_deny_paths", ())
+                if secret_globs:
+                    for secret_path in _resolve_secret_overlay_paths(
+                        self.cwd, secret_globs
+                    ):
+                        secret_overlays.extend(
+                            ["--ro-bind", "/dev/null", secret_path]
+                        )
                 parts = [
                     binary,
                     "--die-with-parent",
                     *ro,
                     *net,
                     *bind,
+                    *secret_overlays,
                     "--chdir",
                     cwd or self.cwd,
                     "/bin/sh",

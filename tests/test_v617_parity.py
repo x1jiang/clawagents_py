@@ -208,6 +208,91 @@ def test_hunk_rewind_roundtrip(tmp_path: Path, monkeypatch):
     result = w.rewind_to_prompt(1)
     assert result["ok"] is True
     assert f.read_text(encoding="utf-8") == "v1\n"
+    assert result.get("user_text") == "first"
+    assert result.get("truncate_to_user_text") == "first"
+
+
+def test_hunk_attribution_agent_and_external(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("CLAW_FEATURE_HUNK_WATCHER", "1")
+    from clawagents.config.features import reset
+
+    reset()
+    from clawagents.memory.attributed_hunks import (
+        agent_edit_attribution,
+        external_edit_attribution,
+        list_hunks,
+        refresh_file_hunks,
+    )
+    from clawagents.memory.hunk_watcher import HunkWatcher
+
+    f = tmp_path / "a.txt"
+    f.write_text("base\n", encoding="utf-8")
+    refresh_file_hunks("a.txt", workspace=tmp_path, seed_baseline_if_missing=True)
+    f.write_text("agent edit\n", encoding="utf-8")
+    refresh_file_hunks(
+        "a.txt",
+        workspace=tmp_path,
+        turn_index=3,
+        tool="write",
+        source="agent",
+        attribution=agent_edit_attribution(3),
+        seed_baseline_if_missing=False,
+    )
+    rows = list_hunks(workspace=tmp_path, path="a.txt")
+    assert rows
+    assert rows[0].attribution == "AgentEdit3"
+    assert rows[0].source == "agent"
+
+    f.write_text("external edit\n", encoding="utf-8")
+    refresh_file_hunks(
+        "a.txt",
+        workspace=tmp_path,
+        source="external_on_agent",
+        attribution=external_edit_attribution(on_agent_file=True),
+        seed_baseline_if_missing=False,
+    )
+    rows2 = list_hunks(workspace=tmp_path, path="a.txt")
+    assert any(h.attribution == "ExternalEditOnAgentFile" for h in rows2)
+
+
+def test_rewind_snapshot_conversation_marker(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("CLAW_FEATURE_SESSION_REWIND", "1")
+    from clawagents.config.features import reset
+
+    reset()
+    from clawagents.memory.hunk_watcher import HunkWatcher
+
+    w = HunkWatcher(tmp_path)
+    w.snapshot_turn(
+        1,
+        user_text="hello",
+        message_count=4,
+        conversation_marker=[
+            {"role": "user", "preview": "hello"},
+            {"role": "assistant", "preview": "hi"},
+        ],
+    )
+    result = w.rewind_to_prompt(1)
+    assert result["message_count"] == 4
+    assert result["conversation_marker"][0]["role"] == "user"
+
+
+def test_bwrap_secret_overlay_paths(tmp_path: Path):
+    from clawagents.sandbox.profiles import _resolve_secret_overlay_paths
+
+    (tmp_path / ".env").write_text("SECRET=1\n", encoding="utf-8")
+    (tmp_path / "secrets").mkdir()
+    (tmp_path / "secrets" / "token.pem").write_text("x", encoding="utf-8")
+    paths = _resolve_secret_overlay_paths(
+        str(tmp_path),
+        (".env", "**/*.pem"),
+    )
+    assert any(p.endswith(".env") for p in paths)
+    assert any(p.endswith("token.pem") for p in paths)
+    # Missing .env path still included for fail-closed bind
+    (tmp_path / ".env").unlink()
+    paths2 = _resolve_secret_overlay_paths(str(tmp_path), (".env",))
+    assert any(p.endswith(".env") for p in paths2)
 
 
 def test_sandbox_project_add_only(tmp_path: Path):

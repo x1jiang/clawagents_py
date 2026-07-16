@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.17.2-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.17.3-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -23,7 +23,7 @@ This repo is the **Python framework** (`pip install clawagents`). Ready-made cli
 |---------|--------|------------|------|
 | **ClawAgents Desktop** | **v0.2.4** | Native macOS app — project chats, file editor, SSH remotes, Settings (incl. AWS Bedrock), Developer ID signed + notarized | [Repo](https://github.com/x1jiang/clawagents-desktop) · [Download DMG](https://github.com/x1jiang/clawagents-desktop/releases/tag/v0.2.4) |
 | **ClawAgents for VS Code / Cursor** | **v1.0.47** | Editor extension — chat, tools, Goal redirect, hunk review, session rewind, voice dictation, Bedrock | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Release + VSIX](https://github.com/x1jiang/clawagents-vscode/releases/tag/v1.0.47) |
-| **Python package** | **v6.17.2** | This library — smart memory, PTY, structured output, provider circuit breaker · `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/) · [Release](https://github.com/x1jiang/clawagents_py/releases) |
+| **Python package** | **v6.17.3** | This library — Tier-2 hook/hunk/sandbox wiring + LLM complete fix · `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/) · [Release](https://github.com/x1jiang/clawagents_py/releases) |
 | **TypeScript package** | **v6.12.13** | Node/TS sibling — `npm install git+https://github.com/x1jiang/clawagents.git` | [Repo](https://github.com/x1jiang/clawagents) |
 
 ## Installation
@@ -36,11 +36,13 @@ pip install -U 'clawagents[bedrock]'   # + Amazon Bedrock (Claude via IAM + Nova
 pip install -U 'clawagents[all]'       # All providers + tiktoken
 ```
 
-> **Version 6.17.2** — Fix goal/flush/dream LLM helpers (`complete` → `chat`) (July 2026).
+> **Version 6.17.3** — Tier-2 wiring: hooks, hunk attribution, conversation rewind, bwrap secrets (July 2026).
 
-### New In v6.17.2
+### New In v6.17.3
 
-- **Fix:** `LLMProvider.complete()` now aliases `chat()`; goal / memory-flush / dream helpers no longer `AttributeError` or pass invalid `stream=`
+- **Hooks:** StopFailure, PostToolUseFailure, PermissionDenied, Notification, SubagentStart/Stop now fire
+- **Hunks:** typed attribution `AgentEdit{n}` / `ExternalEditOnAgentFile` / `External`
+- **Rewind:** conversation truncate hints + host chat truncation; Linux bwrap `--ro-bind /dev/null` secret overlays
 
 > Older release notes live in [Changelog](#changelog).
 
@@ -1518,6 +1520,12 @@ parity sweep.
 ---
 
 ## Changelog
+
+### v6.17.3 — Tier-2 wiring completion (July 2026)
+
+- Taxonomy: StopFailure, PostToolUseFailure, PermissionDenied, Notification, SubagentStart/Stop
+- Typed hunk attribution; conversation rewind markers; bwrap secret-deny overlays
+- Companion — VS Code **1.0.47**
 
 ### v6.17.2 — Fix LLM complete/chat contract (July 2026)
 

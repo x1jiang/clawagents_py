@@ -14,7 +14,19 @@ from pathlib import Path
 from typing import Any, Literal
 
 
-HunkSource = Literal["agent", "external", "unknown"]
+HunkSource = Literal["agent", "external", "external_on_agent", "unknown"]
+
+
+def agent_edit_attribution(prompt_index: int | None) -> str:
+    """Typed attribution for agent-originated edits."""
+    if prompt_index is None:
+        return "AgentEdit"
+    return f"AgentEdit{prompt_index}"
+
+
+def external_edit_attribution(*, on_agent_file: bool) -> str:
+    """Typed attribution for watcher-detected external edits."""
+    return "ExternalEditOnAgentFile" if on_agent_file else "External"
 
 
 @dataclass
@@ -28,6 +40,7 @@ class AttributedHunk:
     header: str
     body: str
     source: HunkSource = "agent"
+    attribution: str = "agent"
     turn_index: int | None = None
     tool: str | None = None
 
@@ -80,6 +93,7 @@ class HunkStore:
         for hid, raw in (data.get("hunks") or {}).items():
             if not isinstance(raw, dict):
                 continue
+            src = raw.get("source") or "agent"
             store.hunks[str(hid)] = AttributedHunk(
                 id=str(raw.get("id") or hid),
                 path=str(raw.get("path") or ""),
@@ -89,7 +103,8 @@ class HunkStore:
                 new_count=int(raw.get("new_count") or 0),
                 header=str(raw.get("header") or ""),
                 body=str(raw.get("body") or ""),
-                source=raw.get("source") or "agent",  # type: ignore[arg-type]
+                source=src,  # type: ignore[arg-type]
+                attribution=str(raw.get("attribution") or src or "agent"),
                 turn_index=raw.get("turn_index"),
                 tool=raw.get("tool"),
             )
@@ -152,6 +167,7 @@ def compute_hunks(
     turn_index: int | None = None,
     tool: str | None = None,
     source: HunkSource = "agent",
+    attribution: str | None = None,
 ) -> list[AttributedHunk]:
     """Split a unified diff into attributed hunks."""
     old_lines = baseline.splitlines(keepends=True)
@@ -187,6 +203,7 @@ def compute_hunks(
                 header=header.strip(),
                 body="".join(body),
                 source=source,
+                attribution=attribution or source,
                 turn_index=turn_index,
                 tool=tool,
             )
@@ -211,6 +228,8 @@ def refresh_file_hunks(
     workspace: str | Path | None = None,
     turn_index: int | None = None,
     tool: str | None = None,
+    source: HunkSource = "agent",
+    attribution: str | None = None,
     seed_baseline_if_missing: bool = True,
 ) -> list[AttributedHunk]:
     """Recompute hunks for one file relative to its baseline."""
@@ -233,6 +252,8 @@ def refresh_file_hunks(
         current,
         turn_index=turn_index,
         tool=tool,
+        source=source,
+        attribution=attribution,
     )
     store.hunks = {k: v for k, v in store.hunks.items() if v.path != rel_path}
     for h in new_hunks:
@@ -371,6 +392,9 @@ def accept_all(
 __all__ = [
     "AttributedHunk",
     "HunkStore",
+    "HunkSource",
+    "agent_edit_attribution",
+    "external_edit_attribution",
     "compute_hunks",
     "refresh_file_hunks",
     "list_hunks",

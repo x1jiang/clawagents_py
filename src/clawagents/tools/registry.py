@@ -184,7 +184,12 @@ def _snapshot_before_write(tool_name: str, args: Dict[str, Any]) -> None:
         pass
 
 
-def _record_hunk_watcher_write(tool_name: str, args: Dict[str, Any]) -> None:
+def _record_hunk_watcher_write(
+    tool_name: str,
+    args: Dict[str, Any],
+    *,
+    prompt_index: int | None = None,
+) -> None:
     """Feed successful writes into hunk watcher for rewind attribution."""
     from clawagents.config.features import is_enabled
 
@@ -208,7 +213,37 @@ def _record_hunk_watcher_write(tool_name: str, args: Dict[str, Any]) -> None:
             return
         rel = str(resolved.relative_to(root)).replace("\\", "/")
         content = resolved.read_text(encoding="utf-8", errors="replace")
-        get_watcher(root).record_agent_write(rel, content)
+        get_watcher(root).record_agent_write(rel, content, prompt_index=prompt_index)
+    except Exception:
+        pass
+
+
+async def _fire_permission_denied_hook(
+    run_context: Any,
+    tool_name: str,
+    reason: str,
+    *,
+    source: str = "permission_engine",
+) -> None:
+    """Fire taxonomy PermissionDenied when a declarative gate blocks a tool."""
+    if run_context is None:
+        return
+    meta = getattr(run_context, "_metadata", None)
+    if not isinstance(meta, dict):
+        return
+    dispatcher = meta.get("taxonomy_dispatcher")
+    if dispatcher is None:
+        return
+    try:
+        from clawagents.hooks.external import dispatch_taxonomy_hook
+        from clawagents.hooks.taxonomy import HookEvent
+
+        await dispatch_taxonomy_hook(
+            dispatcher,
+            HookEvent.PERMISSION_DENIED,
+            {"tool": tool_name, "reason": reason, "source": source},
+            blocking=False,
+        )
     except Exception:
         pass
 
@@ -509,10 +544,14 @@ class ToolRegistry:
         if engine is not None and hasattr(engine, "gate"):
             ok, msg = engine.gate(tool_name, args if isinstance(args, dict) else {})
             if not ok:
+                reason = msg or f"Denied by permission rule: {tool_name}"
+                await _fire_permission_denied_hook(
+                    run_context, tool_name, reason, source="permission_engine",
+                )
                 return ToolResult(
                     success=False,
                     output="",
-                    error=msg or f"Denied by permission rule: {tool_name}",
+                    error=reason,
                 )
 
         # Parameter validation with lenient coercion
@@ -555,7 +594,18 @@ class ToolRegistry:
                 self._result_cache.set(tool_name, effective_args, truncated)
 
             if truncated.success and tool_name in _WRITE_TOOLS:
-                _record_hunk_watcher_write(tool_name, effective_args)
+                prompt_idx = None
+                if run_context is not None and isinstance(
+                    getattr(run_context, "_metadata", None), dict
+                ):
+                    raw_idx = run_context._metadata.get("prompt_index")
+                    try:
+                        prompt_idx = int(raw_idx) if raw_idx is not None else None
+                    except (TypeError, ValueError):
+                        prompt_idx = None
+                _record_hunk_watcher_write(
+                    tool_name, effective_args, prompt_index=prompt_idx,
+                )
 
             return truncated
         except asyncio.TimeoutError:
