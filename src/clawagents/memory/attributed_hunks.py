@@ -235,6 +235,14 @@ def refresh_file_hunks(
     """Recompute hunks for one file relative to its baseline."""
     store = HunkStore.load(workspace)
     rel_path, abs_path = _safe_workspace_file(store, rel_path)
+    # Never seed secret files into .clawagents/hunks/index.json.
+    try:
+        from clawagents.memory.hunk_watcher import is_secret_or_ignored_path
+
+        if is_secret_or_ignored_path(rel_path):
+            return []
+    except Exception:
+        pass
     current = _read_text(abs_path)
     if rel_path not in store.baselines:
         if seed_baseline_if_missing:

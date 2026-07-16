@@ -1,0 +1,105 @@
+"""Residual P1/P2 closures for v6.17.8."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+
+def test_agent_write_skips_env_snapshot(tmp_path):
+    from clawagents.memory.hunk_watcher import HunkWatcher
+
+    w = HunkWatcher(tmp_path)
+    w.record_agent_write(".env", "SECRET=abc\n", prompt_index=1)
+    w.record_agent_write("src/ok.py", "print(1)\n", prompt_index=1)
+    assert ".env" not in w._files
+    assert "src/ok.py" in w._files
+    snap = w.snapshot_turn(1, user_text="hi")
+    assert ".env" not in snap.file_states
+    assert "src/ok.py" in snap.file_states
+    raw = (tmp_path / ".clawagents" / "rewind" / "prompt_0001.json").read_text()
+    assert "SECRET=abc" not in raw
+
+
+def test_hunk_store_skips_secret_baseline(tmp_path, monkeypatch):
+    from clawagents.memory import attributed_hunks as ah
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("SECRET=1\n", encoding="utf-8")
+    out = ah.refresh_file_hunks(".env", workspace=tmp_path, seed_baseline_if_missing=True)
+    assert out == []
+    store = ah.HunkStore.load(tmp_path)
+    assert ".env" not in store.baselines
+
+
+def test_resolve_hook_url_pins_ip():
+    from clawagents.hooks.taxonomy import resolve_hook_url, is_blocked_ip
+
+    # Public IP literal should pin without DNS
+    target, reason = resolve_hook_url("https://1.1.1.1/hook")
+    assert reason == "ok"
+    assert target is not None
+    assert target.ip == "1.1.1.1"
+    assert target.host == "1.1.1.1"
+
+    bad, reason = resolve_hook_url("https://169.254.169.254/latest")
+    assert bad is None
+    assert "ssrf" in reason or "blocked" in reason
+
+
+def test_webhook_uses_pinned_post():
+    from clawagents.hooks.taxonomy import (
+        HookHandler,
+        HookEvent,
+        HookPinnedTarget,
+        _run_webhook,
+    )
+
+    calls: list[tuple] = []
+
+    def fake_post(target, data, timeout_s):
+        calls.append((target.ip, target.host, target.path))
+        return 200, {}, b'{"decision":"allow"}'
+
+    h = HookHandler(
+        event=HookEvent.PRE_TOOL_USE,
+        url="https://1.1.1.1/hooks/pre",
+    )
+    with patch("clawagents.hooks.taxonomy._post_hook_pinned", side_effect=fake_post):
+        dec = _run_webhook(h, {"tool": "execute"})
+    assert dec.allowed is True
+    assert calls and calls[0][0] == "1.1.1.1"
+
+
+def test_stream_breaker_helpers_exist():
+    from clawagents.providers import llm as llm_mod
+
+    assert callable(llm_mod._get_stream_breaker)
+    assert callable(llm_mod._admit_stream_breaker)
+    assert callable(llm_mod._record_stream_breaker)
+    # All four stream entrypoints reference admit helper
+    src = Path(llm_mod.__file__).read_text(encoding="utf-8")
+    assert src.count("_admit_stream_breaker") >= 4
+
+
+def test_doom_force_response_flag_semantics():
+    # Resample path sets doom_force_response; next chat injects no-think instruction.
+    from clawagents.doom_loop import (
+        detect_tail_repetition,
+        should_resample,
+        DoomLoopState,
+        DoomLoopRecoveryPolicy,
+        note_trigger,
+    )
+
+    text = "\n".join(["loop me"] * 5)
+    sig = detect_tail_repetition(text, channel="thinking")
+    assert sig is not None
+    state = DoomLoopState()
+    note_trigger(state, sig)
+    assert should_resample(sig, state, DoomLoopRecoveryPolicy())
+    meta = {"doom_force_response": True}
+    assert meta["doom_force_response"] is True

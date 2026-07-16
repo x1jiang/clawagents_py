@@ -3145,8 +3145,25 @@ async def run_agent_graph(
                         setattr(llm, "_structured_json_schema", None)
                 except Exception:
                     pass
+                # Doom-loop recovery: force a non-thinking response channel.
+                chat_messages = messages
+                if (
+                    run_context is not None
+                    and isinstance(run_context._metadata, dict)
+                    and run_context._metadata.get("doom_force_response")
+                ):
+                    chat_messages = list(messages) + [
+                        LLMMessage(
+                            role="user",
+                            content=(
+                                "CRITICAL recovery instruction: Do NOT emit any "
+                                "<think>...</think> blocks or private chain-of-thought. "
+                                "Respond with the next tool call or final answer only."
+                            ),
+                        )
+                    ]
                 response = await llm.chat(
-                    messages,
+                    chat_messages,
                     on_chunk=on_chunk if streaming else None,
                     cancel_event=cancel_event,
                     tools=native_schemas,
@@ -3310,18 +3327,37 @@ async def run_agent_graph(
                                 setattr(llm, "_temperature", min(1.0, max(0.4, cur_t + 0.4)))
                             except Exception:
                                 pass
+                            # Force next attempt onto the response channel (no think tags).
+                            if meta is not None:
+                                meta["doom_force_response"] = True
                             emit(
                                 "warn",
                                 {
                                     "message": (
                                         f"doom-loop {sig.label} — resampling "
-                                        f"({doom_state.retry_count}/{pol.max_retries})"
+                                        f"({doom_state.retry_count}/{pol.max_retries}, "
+                                        "force response channel)"
                                     )
                                 },
                             )
                             continue
+                        if (
+                            meta is not None
+                            and meta.get("doom_force_response")
+                            and sig.channel == "thinking"
+                        ):
+                            # Forced-response attempt still thought — keep forcing.
+                            meta["doom_force_response"] = True
             except Exception:
                 logger.debug("doom-loop check failed", exc_info=True)
+
+            # Clear force-response once we got a usable non-doom turn.
+            if (
+                run_context is not None
+                and isinstance(run_context._metadata, dict)
+                and run_context._metadata.pop("doom_force_response", None)
+            ):
+                pass
 
             # Use exclusively native or text-based tool calls based on user-provided mode
             native_tool_call_objects: list[NativeToolCall] | None = None

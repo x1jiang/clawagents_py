@@ -6,9 +6,11 @@ Claude-hooks name aliases, HTTPS-only webhooks with private-IP blocklist.
 
 from __future__ import annotations
 
+import http.client
 import ipaddress
 import json
 import socket
+import ssl
 import subprocess
 import urllib.error
 import urllib.request
@@ -116,26 +118,89 @@ def is_blocked_ip(ip: str) -> bool:
     return False
 
 
-def validate_hook_url(url: str) -> tuple[bool, str]:
-    """HTTPS-only + SSRF blocklist. Returns (ok, reason)."""
+@dataclass(frozen=True)
+class HookPinnedTarget:
+    """Hostname + DNS-pinned IP for one webhook hop (closes rebind TOCTOU)."""
+
+    host: str
+    port: int
+    ip: str
+    path: str  # path + query
+
+
+def resolve_hook_url(url: str) -> tuple[HookPinnedTarget | None, str]:
+    """HTTPS-only + SSRF blocklist; returns a DNS-pinned target or error reason."""
     try:
         parsed = urlparse(url)
     except Exception as exc:  # noqa: BLE001
-        return False, f"bad_url:{exc}"
+        return None, f"bad_url:{exc}"
     if parsed.scheme != "https":
-        return False, "https_only"
+        return None, "https_only"
     host = parsed.hostname
     if not host:
-        return False, "missing_host"
+        return None, "missing_host"
+    port = parsed.port or 443
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
     try:
-        infos = socket.getaddrinfo(host, parsed.port or 443, type=socket.SOCK_STREAM)
-    except socket.gaierror as exc:
-        return False, f"dns:{exc}"
-    for info in infos:
-        ip = info[4][0]
-        if is_blocked_ip(ip):
-            return False, f"ssrf_blocked:{ip}"
-    return True, "ok"
+        # IP literal — no DNS needed
+        ipaddress.ip_address(host)
+        ip = host
+        resolved = [host]
+    except ValueError:
+        try:
+            infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        except socket.gaierror as exc:
+            return None, f"dns:{exc}"
+        if not infos:
+            return None, "dns:empty"
+        resolved = [info[4][0] for info in infos]
+        ip = resolved[0]
+    for candidate in resolved:
+        if is_blocked_ip(candidate):
+            return None, f"ssrf_blocked:{candidate}"
+    return HookPinnedTarget(host=host, port=port, ip=ip, path=path), "ok"
+
+
+def validate_hook_url(url: str) -> tuple[bool, str]:
+    """HTTPS-only + SSRF blocklist. Returns (ok, reason)."""
+    target, reason = resolve_hook_url(url)
+    return target is not None, reason
+
+
+def _post_hook_pinned(
+    target: HookPinnedTarget,
+    data: bytes,
+    timeout_s: float,
+) -> tuple[int, dict[str, str], bytes]:
+    """POST to ``target.ip`` with Host/SNI = original hostname (no DNS rebind)."""
+    headers = {
+        "Host": target.host if target.port == 443 else f"{target.host}:{target.port}",
+        "Content-Type": "application/json",
+        "User-Agent": "clawagents-hooks/6.17",
+        "Connection": "close",
+        "Accept-Encoding": "identity",
+    }
+    ctx = ssl.create_default_context()
+    conn = http.client.HTTPSConnection(
+        target.ip,
+        target.port,
+        timeout=max(0.5, timeout_s),
+        context=ctx,
+        server_hostname=target.host,
+    )
+    try:
+        conn.request("POST", target.path, body=data, headers=headers)
+        resp = conn.getresponse()
+        body = resp.read(256_000)
+        hdrs = {k: v for k, v in resp.getheaders()}
+        return int(resp.status), hdrs, body
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def parse_blocking_result(stdout: str, exit_code: int) -> HookDecision:
@@ -181,64 +246,47 @@ def _run_command(handler: HookHandler, payload: dict[str, Any]) -> HookDecision:
 def _run_webhook(handler: HookHandler, payload: dict[str, Any]) -> HookDecision:
     if not handler.url:
         return HookDecision(allowed=True, reason="no_url", source="skip")
-    ok, reason = validate_hook_url(handler.url)
-    if not ok:
-        # Fail-closed: bad webhook must not silently allow the tool.
-        return HookDecision(allowed=False, reason=reason, source="ssrf_fail_closed")
     from urllib.parse import urljoin
 
-    class _NoRedirect(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: N802
-            return None  # force HTTPError so we re-validate Location ourselves
-
     data = json.dumps({"event": payload.get("event"), "payload": payload}).encode("utf-8")
-    # Manual redirect loop with re-validation (no urlopen auto-follow / DNS rebind).
+    # Manual redirect loop: resolve+pin DNS per hop, connect to pinned IP.
     url = handler.url
     max_hops = 5
-    opener = urllib.request.build_opener(_NoRedirect())
     for _ in range(max_hops):
-        ok, reason = validate_hook_url(url)
-        if not ok:
+        target, reason = resolve_hook_url(url)
+        if target is None:
             return HookDecision(allowed=False, reason=reason, source="ssrf_fail_closed")
-        req = urllib.request.Request(
-            url,
-            data=data,
-            headers={
-                "Content-Type": "application/json",
-                "User-Agent": "clawagents-hooks/6.17",
-            },
-            method="POST",
-        )
         try:
-            with opener.open(req, timeout=max(0.5, handler.timeout_s)) as resp:
-                body = resp.read().decode("utf-8", errors="replace")
-                return parse_blocking_result(body, 0)
-        except urllib.error.HTTPError as exc:
-            if 300 <= exc.code < 400:
-                loc = exc.headers.get("Location") if exc.headers else ""
-                if not loc:
-                    return HookDecision(
-                        allowed=False, reason="redirect_no_location", source="ssrf_fail_closed"
-                    )
-                next_url = urljoin(url, loc)
-                if str(next_url).startswith("http://"):
-                    return HookDecision(
-                        allowed=False,
-                        reason="https_only_redirect",
-                        source="ssrf_fail_closed",
-                    )
-                url = next_url
-                continue
-            body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
-            if body.strip().startswith("{"):
-                return parse_blocking_result(body, DENY_EXIT_CODE if exc.code >= 400 else 0)
-            return HookDecision(
-                allowed=False, reason=f"http_{exc.code}", source="fail_closed"
+            status, hdrs, raw = _post_hook_pinned(
+                target, data, timeout_s=handler.timeout_s
             )
         except Exception as exc:  # noqa: BLE001
             return HookDecision(
                 allowed=False, reason=f"webhook_error:{exc}", source="fail_closed"
             )
+        if 300 <= status < 400:
+            loc = hdrs.get("Location") or hdrs.get("location") or ""
+            if not loc:
+                return HookDecision(
+                    allowed=False, reason="redirect_no_location", source="ssrf_fail_closed"
+                )
+            next_url = urljoin(url, loc)
+            if str(next_url).startswith("http://"):
+                return HookDecision(
+                    allowed=False,
+                    reason="https_only_redirect",
+                    source="ssrf_fail_closed",
+                )
+            url = next_url
+            continue
+        body = raw.decode("utf-8", errors="replace")
+        if status >= 400:
+            if body.strip().startswith("{"):
+                return parse_blocking_result(body, DENY_EXIT_CODE)
+            return HookDecision(
+                allowed=False, reason=f"http_{status}", source="fail_closed"
+            )
+        return parse_blocking_result(body, 0)
     return HookDecision(allowed=False, reason="too_many_redirects", source="ssrf_fail_closed")
 
 
@@ -325,6 +373,8 @@ __all__ = [
     "normalize_event",
     "is_blocked_ip",
     "validate_hook_url",
+    "resolve_hook_url",
+    "HookPinnedTarget",
     "parse_blocking_result",
     "load_handlers_from_config",
 ]

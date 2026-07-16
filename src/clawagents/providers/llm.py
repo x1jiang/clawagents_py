@@ -376,6 +376,49 @@ async def _with_retry(
     raise last_error  # type: ignore[misc]
 
 
+def _get_stream_breaker(
+    tag: str,
+    *,
+    base_url: str | None = None,
+    model: str | None = None,
+) -> Any | None:
+    """Return a per-endpoint breaker for streaming paths, or None when disabled."""
+    try:
+        from clawagents.config.features import is_enabled as _feat_cb
+        from clawagents.circuit_breaker import breaker_key, get_provider_breaker
+
+        if not _feat_cb("provider_circuit_breaker"):
+            return None
+        return get_provider_breaker(breaker_key(tag, base_url=base_url, model=model))
+    except Exception:
+        return None
+
+
+async def _admit_stream_breaker(breaker: Any) -> None:
+    if breaker is None:
+        return
+    from clawagents.circuit_breaker import BreakerOpen
+
+    for _ in range(24):
+        try:
+            breaker.check()
+            return
+        except BreakerOpen as open_exc:
+            await asyncio.sleep(max(0.05, float(open_exc.retry_after) or 0.05))
+    breaker.check()
+
+
+def _record_stream_breaker(breaker: Any, *, success: bool) -> None:
+    if breaker is None:
+        return
+    try:
+        from clawagents.circuit_breaker import Outcome
+
+        breaker.record(Outcome.SUCCESS if success else Outcome.FAILURE)
+    except Exception:
+        pass
+
+
 # ─── Truncated JSON Repair ─────────────────────────────────────────────────
 
 
@@ -1218,8 +1261,12 @@ class OpenAIProvider(LLMProvider):
         oai_tools: list[dict[str, Any]] | None = None,
     ) -> LLMResponse:
         last_error: BaseException | None = None
+        breaker = _get_stream_breaker(
+            "openai-responses", base_url=self._base_url, model=self.model
+        )
 
-        for attempt in range(_MAX_RETRIES + 1):
+        attempt = 0
+        while attempt <= _MAX_RETRIES:
             if attempt > 0:
                 delay = _jittered_delay(attempt - 1)
                 logger.warning(
@@ -1227,6 +1274,20 @@ class OpenAIProvider(LLMProvider):
                     attempt, _MAX_RETRIES, delay,
                 )
                 await asyncio.sleep(delay)
+
+            try:
+                await _admit_stream_breaker(breaker)
+            except Exception as exc:
+                last_error = exc
+                try:
+                    from clawagents.circuit_breaker import BreakerOpen as _BO
+
+                    if isinstance(exc, _BO):
+                        await asyncio.sleep(max(0.05, float(exc.retry_after) or 0.05))
+                        continue
+                except Exception:
+                    pass
+                raise
 
             chunks: list[str] = []
             final_tokens = 0
@@ -1337,6 +1398,7 @@ class OpenAIProvider(LLMProvider):
                     except Exception:
                         pass  # malformed event — skip
 
+                _record_stream_breaker(breaker, success=True)
                 return LLMResponse(
                     content="".join(chunks),
                     model=self.model,
@@ -1350,11 +1412,14 @@ class OpenAIProvider(LLMProvider):
                 last_error = exc
                 if _is_responses_unsupported(exc):
                     raise
+                if _is_retryable(exc):
+                    _record_stream_breaker(breaker, success=False)
                 if _is_retryable(exc) and attempt < _MAX_RETRIES:
                     logger.warning(
                         "  [openai-responses] Stream interrupted after %d chars — retrying",
                         len("".join(chunks)),
                     )
+                    attempt += 1
                     continue
                 if chunks or tools_accumulation:
                     partial = "".join(chunks)
@@ -1383,21 +1448,9 @@ class OpenAIProvider(LLMProvider):
         oai_tools: list[dict[str, Any]] | None = None,
     ) -> LLMResponse:
         last_error: BaseException | None = None
-        breaker = None
-        try:
-            from clawagents.config.features import is_enabled as _feat_cb
-            from clawagents.circuit_breaker import (
-                breaker_key,
-                get_provider_breaker,
-                Outcome,
-            )
-
-            if _feat_cb("provider_circuit_breaker"):
-                breaker = get_provider_breaker(
-                    breaker_key("openai", base_url=self._base_url, model=self.model)
-                )
-        except Exception:
-            breaker = None
+        breaker = _get_stream_breaker(
+            "openai", base_url=self._base_url, model=self.model
+        )
 
         attempt = 0
         while attempt <= _MAX_RETRIES:
@@ -1409,31 +1462,19 @@ class OpenAIProvider(LLMProvider):
                 )
                 await asyncio.sleep(delay)
 
-            if breaker is not None:
+            try:
+                await _admit_stream_breaker(breaker)
+            except Exception as exc:
+                last_error = exc
                 try:
-                    from clawagents.circuit_breaker import BreakerOpen
+                    from clawagents.circuit_breaker import BreakerOpen as _BO
 
-                    for _ in range(24):
-                        try:
-                            breaker.check()
-                            break
-                        except BreakerOpen as open_exc:
-                            await asyncio.sleep(
-                                max(0.05, float(open_exc.retry_after) or 0.05)
-                            )
-                    else:
-                        breaker.check()
-                except Exception as exc:
-                    last_error = exc
-                    try:
-                        from clawagents.circuit_breaker import BreakerOpen as _BO
-
-                        if isinstance(exc, _BO):
-                            await asyncio.sleep(max(0.05, float(exc.retry_after) or 0.05))
-                            continue
-                    except Exception:
-                        pass
-                    raise
+                    if isinstance(exc, _BO):
+                        await asyncio.sleep(max(0.05, float(exc.retry_after) or 0.05))
+                        continue
+                except Exception:
+                    pass
+                raise
 
             chunks: list[str] = []
             final_tokens = 0
@@ -1513,8 +1554,7 @@ class OpenAIProvider(LLMProvider):
                     except Exception:
                         pass  # malformed chunk — skip
 
-                if breaker is not None:
-                    breaker.record(Outcome.SUCCESS)
+                _record_stream_breaker(breaker, success=True)
                 return LLMResponse(
                     content="".join(chunks),
                     model=self.model,
@@ -1526,8 +1566,8 @@ class OpenAIProvider(LLMProvider):
 
             except Exception as exc:
                 last_error = exc
-                if breaker is not None and _is_retryable(exc):
-                    breaker.record(Outcome.FAILURE)
+                if _is_retryable(exc):
+                    _record_stream_breaker(breaker, success=False)
                 # A mid-stream exception used to return the truncated text as a
                 # non-retried "final" answer. Retry retryable errors first; only
                 # surface a partial (now including any accumulated tool calls)
@@ -2012,10 +2052,13 @@ class GeminiProvider(LLMProvider):
 
         async def _call(contents: list[dict[str, Any]]) -> LLMResponse:
             if not on_chunk:
+                from clawagents.circuit_breaker import breaker_key as _bk
+
                 return await _with_retry(
                     "gemini",
                     lambda: self._request_once(contents, gemini_config),
                     policy=getattr(self, "retry_policy", None),
+                    breaker_tag=_bk("gemini", model=self.model),
                 )
             return await self._stream_with_retry(
                 contents, gemini_config, on_chunk, cancel_event,
@@ -2112,8 +2155,10 @@ class GeminiProvider(LLMProvider):
         cancel_event: asyncio.Event | None,
     ) -> LLMResponse:
         last_error: BaseException | None = None
+        breaker = _get_stream_breaker("gemini", model=self.model)
 
-        for attempt in range(_MAX_RETRIES + 1):
+        attempt = 0
+        while attempt <= _MAX_RETRIES:
             if attempt > 0:
                 delay = _jittered_delay(attempt - 1)
                 logger.warning(
@@ -2121,6 +2166,20 @@ class GeminiProvider(LLMProvider):
                     attempt, _MAX_RETRIES, delay,
                 )
                 await asyncio.sleep(delay)
+
+            try:
+                await _admit_stream_breaker(breaker)
+            except Exception as exc:
+                last_error = exc
+                try:
+                    from clawagents.circuit_breaker import BreakerOpen as _BO
+
+                    if isinstance(exc, _BO):
+                        await asyncio.sleep(max(0.05, float(exc.retry_after) or 0.05))
+                        continue
+                except Exception:
+                    pass
+                raise
 
             chunks: list[str] = []
             final_tokens = 0
@@ -2204,6 +2263,7 @@ class GeminiProvider(LLMProvider):
                     retry_config = types.GenerateContentConfig(**retry_opts)
                     return await self._request_once(user_contents, retry_config, _malformed_retry=True)
 
+                _record_stream_breaker(breaker, success=True)
                 return LLMResponse(
                     content="".join(chunks),
                     model=self.model,
@@ -2220,11 +2280,14 @@ class GeminiProvider(LLMProvider):
                 last_error = exc
                 # Retry retryable mid-stream failures before surfacing a
                 # truncated partial; include accumulated tool calls when we do.
+                if _is_retryable(exc):
+                    _record_stream_breaker(breaker, success=False)
                 if _is_retryable(exc) and attempt < _MAX_RETRIES:
                     logger.warning(
                         "  [gemini] Stream interrupted after %d chars — retrying",
                         len("".join(chunks)),
                     )
+                    attempt += 1
                     continue
                 if chunks or fn_calls:
                     partial = "".join(chunks)
@@ -2417,10 +2480,13 @@ class AnthropicProvider(LLMProvider):
             ]
 
         if not on_chunk:
+            from clawagents.circuit_breaker import breaker_key as _bk
+
             return await _with_retry(
                 "anthropic",
                 lambda: self._request_once(kwargs),
                 policy=getattr(self, "retry_policy", None),
+                breaker_tag=_bk("anthropic", model=self.model),
             )
         return await self._stream_with_retry(kwargs, on_chunk, cancel_event)
 
@@ -2456,12 +2522,31 @@ class AnthropicProvider(LLMProvider):
         cancel_event: asyncio.Event | None,
     ) -> LLMResponse:
         last_error: BaseException | None = None
+        breaker = _get_stream_breaker(
+            "anthropic",
+            model=getattr(self, "model", None) or kwargs.get("model"),
+        )
 
-        for attempt in range(_MAX_RETRIES + 1):
+        attempt = 0
+        while attempt <= _MAX_RETRIES:
             if attempt > 0:
                 delay = _jittered_delay(attempt - 1)
                 logger.warning("  [anthropic] Retry %d/%d after %.1fs", attempt, _MAX_RETRIES, delay)
                 await asyncio.sleep(delay)
+
+            try:
+                await _admit_stream_breaker(breaker)
+            except Exception as exc:
+                last_error = exc
+                try:
+                    from clawagents.circuit_breaker import BreakerOpen as _BO
+
+                    if isinstance(exc, _BO):
+                        await asyncio.sleep(max(0.05, float(exc.retry_after) or 0.05))
+                        continue
+                except Exception:
+                    pass
+                raise
 
             chunks: list[str] = []
             tool_calls: list[NativeToolCall] = []
@@ -2517,6 +2602,7 @@ class AnthropicProvider(LLMProvider):
                             if hasattr(event.usage, "output_tokens"):
                                 output_tokens = event.usage.output_tokens
 
+                _record_stream_breaker(breaker, success=True)
                 return LLMResponse(
                     content="".join(chunks),
                     model=self.model,
@@ -2533,11 +2619,14 @@ class AnthropicProvider(LLMProvider):
                 last_error = exc
                 # Retry retryable mid-stream failures before surfacing a
                 # truncated partial; include accumulated tool calls when we do.
+                if _is_retryable(exc):
+                    _record_stream_breaker(breaker, success=False)
                 if _is_retryable(exc) and attempt < _MAX_RETRIES:
                     logger.warning(
                         "  [anthropic] Stream interrupted after %d chars — retrying",
                         len("".join(chunks)),
                     )
+                    attempt += 1
                     continue
                 if chunks or tool_calls:
                     return LLMResponse(

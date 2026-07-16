@@ -41,6 +41,42 @@ class RewindSnapshot:
     created_at: float = field(default_factory=time.time)
 
 
+def is_secret_or_ignored_path(rel: str) -> bool:
+    """True for VCS/build noise or secret-like paths that must never be snapshotted."""
+    parts = Path(rel).parts
+    ignore_dirs = {
+        ".git",
+        ".clawagents",
+        "node_modules",
+        ".venv",
+        "venv",
+        "__pycache__",
+        "dist",
+        "build",
+        ".tox",
+    }
+    if any(p in ignore_dirs for p in parts):
+        return True
+    name = Path(rel).name
+    secret_names = {
+        ".env",
+        ".env.local",
+        ".env.production",
+        ".env.development",
+        "credentials.json",
+        "secrets.json",
+        "id_rsa",
+        "id_ed25519",
+    }
+    if name in secret_names or name.startswith(".env."):
+        return True
+    if name.endswith((".pem", ".key", ".p12", ".pfx")):
+        return True
+    if "credentials" in name.lower() or "secret" in name.lower():
+        return True
+    return False
+
+
 class HunkWatcher:
     """gitignore-light mtime watcher that refreshes attributed hunks."""
 
@@ -63,7 +99,15 @@ class HunkWatcher:
         self._store_dir.mkdir(parents=True, exist_ok=True)
 
     def record_agent_write(self, rel_path: str, content: str, prompt_index: int | None = None) -> None:
-        rel = rel_path.replace("\\", "/").lstrip("./")
+        # Do NOT use str.lstrip("./") — that strips every leading '.' and turns
+        # ".env" into "env", defeating secret filters.
+        rel = rel_path.replace("\\", "/")
+        while rel.startswith("./"):
+            rel = rel[2:]
+        rel = rel.lstrip("/")
+        # Never baseline/snapshot secrets into world-readable rewind/hunk JSON.
+        if self._should_ignore(rel):
+            return
         abs_path = self.workspace / rel
         try:
             mtime = abs_path.stat().st_mtime if abs_path.exists() else time.time()
@@ -104,7 +148,11 @@ class HunkWatcher:
         message_count: int | None = None,
         conversation_marker: list[dict[str, str]] | None = None,
     ) -> RewindSnapshot:
-        states = {p: b.content for p, b in self._files.items()}
+        states = {
+            p: b.content
+            for p, b in self._files.items()
+            if not self._should_ignore(p)
+        }
         snap = RewindSnapshot(
             prompt_index=prompt_index,
             user_text=user_text,
@@ -206,39 +254,7 @@ class HunkWatcher:
         }
 
     def _should_ignore(self, rel: str) -> bool:
-        parts = Path(rel).parts
-        ignore_dirs = {
-            ".git",
-            ".clawagents",
-            "node_modules",
-            ".venv",
-            "venv",
-            "__pycache__",
-            "dist",
-            "build",
-            ".tox",
-        }
-        if any(p in ignore_dirs for p in parts):
-            return True
-        name = Path(rel).name
-        # Never snapshot secrets into world-readable rewind JSON.
-        secret_names = {
-            ".env",
-            ".env.local",
-            ".env.production",
-            ".env.development",
-            "credentials.json",
-            "secrets.json",
-            "id_rsa",
-            "id_ed25519",
-        }
-        if name in secret_names or name.startswith(".env."):
-            return True
-        if name.endswith((".pem", ".key", ".p12", ".pfx")):
-            return True
-        if "credentials" in name.lower() or "secret" in name.lower():
-            return True
-        return False
+        return is_secret_or_ignored_path(rel)
 
     def poll_once(self) -> list[str]:
         """Scan watched files for external mtime changes; refresh hunks."""
@@ -394,6 +410,7 @@ __all__ = [
     "FileBaseline",
     "HunkTurnDelta",
     "RewindSnapshot",
+    "is_secret_or_ignored_path",
     "HunkWatcher",
     "get_watcher",
     "create_rewind_tools",
