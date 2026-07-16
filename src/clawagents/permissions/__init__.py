@@ -2,6 +2,10 @@
 
 Currently exposes :class:`PermissionMode` and :data:`WRITE_CLASS_TOOLS`.
 Inspired by claude-code-main/src/utils/permissions/PermissionMode.ts.
+
+Plan-approval helpers live in :mod:`clawagents.permissions.plan_approval`
+and are imported from there (not re-exported here) to avoid a circular
+import with :mod:`clawagents.run_context`.
 """
 
 from clawagents.permissions.mode import (

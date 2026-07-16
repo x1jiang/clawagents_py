@@ -243,6 +243,9 @@ class ClawAgent:
         default_pm = getattr(self, "_default_permission_mode", None)
         if default_pm is not None:
             run_context.permission_mode = default_pm
+        store = getattr(self, "skill_store", None)
+        if store is not None:
+            run_context._metadata["skill_store"] = store
 
         return await run_agent_graph(
             task=task,
@@ -574,6 +577,7 @@ def create_claw_agent(
     action_mode: str = "tools",
     approval_handler: Any = None,
     require_approval_tools: Optional[List[str]] = None,
+    on_exit_plan_mode: Any = None,
 ) -> ClawAgent:
     """
     Create a ClawAgent with full-stack capabilities.
@@ -906,7 +910,12 @@ def create_claw_agent(
 
     from clawagents.tools.skill_workshop import create_skill_workshop_tool
 
-    registry.register(create_skill_workshop_tool(workspace=os.getcwd()))
+    registry.register(
+        create_skill_workshop_tool(
+            workspace=os.getcwd(),
+            on_reload=(skill_store.reload if skill_store is not None else None),
+        )
+    )
 
     from clawagents.tools.search_history import create_search_history_tool
 
@@ -928,7 +937,7 @@ def create_claw_agent(
 
     from clawagents.tools.plan_mode import create_plan_mode_tools
 
-    for t in create_plan_mode_tools():
+    for t in create_plan_mode_tools(on_exit_plan_mode=on_exit_plan_mode):
         if registry.get(t.name) is None:
             registry.register(t)
 
@@ -936,6 +945,18 @@ def create_claw_agent(
 
     for t in create_worktree_tools(workspace=os.getcwd()):
         registry.register(t)
+
+    from clawagents.tools.hunk_review import create_hunk_review_tools
+
+    for t in create_hunk_review_tools(workspace=os.getcwd()):
+        if registry.get(t.name) is None:
+            registry.register(t)
+
+    from clawagents.tools.marketplace_tools import create_marketplace_tools
+
+    for t in create_marketplace_tools(workspace=os.getcwd()):
+        if registry.get(t.name) is None:
+            registry.register(t)
 
     # ── Auto-discover memory from default locations ────────────────────
     memory_paths = _to_list(memory) if memory is not None else _auto_discover_memory()
@@ -994,6 +1015,8 @@ def create_claw_agent(
         approval_handler=approval_handler,
         require_approval_tools=require_approval_tools,
     )
+    if skill_store is not None:
+        agent.skill_store = skill_store  # type: ignore[attr-defined]
     if mode_before is not None:
         agent.before_tool = mode_before
     if permission_mode_override is not None:
@@ -1008,7 +1031,7 @@ def create_claw_agent(
 
     # ── Sub-agent tool (always available) ──────────────────────────────
     from clawagents.tools.subagent import create_task_tool
-    registry.register(create_task_tool(llm, registry))
+    registry.register(create_task_tool(llm, registry, workspace=os.getcwd()))
 
     # ── MCP server integration (v6.4, optional) ────────────────────────
     if mcp_servers:
@@ -1225,7 +1248,23 @@ def _clamp_skill_description(text: str, max_chars: int) -> str:
     return cleaned[: max_chars - 1].rstrip() + "…"
 
 
-def _format_skill_line(name: str, description: str, desc_cap: int) -> str:
+def _format_skill_line(
+    name: str,
+    description: str,
+    desc_cap: int,
+    *,
+    when_to_use: str = "",
+) -> str:
+    from clawagents.config.features import is_enabled
+    from clawagents.skills.strategy import format_skill_catalog_line
+
+    if is_enabled("skill_when_to_use") and when_to_use:
+        return format_skill_catalog_line(
+            name,
+            description,
+            when_to_use=when_to_use,
+            desc_cap=desc_cap if desc_cap > 0 else 10_000,
+        )
     desc = _clamp_skill_description(description, desc_cap)
     if desc:
         return f"- **{name}**: {desc}"
@@ -1394,6 +1433,7 @@ def _skill_relevance_score(skill: Any, query: str) -> float:
     aliases = _phrases("aliases")
     triggers = _phrases("triggers")
     anti_triggers = _phrases("anti_triggers")
+    when_to_use = str(getattr(skill, "when_to_use", "") or "").strip().lower()
 
     def _phrase_matches(phrase: str) -> bool:
         phrase_tokens = _skill_core_tokens(phrase)
@@ -1422,6 +1462,12 @@ def _skill_relevance_score(skill: Any, query: str) -> float:
     for phrase in triggers:
         if _phrase_matches(phrase):
             score += 70.0
+    if when_to_use and _phrase_matches(when_to_use):
+        score += 75.0
+    elif when_to_use:
+        when_tokens = _skill_core_tokens(when_to_use)
+        when_overlap = _skill_core_tokens(q) & when_tokens
+        score += 12.0 * len(when_overlap)
 
     if explicit_name:
         score += 120.0
@@ -1436,7 +1482,7 @@ def _skill_relevance_score(skill: Any, query: str) -> float:
     query_words = re.findall(r"[a-z0-9+#]{4,}", q)
     searchable_words = re.findall(
         r"[a-z0-9+#]{4,}",
-        " ".join([name_l, *aliases, *triggers]),
+        " ".join([name_l, *aliases, *triggers, when_to_use]),
     )
     fuzzy = max(
         (
@@ -1497,6 +1543,7 @@ def _build_skill_catalog_prompt(
     *,
     context_window: int | None = None,
     query: str | None = None,
+    touched_paths: list[str] | None = None,
 ) -> str:
     """Build a bounded name/description catalog (Claude/Codex-style).
 
@@ -1510,7 +1557,13 @@ def _build_skill_catalog_prompt(
     if not loaded_skills:
         return ""
 
-    ranked = _rank_skills_for_query(loaded_skills, query)
+    from clawagents.skills.strategy import auto_suggest_lines, filter_skills_for_catalog
+
+    gated = filter_skills_for_catalog(loaded_skills, touched_paths=touched_paths)
+    if not gated:
+        return ""
+
+    ranked = _rank_skills_for_query(gated, query)
     max_desc = SKILL_LISTING_MAX_DESC_CHARS
     env_desc = (os.environ.get("CLAW_SKILL_LISTING_MAX_DESC_CHARS") or "").strip()
     if env_desc.isdigit():
@@ -1518,9 +1571,17 @@ def _build_skill_catalog_prompt(
 
     budget = skill_listing_budget_chars(context_window)
     name_index = _compact_skill_name_index(
-        loaded_skills,
+        gated,
         max_chars=max(800, min(2400, budget // 2)),
     )
+
+    def _line(skill: Any, desc_cap: int) -> str:
+        return _format_skill_line(
+            str(getattr(skill, "name", "") or "skill"),
+            str(getattr(skill, "description", "") or ""),
+            desc_cap,
+            when_to_use=str(getattr(skill, "when_to_use", "") or ""),
+        )
 
     # Normal LLM rounds have a current user query. Prefer recall over saving a
     # small prompt suffix: include all confident candidates up to a generous
@@ -1559,13 +1620,9 @@ def _build_skill_catalog_prompt(
 
         lines = [_SKILL_CATALOG_HEADER.rstrip(), name_index, heading]
         for skill, _score in relevant:
-            lines.append(
-                _format_skill_line(
-                    str(getattr(skill, "name", "") or "skill"),
-                    str(getattr(skill, "description", "") or ""),
-                    min(max_desc, 240),
-                )
-            )
+            lines.append(_line(skill, min(max_desc, 240)))
+        for nudge in auto_suggest_lines(relevant):
+            lines.append(nudge)
         lines.append(
             "Choose by task fit, not rank alone. Call `use_skill` and read every page "
             "before acting."
@@ -1580,11 +1637,7 @@ def _build_skill_catalog_prompt(
         if len(text) > budget:
             compact = [_SKILL_CATALOG_HEADER.rstrip(), name_index, heading]
             for skill, _score in relevant:
-                line = _format_skill_line(
-                    str(getattr(skill, "name", "") or "skill"),
-                    str(getattr(skill, "description", "") or ""),
-                    100,
-                )
+                line = _line(skill, 100)
                 if len("\n".join([*compact, line])) > budget - 160:
                     break
                 compact.append(line)
@@ -1598,10 +1651,14 @@ def _build_skill_catalog_prompt(
     body_budget = max(200, budget - len(_SKILL_CATALOG_HEADER) - reserve)
 
     entries = [
-        (str(getattr(s, "name", "") or "skill"), str(getattr(s, "description", "") or ""))
+        (
+            str(getattr(s, "name", "") or "skill"),
+            str(getattr(s, "description", "") or ""),
+            str(getattr(s, "when_to_use", "") or ""),
+        )
         for s in ranked
     ]
-    entries = [(n, d) for n, d in entries if n.strip()]
+    entries = [(n, d, w) for n, d, w in entries if n.strip()]
     if not entries:
         return ""
 
@@ -1617,12 +1674,12 @@ def _build_skill_catalog_prompt(
         shown = []
         used = 0
         omitted = 0
-        for i, (name, desc) in enumerate(entries):
+        for i, (name, desc, when) in enumerate(entries):
             if i >= MAX_SKILLS_IN_PROMPT and desc_cap > 0:
                 # Beyond soft count: name-only for the rest of this pass.
-                line = _format_skill_line(name, desc, 0)
+                line = _format_skill_line(name, desc, 0, when_to_use=when)
             else:
-                line = _format_skill_line(name, desc, desc_cap)
+                line = _format_skill_line(name, desc, desc_cap, when_to_use=when)
             add = len(line) + (1 if shown else 0)
             if used + add > body_budget:
                 omitted = len(entries) - len(shown)
@@ -1753,14 +1810,30 @@ def _compose_before_llm(
                 memory_content = load_memory_files(memory_paths)
 
         summaries = skill_summaries
+        discovery = ""
         if skill_store is not None:
+            try:
+                skill_store.maybe_hot_reload()
+            except Exception:
+                pass
             loaded = skill_store.list()
             if loaded:
+                touched = list(getattr(skill_store, "session_touched_paths", []) or [])
                 summaries = _build_skill_catalog_prompt(
                     loaded,
                     context_window=context_window,
                     query=_latest_user_text(messages),
+                    touched_paths=touched,
                 )
+            try:
+                discovery = skill_store.consume_discovery_announcement() or ""
+            except Exception:
+                discovery = ""
+
+        if discovery and summaries:
+            summaries = discovery + "\n\n" + summaries
+        elif discovery:
+            summaries = discovery
 
         if not memory_content and not summaries:
             return messages

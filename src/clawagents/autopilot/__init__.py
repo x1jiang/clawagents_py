@@ -45,3 +45,21 @@ class AutopilotRegistry:
 
 
 DEFAULT_AUTOPILOT_REGISTRY = AutopilotRegistry()
+
+
+def __getattr__(name: str) -> Any:
+    if name == "run_autopilot":
+        from clawagents.autopilot.loop import run_autopilot
+
+        return run_autopilot
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+__all__ = [
+    "AutopilotPhase",
+    "AutopilotTask",
+    "AutopilotRunner",
+    "AutopilotRegistry",
+    "DEFAULT_AUTOPILOT_REGISTRY",
+    "run_autopilot",
+]

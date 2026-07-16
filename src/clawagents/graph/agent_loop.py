@@ -1034,11 +1034,29 @@ def _post_tool_side_effects(
     tool_output: str | list[dict[str, Any]],
     *,
     emit: OnEvent,
+    run_context: RunContext | None = None,
 ) -> str | list[dict[str, Any]]:
     """Ledger / shadow-checkpoint / auto-verify after a tool completes."""
     from clawagents.config.features import is_enabled
 
     out = tool_output
+    try:
+        if success:
+            path = None
+            if isinstance(args, dict):
+                path = args.get("path") or args.get("file_path") or args.get("file")
+            if path:
+                from clawagents.skills.strategy import note_touched_path
+
+                note_touched_path(run_context, str(path))
+                store = None
+                if run_context is not None and isinstance(run_context._metadata, dict):
+                    store = run_context._metadata.get("skill_store")
+                if store is not None and hasattr(store, "note_touched_path"):
+                    store.note_touched_path(str(path))
+    except Exception:
+        logger.debug("skill path touch tracking failed", exc_info=True)
+
     try:
         if success and is_enabled("context_ledger"):
             from clawagents.memory.context_ledger import maybe_record_from_tool_result
@@ -1414,6 +1432,74 @@ def _content_key_text(content: Any) -> str:
     return "\n".join(parts)
 
 
+def _is_compactable_user(msg: LLMMessage) -> bool:
+    if msg.role != "user":
+        return False
+    content = msg.content if isinstance(msg.content, str) else ""
+    if content.startswith("[Tool Result]"):
+        return False
+    if "Compacted History" in content:
+        return False
+    if content.startswith("This session is being continued"):
+        return False
+    return True
+
+
+_FILE_PATH_RE = re.compile(
+    r"""(?:write_file|edit_file|apply_patch|read_file)[^\"']*[\"']([^\"']+)[\"']"""
+    r"""|path[\"']?\s*[:=]\s*[\"']([^\"']+)[\"']""",
+    re.I,
+)
+
+
+def _extract_recent_files(messages: list[LLMMessage], *, limit: int = 12) -> list[str]:
+    found: list[str] = []
+    seen: set[str] = set()
+    for m in messages:
+        blob = ""
+        if isinstance(m.content, str):
+            blob = m.content
+        if getattr(m, "tool_calls_meta", None):
+            try:
+                blob += " " + json.dumps(m.tool_calls_meta, default=str)
+            except TypeError:
+                pass
+        for match in _FILE_PATH_RE.finditer(blob):
+            path = next((g for g in match.groups() if g), None)
+            if not path or path in seen:
+                continue
+            if any(ch in path for ch in ("\n", " ")):
+                continue
+            seen.add(path)
+            found.append(path)
+            if len(found) >= limit:
+                return found
+    return found
+
+
+def _reuse_messages_where_possible(
+    originals: list[LLMMessage],
+    rebuilt: list[LLMMessage],
+) -> list[LLMMessage]:
+    """Prefer original LLMMessage object identity when (role, content) match.
+
+    Required for session-persistence trackers that key off identity.
+    """
+    buckets: dict[tuple[str, str], list[LLMMessage]] = {}
+    for om in originals:
+        key = (om.role, _content_key_text(om.content))
+        buckets.setdefault(key, []).append(om)
+    out: list[LLMMessage] = []
+    for m in rebuilt:
+        key = (m.role, _content_key_text(m.content))
+        bucket = buckets.get(key)
+        if bucket:
+            out.append(bucket.pop())
+        else:
+            out.append(m)
+    return out
+
+
 async def _compact_if_needed(
     messages: list[LLMMessage],
     context_window: int,
@@ -1501,6 +1587,128 @@ async def _compact_if_needed(
 
     if len(non_system) <= _RECENT_MESSAGES_TO_KEEP:
         return messages
+
+    # ── Grok-style full-replace (preferred when enabled) ───────────────
+    try:
+        from clawagents.config.features import is_enabled as _feat
+
+        if _feat("full_replace_compaction"):
+            from clawagents.memory.full_replace_compaction import (
+                apply_full_replace_compaction,
+                build_state_reminder,
+            )
+            from clawagents.context.carryover import (
+                get_compaction_carryover,
+                set_compaction_carryover,
+            )
+
+            workspace = None
+            if run_context is not None:
+                ws = run_context._metadata.get("workspace")
+                if isinstance(ws, str):
+                    workspace = ws
+
+            # Auto-enrich carryover from transcript signals when host didn't set it
+            try:
+                task_focus = ""
+                for m in non_system:
+                    if m.role == "user" and isinstance(m.content, str) and _is_compactable_user(m):
+                        task_focus = m.content[:500]
+                        break
+                recent_files = _extract_recent_files(non_system)
+                existing = get_compaction_carryover(run_context, task_context=task_focus)
+                active = list(getattr(run_context, "active_skills", {}) or {})
+                invoked = list(existing.invoked_skills) or active
+                for name in active:
+                    if name not in invoked:
+                        invoked.append(name)
+                if run_context is not None and (
+                    not existing.recent_files
+                    or not existing.task_focus
+                    or (active and not existing.invoked_skills)
+                ):
+                    set_compaction_carryover(
+                        run_context,
+                        task_focus=existing.task_focus or task_focus or None,
+                        recent_files=existing.recent_files or recent_files,
+                        recent_work_log=existing.recent_work_log,
+                        invoked_skills=invoked,
+                        active_workers=existing.active_workers,
+                        channel_log=existing.channel_log,
+                        plan_reminder=existing.plan_reminder,
+                        metadata=existing.metadata,
+                    )
+                carryover = get_compaction_carryover(run_context, task_context=task_focus)
+                carryover_md = carryover.to_markdown()
+                reminder = build_state_reminder(
+                    recent_files=carryover.recent_files,
+                    plan_text=carryover.plan_reminder,
+                    invoked_skills=carryover.invoked_skills,
+                    active_workers=carryover.active_workers,
+                )
+            except Exception:
+                logger.debug("full-replace carryover enrich failed", exc_info=True)
+                carryover_md = ""
+                reminder = None
+
+            fr = await apply_full_replace_compaction(
+                messages,
+                llm,
+                workspace=workspace,
+                carryover_markdown=carryover_md or None,
+                system_reminder=reminder,
+            )
+            if fr is not None:
+                # Prefer identity reuse for system + recent tails that survived
+                fr = _reuse_messages_where_possible(messages, fr)
+                fr_tokens = _estimate_messages_tokens(fr, token_multiplier)
+                # Input ladder: if still over budget, retry lossy summarizer input
+                if fr_tokens > budget:
+                    fr_lossy = await apply_full_replace_compaction(
+                        messages,
+                        llm,
+                        workspace=workspace,
+                        carryover_markdown=carryover_md or None,
+                        system_reminder=reminder,
+                        lossy=True,
+                    )
+                    if fr_lossy is not None:
+                        fr = _reuse_messages_where_possible(messages, fr_lossy)
+                        fr_tokens = _estimate_messages_tokens(fr, token_multiplier)
+                if fr_tokens <= budget or fr_tokens < current_tokens:
+                    if savings_history is not None and current_tokens > 0:
+                        saved = max(0, current_tokens - fr_tokens)
+                        savings_history.append(saved / current_tokens * 100.0)
+                    emit("context", {
+                        "message": (
+                            f"full-replace compaction rebuilt history "
+                            f"(~{current_tokens} → ~{fr_tokens} tokens)"
+                        ),
+                    })
+                    emit("compact_progress", {
+                        "phase": "end",
+                        "message": "compaction completed via full_replace",
+                        "mode": "full_replace",
+                        "before_tokens": current_tokens,
+                        "after_tokens": fr_tokens,
+                    })
+                    if fire_hook is not None:
+                        try:
+                            summary_snip = next(
+                                (
+                                    m.content
+                                    for m in fr
+                                    if isinstance(m.content, str)
+                                    and "being continued" in m.content
+                                ),
+                                None,
+                            )
+                            await fire_hook("on_post_compact", len(fr), summary_snip)
+                        except Exception:
+                            logger.debug("on_post_compact hook failed", exc_info=True)
+                    return fr
+    except Exception:
+        logger.debug("full_replace_compaction path failed; falling back", exc_info=True)
 
     # Prefer hardened compress_messages_safe when it yields meaningful savings.
     try:
@@ -3358,6 +3566,7 @@ async def run_agent_graph(
                     tool_result.success,
                     tool_output,
                     emit=emit,
+                    run_context=run_context,
                 )
                 if isinstance(tool_output, str):
                     preview = tool_output[:preview_chars]
@@ -3737,6 +3946,7 @@ async def run_agent_graph(
                         result.success,
                         output,
                         emit=emit,
+                        run_context=run_context,
                     )
                     if isinstance(output, str):
                         preview = output[:preview_chars]

@@ -50,6 +50,25 @@ _FEATURE_DEFAULTS: dict[str, str] = {
     "coordinator":          "0",   # Coordinator/swarm orchestration mode
     "transcript_archival":  "0",   # Archive full messages to markdown before compaction
     "credential_proxy":     "0",   # Credential proxy for sandboxed sub-agents
+
+    # Grok-Build inspired (v6.14) — on by default where safe
+    "plan_approval":        "1",   # Host gate on exit_plan_mode when callback set
+    "task_worktree":        "1",   # Allow task(isolation=worktree)
+    "hunk_review":          "1",   # Attributed hunk accept/reject tools
+    "compact_reinject_plan": "1",  # Re-inject plan reminder into compaction carryover
+    "compact_tool_pair_safe": "1", # Snap protect_last_n so tool pairs stay intact
+    "full_replace_compaction": "1",  # Grok-style full-replace assemble after summarize
+    "marketplace":          "1",   # Skill/plugin install from path or git
+    "os_sandbox_profiles":  "1",   # Named OS sandbox profile abstraction
+    "incremental_repo_map": "1",   # mtime-cached scope graph for repo_map
+    "autopilot_loop":       "1",   # plan→execute→verify autopilot driver
+
+    # Skills strategy (Grok-inspired, layered on progressive disclosure) — v6.14.2
+    "skill_when_to_use":    "1",   # Parse/list when-to-use; boost ranking
+    "skill_path_gating":    "1",   # Hide path-gated skills until matching files touched
+    "skill_substitutions":  "1",   # $ARGUMENTS / ${SKILL_DIR} / ${SESSION_ID} in bodies
+    "skill_hot_reload":     "1",   # Rescan skill dirs on mtime / workshop apply
+    "skill_auto_suggest":   "1",   # High-confidence use_skill nudge (no auto-load)
 }
 
 # Env var prefix: CLAW_FEATURE_MICRO_COMPACT=1

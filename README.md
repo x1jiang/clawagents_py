@@ -23,7 +23,7 @@ This repo is the **Python framework** (`pip install clawagents`). Ready-made cli
 |---------|--------|------------|------|
 | **ClawAgents Desktop** | **v0.2.4** | Native macOS app — project chats, file editor, SSH remotes, Settings (incl. AWS Bedrock), Developer ID signed + notarized | [Repo](https://github.com/x1jiang/clawagents-desktop) · [Download DMG](https://github.com/x1jiang/clawagents-desktop/releases/tag/v0.2.4) |
 | **ClawAgents for VS Code / Cursor** | **v1.0.36** | Editor extension — chat, tools, Bedrock, ATLAS opt-in, Effort / Wire API | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Release + VSIX](https://github.com/x1jiang/clawagents-vscode/releases/tag/v1.0.36) |
-| **Python package** | **v6.13.1** | This library — `pip install -U 'clawagents[bedrock]'` · ATLAS via `atlas-skill` (GitHub) | [PyPI](https://pypi.org/project/clawagents/6.13.1/) · [Release](https://github.com/x1jiang/clawagents_py/releases/tag/v6.13.1) |
+| **Python package** | **v6.14.2** | This library — `pip install -U 'clawagents[bedrock]'` · ATLAS via `atlas-skill` (GitHub) | [PyPI](https://pypi.org/project/clawagents/) · [Release](https://github.com/x1jiang/clawagents_py/releases) |
 | **TypeScript package** | **v6.12.13** | Node/TS sibling — `npm install git+https://github.com/x1jiang/clawagents.git` | [Repo](https://github.com/x1jiang/clawagents) |
 
 ## Installation
@@ -1755,6 +1755,21 @@ parity sweep.
 ---
 
 ## Changelog
+
+### v6.14.2 — Skill strategy (Grok-aligned) (July 2026)
+
+- `when-to-use` / path-gated skills, `$ARGUMENTS` / `${SKILL_DIR}` substitutions
+- Hot reload + discovery announcements; high-confidence `use_skill` suggest (no auto-load bodies)
+- Compaction carryover tracks `invoked_skills` from fully-read skills
+
+### v6.14.1 — Full-replace compaction (July 2026)
+
+- Grok-style full-replace assemble after summarize; tool-pair snap; AGENTS/plan reinject
+
+### v6.14.0 — Grok Build parity pack (July 2026)
+
+- Plan approval gate, subagent resolution layers, `task(isolation=worktree)`
+- Attributed hunk review, marketplace install, autopilot loop, OS sandbox profiles, incremental scope graph
 
 ### v6.12.0 — Native Amazon Bedrock (July 2026)
 

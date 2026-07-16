@@ -164,6 +164,14 @@ class RunHooks(Generic[TContext]):
         without having to filter every ``on_tool_end`` call."""
         ...
 
+    async def on_exit_plan_mode(
+        self,
+        context: RunContext[TContext],
+        plan_text: str,
+    ) -> None:
+        """Fires when the agent requests to leave plan mode (before host gate)."""
+        ...
+
 
 class AgentHooks(RunHooks[TContext]):
     """Alias for per-agent hooks.
@@ -187,6 +195,8 @@ _HOOK_METHODS: tuple[str, ...] = (
     "on_user_prompt_submit",
     "on_session_start", "on_session_end",
     "on_tool_failure",
+    # v6.14
+    "on_exit_plan_mode",
 )
 
 

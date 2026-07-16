@@ -147,7 +147,7 @@ class RepoMapTool:
         self._workspace = workspace or os.getcwd()
 
     async def execute(self, args: dict[str, Any]) -> ToolResult:
-        from clawagents.memory.repo_map import build_repo_map
+        from clawagents.memory.scope_graph import build_repo_map_incremental
 
         try:
             max_chars = int(args.get("max_chars") or 4_000)
@@ -157,7 +157,7 @@ class RepoMapTool:
         raw = args.get("mentioned") or []
         if isinstance(raw, list):
             mentioned = {str(x) for x in raw}
-        text = build_repo_map(
+        text = build_repo_map_incremental(
             self._workspace, max_chars=max_chars, mentioned=mentioned
         )
         return ToolResult(success=True, output=text or "(no symbols found)")

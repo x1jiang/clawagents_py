@@ -33,7 +33,7 @@ def create_worktree(
     slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", (name or uuid.uuid4().hex[:8])).strip("-")[:40]
     path = worktrees_root(ws) / slug
     if path.exists():
-        return {"ok": False, "error": f"worktree exists: {path}"}
+        return {"ok": True, "path": str(path), "branch": branch or f"claw/{slug}", "reused": True}
     br = branch or f"claw/{slug}"
     # create branch from HEAD if needed
     code, _, err = _run(["git", "worktree", "add", "-b", br, str(path)], ws)
@@ -42,7 +42,20 @@ def create_worktree(
         code, _, err = _run(["git", "worktree", "add", str(path), br], ws)
         if code != 0:
             return {"ok": False, "error": err}
-    return {"ok": True, "path": str(path), "branch": br}
+    return {"ok": True, "path": str(path), "branch": br, "reused": False}
+
+
+def ensure_task_worktree(
+    *,
+    workspace: str | Path | None = None,
+    name: str | None = None,
+) -> dict[str, Any]:
+    """Create (or reuse) a worktree for a task subagent.
+
+    Unique slug per call when ``name`` is omitted so parallel tasks don't collide.
+    """
+    slug = name or f"task-{uuid.uuid4().hex[:8]}"
+    return create_worktree(workspace=workspace, name=slug)
 
 
 def remove_worktree(

@@ -1,4 +1,4 @@
-__version__ = "6.13.1"
+__version__ = "6.14.2"
 
 from clawagents.agent import ClawAgent, create_claw_agent
 from clawagents.run_result import RunResult
@@ -193,6 +193,10 @@ from clawagents.permissions import (
     PermissionMode, WRITE_CLASS_TOOLS,
     is_write_class_tool, permission_mode_from_string,
 )
+from clawagents.permissions.plan_approval import (
+    PlanApprovalAction, PlanApprovalDecision,
+    await_plan_approval, normalize_plan_decision,
+)
 from clawagents.tools.bash_validator import (
     BashDecision, CommandCategory, Decision, validate_bash,
 )
@@ -314,3 +318,28 @@ from clawagents.rl import (
     TRL_AVAILABLE,
     ATROPOS_AVAILABLE,
 )
+
+# ── Grok-Build parity (v6.14) ──────────────────────────────────────────
+from clawagents.autopilot.loop import run_autopilot
+from clawagents.marketplace import install_from_source, list_installed
+from clawagents.sandbox.profiles import (
+    OSSandboxProfile,
+    get_profile,
+    list_profiles,
+    resolve_sandbox,
+)
+from clawagents.tools.subagent_resolve import resolve_subagent, ResolvedSubAgent
+from clawagents.memory.attributed_hunks import (
+    list_hunks,
+    accept_hunk,
+    reject_hunk,
+    refresh_file_hunks,
+)
+from clawagents.memory.scope_graph import ScopeGraph, build_repo_map_incremental
+from clawagents.memory.full_replace_compaction import (
+    assemble_compacted_history,
+    apply_full_replace_compaction,
+    format_compact_summary,
+    is_degenerate_summary,
+)
+

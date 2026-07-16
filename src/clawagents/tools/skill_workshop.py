@@ -44,8 +44,15 @@ class SkillWorkshopTool:
         },
     }
 
-    def __init__(self, workspace: str | None = None, skills_dir: str | None = None) -> None:
+    def __init__(
+        self,
+        workspace: str | None = None,
+        skills_dir: str | None = None,
+        *,
+        on_reload: Any = None,
+    ) -> None:
         self._service = SkillWorkshopService(workspace or os.getcwd(), skills_dir)
+        self._on_reload = on_reload
 
     async def execute(self, args: dict[str, Any], run_context: Any = None) -> ToolResult:
         action = str(args.get("action", ""))
@@ -94,12 +101,32 @@ class SkillWorkshopTool:
                 result = self._service.inspect(str(args.get("proposal_id", "")))
             elif action == "apply":
                 result = self._service.apply(str(args.get("proposal_id", "")))
+                if result.get("ok") and self._on_reload is not None:
+                    try:
+                        self._on_reload()
+                        result = {**result, "skill_store_reloaded": True}
+                    except Exception as reload_err:
+                        result = {
+                            **result,
+                            "skill_store_reloaded": False,
+                            "reload_error": str(reload_err),
+                        }
             elif action == "reject":
                 result = self._service.reject(str(args.get("proposal_id", "")), str(args.get("reason", "")))
             elif action == "quarantine":
                 result = self._service.quarantine(str(args.get("proposal_id", "")), str(args.get("reason", "")))
             elif action == "rollback":
                 result = self._service.rollback(str(args.get("rollback_id", "")))
+                if result.get("ok") and self._on_reload is not None:
+                    try:
+                        self._on_reload()
+                        result = {**result, "skill_store_reloaded": True}
+                    except Exception as reload_err:
+                        result = {
+                            **result,
+                            "skill_store_reloaded": False,
+                            "reload_error": str(reload_err),
+                        }
             else:
                 return ToolResult(success=False, output="", error=f"unknown action {action}")
             return ToolResult(success=True, output=json.dumps(result, indent=2))
@@ -119,5 +146,10 @@ def _parse_support_files(raw: Any) -> list[dict[str, str]] | None:
     return None
 
 
-def create_skill_workshop_tool(workspace: str | None = None, skills_dir: str | None = None) -> Tool:
-    return SkillWorkshopTool(workspace, skills_dir)
+def create_skill_workshop_tool(
+    workspace: str | None = None,
+    skills_dir: str | None = None,
+    *,
+    on_reload: Any = None,
+) -> Tool:
+    return SkillWorkshopTool(workspace, skills_dir, on_reload=on_reload)

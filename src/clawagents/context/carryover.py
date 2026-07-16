@@ -19,6 +19,7 @@ class CompactionCarryover:
     invoked_skills: list[str] = field(default_factory=list)
     active_workers: list[str] = field(default_factory=list)
     channel_log: list[dict[str, Any]] = field(default_factory=list)
+    plan_reminder: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def is_empty(self) -> bool:
@@ -29,6 +30,7 @@ class CompactionCarryover:
             self.invoked_skills,
             self.active_workers,
             self.channel_log,
+            self.plan_reminder,
             self.metadata,
         ))
 
@@ -40,6 +42,7 @@ class CompactionCarryover:
             "invoked_skills": list(self.invoked_skills),
             "active_workers": list(self.active_workers),
             "channel_log": list(self.channel_log),
+            "plan_reminder": self.plan_reminder,
             "metadata": dict(self.metadata),
         }
 
@@ -50,6 +53,9 @@ class CompactionCarryover:
         lines = ["## Carryover State"]
         if self.task_focus:
             lines.append(f"- Task focus: {_clip(self.task_focus, 500)}")
+        if self.plan_reminder:
+            lines.append("- Active plan:")
+            lines.append(_clip(self.plan_reminder, 1500))
         if self.recent_files:
             lines.append("- Recent files: " + ", ".join(self.recent_files[:12]))
         if self.recent_work_log:
@@ -84,6 +90,7 @@ def set_compaction_carryover(
     invoked_skills: list[str] | None = None,
     active_workers: list[str] | None = None,
     channel_log: list[dict[str, Any]] | None = None,
+    plan_reminder: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> CompactionCarryover:
     """Attach structured compaction carryover state to a RunContext."""
@@ -95,6 +102,7 @@ def set_compaction_carryover(
         invoked_skills=_string_list(invoked_skills),
         active_workers=_string_list(active_workers),
         channel_log=[dict(item) for item in (channel_log or []) if isinstance(item, dict)],
+        plan_reminder=_optional_str(plan_reminder),
         metadata=dict(metadata or {}),
     )
     _metadata(run_context)[CARRYOVER_METADATA_KEY] = carryover.to_dict()
@@ -111,6 +119,21 @@ def get_compaction_carryover(run_context: Any | None, *, task_context: str = "")
     carryover = normalize_compaction_carryover(raw)
     if not carryover.task_focus and task_context:
         carryover.task_focus = task_context
+    # Re-inject active plan when feature enabled and not already set
+    try:
+        from clawagents.config.features import is_enabled
+
+        if is_enabled("compact_reinject_plan") and not carryover.plan_reminder:
+            from clawagents.tools.context_tools import load_plan_preamble
+
+            workspace = None
+            if hasattr(run_context, "_metadata"):
+                workspace = run_context._metadata.get("workspace")
+            plan = load_plan_preamble(workspace=workspace) if workspace else load_plan_preamble()
+            if plan:
+                carryover.plan_reminder = plan
+    except Exception:
+        pass
     return carryover
 
 
@@ -126,6 +149,7 @@ def normalize_compaction_carryover(value: Any) -> CompactionCarryover:
         invoked_skills=_string_list(value.get("invoked_skills") or value.get("invokedSkills")),
         active_workers=_string_list(value.get("active_workers") or value.get("activeWorkers")),
         channel_log=[dict(item) for item in (value.get("channel_log") or value.get("channelLog") or []) if isinstance(item, dict)],
+        plan_reminder=_optional_str(value.get("plan_reminder") or value.get("planReminder")),
         metadata=dict(value.get("metadata") or {}),
     )
 

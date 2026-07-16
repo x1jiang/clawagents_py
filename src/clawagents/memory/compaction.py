@@ -219,6 +219,20 @@ async def compress_messages_safe(
     else:
         tail_start = tail_start_naive
 
+    # Tool-pair safety: never split an assistant tool_call from its tool results.
+    try:
+        from clawagents.config.features import is_enabled
+
+        if is_enabled("compact_tool_pair_safe"):
+            while tail_start < n and messages[tail_start].role == "tool":
+                tail_start += 1
+            # Also walk backward: if the message just before tail is an
+            # assistant with tool_calls conceptually represented as content
+            # markers, keep scanning for orphan tools already handled above.
+            # For AgentMessage we only have roles — snap forward past tools.
+    except Exception:
+        pass
+
     head = list(messages[:head_end])
     middle = list(messages[head_end:tail_start])
     tail = list(messages[tail_start:])

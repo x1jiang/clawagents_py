@@ -68,12 +68,20 @@ class _CompactingMockLLM:
             and (
                 m.content.startswith("You are summarizing a chunk")
                 or m.content.startswith("You are a summarization engine")
+                or m.content.startswith(
+                    "Your task is to produce a faithful, concise summary"
+                )
             )
             for m in messages
         )
         if is_summarize:
             self.summarize_calls += 1
-            return LLMResponse(content="COMPACTION_SUMMARY", model="mock", tokens_used=5)
+            # Long enough to pass full-replace degenerate-summary gate (≥500 chars).
+            return LLMResponse(
+                content="<summary>\n" + ("COMPACTION_SUMMARY detail " * 40) + "\n</summary>",
+                model="mock",
+                tokens_used=5,
+            )
 
         self.main_calls += 1
         if self.main_calls == 1:

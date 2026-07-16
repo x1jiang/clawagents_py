@@ -94,6 +94,51 @@ class SubAgentSpec:
     will be stripped from its environment.
     """
 
+    isolation: str = "none"
+    """Filesystem isolation: ``none`` (default) or ``worktree``."""
+
+    capability: str = "all"
+    """Capability mode: ``read-only`` | ``read-write`` | ``execute`` | ``all``."""
+
+    model: Optional[str] = None
+    """Optional model pin for this sub-agent type."""
+
+    persona: Optional[str] = None
+    """Optional persona key looked up in TaskTool personas map."""
+
+    tool_allowlist: Optional[List[str]] = None
+    tool_denylist: Optional[List[str]] = None
+
+
+def _registry_for_workspace(
+    tools: ToolRegistry,
+    workspace: str,
+    *,
+    deny_tools: frozenset[str] | None = None,
+    allow_tools: frozenset[str] | None = None,
+) -> ToolRegistry:
+    """Shallow-retarget sandbox/workspace-bound tools onto ``workspace``."""
+    import copy
+
+    from clawagents.sandbox.local import LocalBackend
+
+    sb = LocalBackend(root=workspace)
+    child = ToolRegistry()
+    deny = deny_tools or frozenset()
+    for tool in tools.list():
+        name = getattr(tool, "name", "") or ""
+        if name in deny or name == "task":
+            continue
+        if allow_tools is not None and name not in allow_tools and name not in ("think",):
+            continue
+        t = copy.copy(tool)
+        if hasattr(t, "_sb"):
+            t._sb = sb
+        if hasattr(t, "_workspace"):
+            t._workspace = workspace
+        child.register(t)
+    return child
+
 
 class TaskTool:
     name = "task"
@@ -104,18 +149,23 @@ class TaskTool:
         tools: ToolRegistry,
         subagents: Optional[List[SubAgentSpec]] = None,
         use_queue: bool = False,
+        personas: Optional[Dict[str, str]] = None,
+        workspace: Optional[str] = None,
     ):
         self._llm = llm
         self._tools = tools
         self._subagents = subagents or []
         self._use_queue = use_queue
+        self._personas = personas or {}
+        self._workspace = workspace or os.getcwd()
 
         agent_names = [s.name for s in self._subagents]
         agent_list = f" Available specialized agents: {', '.join(agent_names)}." if agent_names else ""
         self.description = (
             "Delegate a task to a sub-agent with its own isolated context window. "
             "Use for complex sub-tasks that would clutter your main context. "
-            "The sub-agent has access to the same tools but a fresh conversation."
+            "The sub-agent has access to the same tools but a fresh conversation. "
+            "Set isolation=worktree for a git worktree-isolated child."
             + agent_list
         )
         self.parameters: Dict[str, Dict[str, Any]] = {
@@ -132,6 +182,22 @@ class TaskTool:
                 "type": "number",
                 "description": "Max tool rounds for the sub-agent. Default: 5",
             },
+            "isolation": {
+                "type": "string",
+                "description": "none (default) or worktree — run child in a git worktree",
+            },
+            "capability": {
+                "type": "string",
+                "description": "read-only | read-write | execute | all",
+            },
+            "persona": {
+                "type": "string",
+                "description": "Optional persona overlay name",
+            },
+            "model": {
+                "type": "string",
+                "description": "Optional model pin for this child",
+            },
         }
 
     async def execute(
@@ -143,10 +209,6 @@ class TaskTool:
 
         description = str(args.get("description", ""))
         agent_name = args.get("agent")
-        try:
-            max_iter = max(1, int(args.get("max_iterations", 5)))
-        except (TypeError, ValueError):
-            max_iter = 5
 
         if not description:
             return ToolResult(success=False, output="", error="No task description provided")
@@ -171,14 +233,49 @@ class TaskTool:
                 ),
             )
 
-        spec: Optional[SubAgentSpec] = None
-        if agent_name:
-            spec = next((s for s in self._subagents if s.name == str(agent_name)), None)
+        from clawagents.tools.subagent_resolve import resolve_subagent
 
-        effective_max_iter = spec.max_iterations if spec else max_iter
-        effective_prompt = spec.system_prompt if spec else None
-        effective_native_tools = spec.use_native_tools if spec else True
-        use_cred_proxy = bool(spec and spec.credential_proxy and is_enabled("credential_proxy"))
+        resolved = resolve_subagent(
+            str(agent_name) if agent_name else None,
+            specs=self._subagents,
+            args=args,
+            personas=self._personas,
+        )
+        spec = resolved.spec
+        effective_max_iter = resolved.max_iterations
+        effective_prompt = resolved.system_prompt
+        effective_native_tools = resolved.use_native_tools
+        use_cred_proxy = bool(resolved.credential_proxy and is_enabled("credential_proxy"))
+
+        child_tools = self._tools
+        child_workspace = self._workspace
+        if resolved.isolation == "worktree" and is_enabled("task_worktree"):
+            from clawagents.tools.worktree import ensure_task_worktree
+
+            wt = ensure_task_worktree(
+                workspace=self._workspace,
+                name=f"{resolved.type}-{os.getpid()}",
+            )
+            if not wt.get("ok"):
+                return ToolResult(
+                    success=False,
+                    output="",
+                    error=f"worktree isolation failed: {wt.get('error')}",
+                )
+            child_workspace = str(wt["path"])
+            child_tools = _registry_for_workspace(
+                self._tools,
+                child_workspace,
+                deny_tools=resolved.denied_tools(),
+                allow_tools=resolved.tool_allowlist,
+            )
+        elif resolved.denied_tools() or resolved.tool_allowlist:
+            child_tools = _registry_for_workspace(
+                self._tools,
+                child_workspace,
+                deny_tools=resolved.denied_tools(),
+                allow_tools=resolved.tool_allowlist,
+            )
 
         async def do_run() -> ToolResult:
             from clawagents.sandbox.credential_proxy import CredentialProxy
@@ -217,7 +314,7 @@ class TaskTool:
                 k: v for k, v in {
                     "task": description,
                     "llm": self._llm,
-                    "tools": self._tools,
+                    "tools": child_tools,
                     "system_prompt": effective_prompt,
                     "max_iterations": effective_max_iter,
                     "streaming": False,
@@ -266,10 +363,15 @@ class TaskTool:
                     else None
                 ),
             )
+            child_ctx._metadata["workspace"] = child_workspace
+            child_ctx._metadata["isolation"] = resolved.isolation
+            child_ctx._metadata["subagent_type"] = resolved.type
+            if resolved.model:
+                child_ctx._metadata["model_pin"] = resolved.model
             run_kwargs["run_context"] = child_ctx
 
             parent_name = "ClawAgent"
-            child_label = spec.name if spec else "subagent"
+            child_label = resolved.type
             if run_context is not None:
                 parent_name = str(
                     run_context._metadata.get("agent_name") or parent_name
@@ -330,10 +432,14 @@ class TaskTool:
                     error=f"Sub-agent failed: {state.result}",
                 )
 
-            agent_label = f"Sub-agent [{spec.name}]" if spec else "Sub-agent"
+            agent_label = f"Sub-agent [{resolved.type}]"
+            iso_note = f", isolation={resolved.isolation}" if resolved.isolation != "none" else ""
             return ToolResult(
                 success=True,
-                output=f"[{agent_label} completed: {state.tool_calls} tool calls, {state.iterations} iterations]\n\n{state.result}",
+                output=(
+                    f"[{agent_label} completed: {state.tool_calls} tool calls, "
+                    f"{state.iterations} iterations{iso_note}]\n\n{state.result}"
+                ),
             )
 
         try:
@@ -349,6 +455,15 @@ def create_task_tool(
     tools: ToolRegistry,
     subagents: Optional[List[SubAgentSpec]] = None,
     use_queue: bool = False,
+    personas: Optional[Dict[str, str]] = None,
+    workspace: Optional[str] = None,
 ) -> Tool:
     """Factory function to create a TaskTool with the parent's LLM and tools."""
-    return TaskTool(llm=llm, tools=tools, subagents=subagents, use_queue=use_queue)
+    return TaskTool(
+        llm=llm,
+        tools=tools,
+        subagents=subagents,
+        use_queue=use_queue,
+        personas=personas,
+        workspace=workspace,
+    )
