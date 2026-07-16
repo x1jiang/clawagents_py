@@ -1,4 +1,4 @@
-__version__ = "6.15.0"
+__version__ = "6.16.0"
 
 from clawagents.agent import ClawAgent, create_claw_agent
 from clawagents.run_result import RunResult
@@ -319,7 +319,8 @@ from clawagents.rl import (
     ATROPOS_AVAILABLE,
 )
 
-from clawagents.goal.product import run_goal as run_goal
+# run_goal is lazy via __getattr__ (see below) so goal.product is not imported
+# at package import time.
 
 # ── Grok-Build parity (v6.14+) ─────────────────────────────────────────
 from clawagents.autopilot.loop import run_autopilot
@@ -344,4 +345,12 @@ from clawagents.memory.full_replace_compaction import (
     format_compact_summary,
     is_degenerate_summary,
 )
+
+
+def __getattr__(name: str):
+    if name == "run_goal":
+        from clawagents.goal.product import run_goal as _run_goal
+
+        return _run_goal
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 

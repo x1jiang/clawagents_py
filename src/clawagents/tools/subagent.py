@@ -124,6 +124,14 @@ def _registry_for_workspace(
 
     sb = LocalBackend(root=workspace)
     child = ToolRegistry()
+    # Inherit declarative permissions — worktree/capability clones must not
+    # bypass deny/ask rules (rm -rf, credentials*, …).
+    pe = getattr(tools, "_permission_engine", None)
+    if pe is not None:
+        child._permission_engine = pe  # type: ignore[attr-defined]
+    ask_h = getattr(tools, "_permission_ask_handler", None)
+    if ask_h is not None:
+        child._permission_ask_handler = ask_h  # type: ignore[attr-defined]
     deny = deny_tools or frozenset()
     for tool in tools.list():
         name = getattr(tool, "name", "") or ""
@@ -368,6 +376,22 @@ class TaskTool:
             child_ctx._metadata["subagent_type"] = resolved.type
             if resolved.model:
                 child_ctx._metadata["model_pin"] = resolved.model
+            # Forward parent gates so the child is not ungated.
+            if run_context is not None and isinstance(run_context._metadata, dict):
+                parent_meta = run_context._metadata
+                if parent_meta.get("before_tool") is not None:
+                    run_kwargs["before_tool"] = parent_meta["before_tool"]
+                    child_ctx._metadata["before_tool"] = parent_meta["before_tool"]
+                if parent_meta.get("permission_engine") is not None:
+                    child_ctx._metadata["permission_engine"] = parent_meta[
+                        "permission_engine"
+                    ]
+                    if getattr(child_tools, "_permission_engine", None) is None:
+                        child_tools._permission_engine = parent_meta[  # type: ignore[attr-defined]
+                            "permission_engine"
+                        ]
+                if parent_meta.get("approval_handler") is not None:
+                    run_kwargs["approval_handler"] = parent_meta["approval_handler"]
             run_kwargs["run_context"] = child_ctx
 
             parent_name = "ClawAgent"

@@ -236,44 +236,12 @@ def cmd_doctor():
     traj = os.getenv("CLAW_TRAJECTORY", "0") in ("1", "true", "yes")
     rethink = os.getenv("CLAW_RETHINK", "0") in ("1", "true", "yes")
     learn = os.getenv("CLAW_LEARN", "0") in ("1", "true", "yes")
-    atlas = os.getenv("CLAW_ATLAS", "0") in ("1", "true", "yes")
     max_iter = os.getenv("MAX_ITERATIONS", "200")
 
     sys.stderr.write(f"\n  PTRL: trajectory={'on' if traj else 'off'}  "
                      f"rethink={'on' if rethink else 'off'}  "
                      f"learn={'on' if learn else 'off'}  "
-                     f"atlas={'on' if atlas else 'off'}  "
                      f"max_iterations={max_iter}\n")
-
-    # ATLAS optional extra
-    if atlas:
-        try:
-            import atlas_runtime  # noqa: F401
-            _check("ATLAS package", True, "atlas_runtime importable")
-        except ImportError:
-            _check(
-                "ATLAS package",
-                False,
-                "missing — pip install 'atlas-skill @ git+https://github.com/"
-                "multi-agent-systems-failure-taxonomy/"
-                "ATLAS.git@3a917f3e0b993e3bfd77f652b013193aed167964'",
-            )
-            issues += 1
-        atlas_cfg = os.getenv("CLAW_ATLAS_CONFIG") or (
-            "atlas.json" if Path("atlas.json").is_file() else None
-        )
-        if atlas_cfg:
-            _check("ATLAS config", True, str(atlas_cfg))
-            sys.stderr.write(
-                "    tip: validate with `atlas-doctor --config "
-                f"{atlas_cfg}`\n"
-            )
-        else:
-            _check(
-                "ATLAS config",
-                True,
-                "none (will use .clawagents/atlas-program defaults)",
-            )
 
     # 8. Local endpoint reachability
     if has_base_url and ("localhost" in config.openai_base_url or "127.0.0.1" in config.openai_base_url):
@@ -389,8 +357,6 @@ def _build_banner() -> str:
         flags.append("rethink")
     if os.getenv("CLAW_TRAJECTORY", "0") in ("1", "true", "yes"):
         flags.append("trajectory")
-    if os.getenv("CLAW_ATLAS", "0") in ("1", "true", "yes"):
-        flags.append("atlas")
     flag_str = "+".join(flags) if flags else "none"
 
     return f"ClawAgents | provider={provider} model={model} env={env_src} ptrl={flag_str}"

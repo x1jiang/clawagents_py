@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.15.0-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.16.0-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -22,8 +22,8 @@ This repo is the **Python framework** (`pip install clawagents`). Ready-made cli
 | Product | Latest | What it is | Link |
 |---------|--------|------------|------|
 | **ClawAgents Desktop** | **v0.2.4** | Native macOS app — project chats, file editor, SSH remotes, Settings (incl. AWS Bedrock), Developer ID signed + notarized | [Repo](https://github.com/x1jiang/clawagents-desktop) · [Download DMG](https://github.com/x1jiang/clawagents-desktop/releases/tag/v0.2.4) |
-| **ClawAgents for VS Code / Cursor** | **v1.0.43** | Editor extension — chat, tools, Goal redirect, hunk review, Bedrock | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Release + VSIX](https://github.com/x1jiang/clawagents-vscode/releases/tag/v1.0.43) |
-| **Python package** | **v6.15.0** | This library — Goal autopilot, OS sandbox, deny-wins permissions · `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/) · [Release](https://github.com/x1jiang/clawagents_py/releases) |
+| **ClawAgents for VS Code / Cursor** | **v1.0.44** | Editor extension — chat, tools, Goal redirect, hunk review, Bedrock | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Release + VSIX](https://github.com/x1jiang/clawagents-vscode/releases/tag/v1.0.44) |
+| **Python package** | **v6.16.0** | This library — Goal autopilot, OS sandbox, deny-wins permissions · `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/) · [Release](https://github.com/x1jiang/clawagents_py/releases) |
 | **TypeScript package** | **v6.12.13** | Node/TS sibling — `npm install git+https://github.com/x1jiang/clawagents.git` | [Repo](https://github.com/x1jiang/clawagents) |
 
 ## Installation
@@ -34,20 +34,15 @@ pip install -U 'clawagents[gemini]'    # + Google Gemini support
 pip install -U 'clawagents[anthropic]' # + Anthropic Claude support
 pip install -U 'clawagents[bedrock]'   # + Amazon Bedrock (Claude via IAM + Nova/Converse)
 pip install -U 'clawagents[all]'       # All providers + tiktoken
-# ATLAS (optional; install clawagents first, then ATLAS from GitHub — PyPI
-# cannot vendor that direct URL):
-pip install 'atlas-skill @ git+https://github.com/multi-agent-systems-failure-taxonomy/ATLAS.git@3a917f3e0b993e3bfd77f652b013193aed167964'
 ```
 
-> **Version 6.15.0** — Goal autopilot product + OS sandbox enforce (July 2026).
+> **Version 6.16.0** — ATLAS removed; Goal is the long-horizon path (July 2026).
 
-### New In v6.15.0
+### New In v6.16.0
 
-- **Goal autopilot** (Grok `/goal` class): planner → execute → majority verifier → strategist; prefer over ATLAS (`create_claw_agent(goal_mode=True)`, `run_goal`, `start_goal` tools)
-- **OS sandbox**: workspace profile wired by default; seatbelt/bwrap auto-upgrade; write deny-then-allow confinement
-- **Permission rules**: deny-wins, on by default (`.clawagents/permissions.json`)
-- **Best-of-N** bundled skill (worktree isolation tournament)
-- **Prefire compaction** before the hard context cliff; mid-turn `pending_interject`
+- **Removed ATLAS integration** — `clawagents.atlas` is gone; `atlas=` / `CLAW_ATLAS` are ignored with `DeprecationWarning`
+- **Goal autopilot** is the only long-horizon completion product (`goal_mode` injects nudge; `start_goal` / `run_goal`)
+- **Security:** subagents inherit permission rules; hunk paths confined to workspace; permission `ask` can escalate via host handler
 
 > Older release notes live in [Changelog](#changelog).
 
@@ -159,8 +154,6 @@ TEMPERATURE=0                      # Model-specific overrides apply (see below)
 CLAW_TRAJECTORY=1                  # Enable trajectory logging + scoring
 CLAW_RETHINK=1                     # Enable consecutive-failure detection
 CLAW_LEARN=1                       # Enable PTRL (lessons from past runs)
-CLAW_ATLAS=1                       # Enable ATLAS failure-taxonomy supervision
-# CLAW_ATLAS_CONFIG=atlas.json     # Optional path (default: ./atlas.json if present)
 ```
 
 <details>
@@ -1225,41 +1218,10 @@ All parameters are **optional** — zero-config usage (`create_claw_agent()`) wo
 | `trajectory` | `bool \| None` | env `CLAW_TRAJECTORY` / `False` | No | Enable trajectory logging. Records every turn as NDJSON to `.clawagents/trajectories/` and scores each run |
 | `rethink` | `bool \| None` | env `CLAW_RETHINK` / `False` | No | Enable consecutive-failure detection. Injects a "rethink" prompt with adaptive threshold after repeated tool failures |
 | `learn` | `bool \| None` | env `CLAW_LEARN` / `False` | No | Enable Prompt-Time Reinforcement Learning. Includes: post-run self-analysis, pre-run lesson injection, LLM-as-Judge verification (Feature G), and thinking token preservation (Feature H). Implies `trajectory=True` |
-| `atlas` | `bool \| None` | env `CLAW_ATLAS` / `False` | No | Enable [ATLAS](https://github.com/multi-agent-systems-failure-taxonomy/ATLAS) adaptive failure-taxonomy supervision. Requires `atlas-skill` from GitHub. Implies `trajectory=True` |
-| `atlas_config` | `str \| Path \| None` | env `CLAW_ATLAS_CONFIG` / `./atlas.json` | No | Path to `atlas.json` (`trace_output`, `atlas_model`, gate/learning knobs). Defaults under `.clawagents/atlas-program` when omitted |
 | `preview_chars` | `int \| None` | env `CLAW_PREVIEW_CHARS` / `120` | No | Max chars for tool-output previews in trajectory logs |
 | `response_chars` | `int \| None` | env `CLAW_RESPONSE_CHARS` / `500` | No | Max chars for LLM response text in trajectory records |
 
 > **Priority:** Explicit parameter > environment variable > default value. You never need to set both.
-
-### ATLAS failure-taxonomy (optional)
-
-ATLAS is a diagnostic feedback layer (not a task solver). When enabled, ClawAgents:
-
-1. Starts an ATLAS session and injects the runtime protocol (not the full taxonomy) into the system prompt
-2. Reflects at tool failures and subagent stops (Observe → Correlate → Map → Decide)
-3. Blocks completion until the final ATLAS gate allows submit (or repair budget exhausts — default policy `release`)
-4. Records a redacted trajectory and calls `end_session` so taxonomy generation/refinement can run
-
-```bash
-pip install -U clawagents
-pip install 'atlas-skill @ git+https://github.com/multi-agent-systems-failure-taxonomy/ATLAS.git@3a917f3e0b993e3bfd77f652b013193aed167964'
-```
-
-```json
-// atlas.json
-{
-  "version": 1,
-  "trace_output": "./.clawagents/atlas-program",
-  "atlas_model": "gpt-5"
-}
-```
-
-```python
-agent = create_claw_agent(atlas=True, atlas_config="atlas.json")
-```
-
-`atlas_model` is used for ATLAS learning/judging calls and is separate from your task-solving model — set the matching provider API key in the environment. Validate with `atlas-doctor --config atlas.json`. See `examples/atlas_basic/`.
 
 ### Hooks & Access Control
 
@@ -1479,8 +1441,6 @@ All environment variables are **optional**. They serve as defaults when the corr
 | `CLAW_TRAJECTORY` | `0` | No | Enable trajectory logging. Records every turn + scores each run to `.clawagents/trajectories/` |
 | `CLAW_RETHINK` | `0` | No | Enable consecutive-failure detection + adaptive rethink injection |
 | `CLAW_LEARN` | `0` | No | Enable full PTRL: lesson extraction, injection, LLM-as-Judge, and thinking token preservation. Implies `CLAW_TRAJECTORY=1` |
-| `CLAW_ATLAS` | `0` | No | Enable ATLAS failure-taxonomy supervision. Requires `atlas-skill` from GitHub. Implies trajectory logging |
-| `CLAW_ATLAS_CONFIG` | _(empty)_ | No | Path to `atlas.json` (falls back to `./atlas.json` when present) |
 | `CLAW_PREVIEW_CHARS` | `120` | No | Max chars for tool-output previews in trajectory logs |
 | `CLAW_RESPONSE_CHARS` | `500` | No | Max chars for LLM response text in trajectory records |
 
@@ -1561,9 +1521,16 @@ parity sweep.
 
 ## Changelog
 
+### v6.16.0 — Removed ATLAS + permission/hunk hardening (July 2026)
+
+- Removed ATLAS integration (`clawagents.atlas` gone; `atlas=` / `CLAW_ATLAS` ignored)
+- Goal autopilot is the only long-horizon path; `goal_mode` injects the GOAL nudge
+- Subagents inherit permission engine; hunk accept paths confined; permission `ask` → host handler
+- Companion — VS Code **1.0.44**
+
 ### v6.15.0 — Goal autopilot + OS sandbox (July 2026)
 
-- Goal autopilot (planner → majority verifier → strategist); prefer over ATLAS
+- Goal autopilot (planner → majority verifier → strategist)
 - Workspace OS sandbox default; seatbelt/bwrap auto-upgrade; deny-then-allow writes
 - Deny-wins permission rules on by default; best-of-n skill; prefire compaction; mid-turn interject
 - Companion — VS Code **1.0.43**

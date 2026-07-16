@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "clawagents"
-version = "6.15.0"
+version = "6.16.0"
 description = "Lean, full-stack agentic AI framework with PTRL (Prompt-Time Reinforcement Learning)"
 readme = "README.md"
 license = "MIT"
@@ -54,12 +54,6 @@ cron = ["croniter>=1.4"]
 rl = ["trl>=0.7.0"]
 # Agent Communication Protocol adapter.
 acp = ["agent-client-protocol>=0.1.0"]
-# ATLAS adaptive failure-taxonomy runtime (optional harness integration).
-# Marker extra only — PyPI forbids direct URL deps. After installing clawagents,
-# also install ATLAS from GitHub:
-#   pip install 'atlas-skill @ git+https://github.com/multi-agent-systems-failure-taxonomy/ATLAS.git@3a917f3e0b993e3bfd77f652b013193aed167964'
-# Or: pip install 'clawagents[atlas]' && the git install above.
-atlas = []
 all = [
     "google-genai>=0.1.0",
     "anthropic>=0.40.0",

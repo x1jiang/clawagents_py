@@ -1530,6 +1530,60 @@ def _drain_interject(run_context: Any) -> str | None:
     return text or None
 
 
+_GOAL_REMINDER_START = "\n\n<!--claw:goal-reminder-->\n"
+_GOAL_REMINDER_END = "\n<!--/claw:goal-reminder-->"
+
+
+def _strip_goal_reminder(system_content: str) -> str:
+    if not isinstance(system_content, str):
+        return system_content
+    start = system_content.find("<!--claw:goal-reminder-->")
+    if start < 0:
+        # Legacy unwrapped block from first-turn injection
+        marker = "\n## Active Goal\n"
+        idx = system_content.find(marker)
+        if idx < 0:
+            return system_content
+        return system_content[:idx].rstrip()
+    # Include any blank lines immediately before the marker
+    while start > 0 and system_content[start - 1] == "\n":
+        start -= 1
+        if start > 0 and system_content[start - 1] == "\n":
+            break
+    end = system_content.find("<!--/claw:goal-reminder-->", start)
+    if end < 0:
+        return system_content[:start].rstrip()
+    end += len("<!--/claw:goal-reminder-->")
+    return (system_content[:start] + system_content[end:]).rstrip()
+
+
+def _sync_goal_reminder_into_system(
+    messages: list[LLMMessage],
+    run_context: Any,
+) -> None:
+    """Keep Active Goal standing reminder fresh when start_goal runs mid-loop."""
+    if not messages or getattr(messages[0], "role", None) != "system":
+        return
+    content = messages[0].content
+    if not isinstance(content, str):
+        return
+    try:
+        from clawagents.config.features import is_enabled as _feat_goal_sys
+        from clawagents.goal import get_goal_tracker, goal_system_reminder
+
+        if not _feat_goal_sys("goal_autopilot"):
+            return
+        tracker = get_goal_tracker(run_context)
+        rem = goal_system_reminder(tracker.state if tracker else None)
+    except Exception:
+        return
+    base = _strip_goal_reminder(content)
+    if rem:
+        messages[0].content = base + _GOAL_REMINDER_START + rem + _GOAL_REMINDER_END
+    else:
+        messages[0].content = base
+
+
 async def _compact_if_needed(
     messages: list[LLMMessage],
     context_window: int,
@@ -2180,8 +2234,8 @@ async def run_agent_graph(
     trajectory: bool = False,
     rethink: bool = False,
     learn: bool = False,
-    atlas: bool = False,
-    atlas_config: Optional[Any] = None,
+    atlas: bool = False,  # deprecated no-op (ATLAS removed)
+    atlas_config: Optional[Any] = None,  # deprecated no-op
     preview_chars: int = 120,
     response_chars: int = 500,
     timeout_s: float = 0,
@@ -2349,9 +2403,9 @@ async def run_agent_graph(
     failure_tracker = _FailureTracker(threshold=adaptive_threshold) if rethink else None
     _compaction_savings: list[float] = []
 
-    # Trajectory recorder (opt-in; learn/atlas imply trajectory)
+    # Trajectory recorder (opt-in; learn implies trajectory)
     recorder = None
-    if trajectory or learn or atlas:
+    if trajectory or learn:
         from clawagents.trajectory.recorder import TrajectoryRecorder
         recorder = TrajectoryRecorder(task=task, response_chars=response_chars)
 
@@ -2362,6 +2416,10 @@ async def run_agent_graph(
             meta["workspace"] = os.getcwd()
         if getattr(registry, "_permission_engine", None) is not None:
             meta.setdefault("permission_engine", registry._permission_engine)
+        if before_tool is not None:
+            meta["before_tool"] = before_tool
+        if approval_handler is not None:
+            meta["approval_handler"] = approval_handler
 
         async def _bound_goal_llm(prompt: str) -> str:
             resp = await llm.complete(
@@ -2386,41 +2444,6 @@ async def run_agent_graph(
         except Exception:
             logger.debug("goal tracker bind failed", exc_info=True)
 
-    # ATLAS failure-taxonomy supervision (parent runs only; optional extra).
-    # Skipped when an active Goal autopilot session owns the completion gate.
-    atlas_adapter = None
-    _goal_owns_gate = False
-    try:
-        from clawagents.goal import get_goal_tracker as _ggt
-
-        _gt0 = _ggt(run_context)
-        _goal_owns_gate = _gt0 is not None and _gt0.is_active()
-    except Exception:
-        _goal_owns_gate = False
-
-    if (
-        atlas
-        and not _goal_owns_gate
-        and not getattr(run_context, "skip_memory", False)
-        and getattr(run_context, "depth", 0) == 0
-    ):
-        try:
-            from clawagents.atlas import AtlasAdapter
-
-            atlas_adapter = AtlasAdapter.maybe_create(atlas=True, atlas_config=atlas_config)
-            if atlas_adapter is not None:
-                atlas_adapter.start(task, session_id=getattr(recorder, "run_id", None))
-                emit("context", {"message": "ATLAS: session started"})
-        except ImportError as atlas_err:
-            raise ImportError(str(atlas_err)) from atlas_err
-        except Exception as atlas_err:
-            emit("warn", {"message": f"ATLAS start failed: {atlas_err}"})
-            if atlas_adapter is not None:
-                try:
-                    atlas_adapter.abort()
-                except Exception:
-                    pass
-            atlas_adapter = None
 
     # Feature: Session Persistence — save session as append-only JSONL
     session_writer = None
@@ -2478,6 +2501,7 @@ async def run_agent_graph(
             emit("context", {"message": "PTRL: injected lessons from past runs"})
 
     # Goal autopilot standing reminder (preferred long-horizon gate).
+    # Wrapped in markers so mid-run start_goal can refresh it each turn.
     try:
         from clawagents.config.features import is_enabled as _feat_goal_sys
         from clawagents.goal import get_goal_tracker, goal_system_reminder
@@ -2486,21 +2510,16 @@ async def run_agent_graph(
             _gt_sys = get_goal_tracker(run_context)
             _rem = goal_system_reminder(_gt_sys.state if _gt_sys else None)
             if _rem:
-                dynamic_parts.append(_rem)
+                dynamic_parts.append(
+                    "<!--claw:goal-reminder-->\n"
+                    + _rem
+                    + "\n<!--/claw:goal-reminder-->"
+                )
                 emit("context", {"message": "goal: injected active goal reminder"})
     except Exception:
         logger.debug("goal system reminder failed", exc_info=True)
 
-    # ATLAS standing protocol (taxonomy itself is NOT dumped into ordinary context).
-    if atlas_adapter is not None:
-        try:
-            protocol = atlas_adapter.protocol_for_system()
-            if protocol:
-                dynamic_parts.append(protocol)
-                emit("context", {"message": "ATLAS: injected runtime protocol"})
-        except Exception as atlas_err:
-            emit("warn", {"message": f"ATLAS protocol inject failed: {atlas_err}"})
-
+    # Dynamic context packs
     # Dynamic context packs (after cache boundary) — local only.
     if not getattr(run_context, "skip_memory", False):
         from clawagents.config.features import is_enabled
@@ -2762,6 +2781,12 @@ async def run_agent_graph(
             except Exception:
                 logger.debug("mid-turn interject drain failed", exc_info=True)
 
+            # Refresh Goal standing reminder if start_goal fired mid-run.
+            try:
+                _sync_goal_reminder_into_system(messages, run_context)
+            except Exception:
+                logger.debug("goal reminder sync failed", exc_info=True)
+
             # Session: mark turn start
             if session_writer:
                 session_writer.write_turn_started(round_idx)
@@ -2996,46 +3021,6 @@ async def run_agent_graph(
             else:
                 tool_calls = registry.parse_tool_calls(response.content)
 
-            # ── ATLAS: harvest pending reflection before tools / completion ──
-            if (
-                atlas_adapter is not None
-                and atlas_adapter.run is not None
-                and atlas_adapter.run.pending is not None
-            ):
-                messages.append(LLMMessage(
-                    role="assistant",
-                    content=response.content or "",
-                    thinking=_thinking_content,
-                ))
-                try:
-                    _atlas_action = atlas_adapter.process_assistant_text(
-                        messages, response.content or "",
-                    )
-                except Exception as atlas_err:
-                    message = f"ATLAS harvest failed: {atlas_err}"
-                    emit("error", {"phase": "atlas", "message": message})
-                    state.status = "error"
-                    state.result = message
-                    break
-                if _atlas_action is not None:
-                    if _atlas_action.raise_error:
-                        state.status = "error"
-                        state.result = _atlas_action.raise_error
-                        break
-                    if _atlas_action.inject:
-                        messages.append(LLMMessage(role="user", content=_atlas_action.inject))
-                        continue
-                    if _atlas_action.allow_done:
-                        state.result = _sanitize_assistant_text(
-                            getattr(atlas_adapter.run, "_proposed_final", None)
-                            or response.content
-                        )
-                        state.status = "done"
-                        emit("final_content", {"content": state.result})
-                        break
-                    # Harvest consumed; do not execute tools from a reflection turn.
-                    if tool_calls:
-                        continue
 
             if not tool_calls:
                 # Check if the response is a truncated JSON tool call (hit max_tokens)
@@ -3117,45 +3102,8 @@ async def run_agent_graph(
                     if last_msg and isinstance(last_msg.content, str) and last_msg.content.startswith("[Advisor Guidance]"):
                         continue
 
-                # ── ATLAS final submission gate (after advisor) ──
-                # Prefer Goal autopilot when an active goal owns completion.
-                _skip_atlas_gate = False
-                try:
-                    from clawagents.goal import get_goal_tracker as _ggt_gate
 
-                    _gtg = _ggt_gate(run_context)
-                    _skip_atlas_gate = _gtg is not None and _gtg.is_active()
-                except Exception:
-                    _skip_atlas_gate = False
-
-                if (
-                    not _skip_atlas_gate
-                    and atlas_adapter is not None
-                    and atlas_adapter.run is not None
-                    and atlas_adapter.run.final_gate_allowed is None
-                ):
-                    if not _final_assistant_appended:
-                        messages.append(LLMMessage(
-                            role="assistant",
-                            content=response.content,
-                            thinking=_thinking_content,
-                        ))
-                        _final_assistant_appended = True
-                    atlas_adapter.run._proposed_final = response.content  # type: ignore[attr-defined]
-                    try:
-                        _atlas_gate = atlas_adapter.begin_final_gate(messages)
-                    except Exception as atlas_err:
-                        message = f"ATLAS final gate failed: {atlas_err}"
-                        emit("error", {"phase": "atlas", "message": message})
-                        state.status = "error"
-                        state.result = message
-                        break
-                    if _atlas_gate is not None and _atlas_gate.inject:
-                        messages.append(LLMMessage(role="user", content=_atlas_gate.inject))
-                        emit("context", {"message": "ATLAS: final submission gate"})
-                        continue
-
-                # ── Goal autopilot final gate (preferred over ATLAS when active) ──
+                # ── Goal autopilot final gate ──
                 try:
                     from clawagents.config.features import is_enabled as _feat_goal
                     from clawagents.goal import GoalOrchestrator, get_goal_tracker
@@ -3692,8 +3640,6 @@ async def run_agent_graph(
                             tool_result.error or str(tool_result.output)[:500],
                         )
 
-                if atlas_adapter is not None:
-                    atlas_adapter.note_tool_call()
 
                 # External post_tool_use hook
                 if ext_hook_runner:
@@ -3835,33 +3781,8 @@ async def run_agent_graph(
                         LLMMessage(role="user", content=user_content)
                     )
 
-                # ── ATLAS advisory checkpoint (tool failure / subagent stop) ──
-                _atlas_skip_rethink = False
-                if atlas_adapter is not None:
-                    try:
-                        if not tool_result.success:
-                            _aa = atlas_adapter.on_tool_failure(
-                                messages,
-                                tool_name=call.tool_name,
-                                error=tool_result.error,
-                            )
-                        elif call.tool_name == "task":
-                            _aa = atlas_adapter.on_subagent_end(
-                                messages, name=call.tool_name,
-                            )
-                        else:
-                            _aa = None
-                        if _aa is not None and _aa.inject:
-                            messages.append(LLMMessage(role="user", content=_aa.inject))
-                            emit("context", {"message": f"ATLAS: checkpoint ({call.tool_name})"})
-                            _atlas_skip_rethink = _aa.skip_rethink or atlas_adapter.consume_skip_rethink()
-                    except Exception as atlas_err:
-                        emit("warn", {"message": f"ATLAS checkpoint failed: {atlas_err}"})
-
                 # ── Rethink injection on consecutive failures ──
-                # When ATLAS already injected a reflection prompt this round,
-                # skip the second rethink nudge (plan coexistence rule).
-                if failure_tracker and not _atlas_skip_rethink:
+                if failure_tracker:
                     # Feature F: update threshold dynamically based on progress
                     try:
                         from clawagents.trajectory.verifier import compute_adaptive_rethink_threshold
@@ -4043,9 +3964,6 @@ async def run_agent_graph(
                                 _r.error or str(_r.output)[:500],
                             )
 
-                if atlas_adapter is not None:
-                    for _ in approved_calls:
-                        atlas_adapter.note_tool_call()
 
                 # External post_tool_use hook (parallel) — parity with the
                 # single-call path so result-rewriting policy hooks apply.
@@ -4245,39 +4163,8 @@ async def run_agent_graph(
                         )
                     )
 
-                # ── ATLAS advisory checkpoint (parallel batch) ──
-                _atlas_skip_rethink = False
-                if atlas_adapter is not None:
-                    try:
-                        _failed = next(
-                            ((_c, _r) for _c, _r in zip(approved_calls, results) if not _r.success),
-                            None,
-                        )
-                        _aa = None
-                        if _failed is not None:
-                            _aa = atlas_adapter.on_tool_failure(
-                                messages,
-                                tool_name=_failed[0].tool_name,
-                                error=_failed[1].error,
-                            )
-                        else:
-                            _task_done = next(
-                                (_c for _c in approved_calls if _c.tool_name == "task"),
-                                None,
-                            )
-                            if _task_done is not None:
-                                _aa = atlas_adapter.on_subagent_end(
-                                    messages, name="task",
-                                )
-                        if _aa is not None and _aa.inject:
-                            messages.append(LLMMessage(role="user", content=_aa.inject))
-                            emit("context", {"message": "ATLAS: checkpoint (parallel)"})
-                            _atlas_skip_rethink = _aa.skip_rethink or atlas_adapter.consume_skip_rethink()
-                    except Exception as atlas_err:
-                        emit("warn", {"message": f"ATLAS checkpoint failed: {atlas_err}"})
-
                 # ── Rethink injection on consecutive failures (parallel) ──
-                if failure_tracker and not _atlas_skip_rethink:
+                if failure_tracker:
                     # Feature F: update threshold dynamically
                     try:
                         from clawagents.trajectory.verifier import compute_adaptive_rethink_threshold
@@ -4360,24 +4247,6 @@ async def run_agent_graph(
         state.trajectory_file = run_summary.trajectory_file
         emit("context", {"message": f"trajectory saved to {run_summary.trajectory_file}"})
 
-    # ── ATLAS: record_trace + end_session (triggers generation/refinement) ──
-    if atlas_adapter is not None:
-        try:
-            meta = {
-                "outcome": state.status,
-                "tool_calls": state.tool_calls,
-                "iterations": state.iterations,
-            }
-            if run_summary is not None:
-                meta["trajectory_file"] = run_summary.trajectory_file
-            atlas_adapter.finalize(messages, metadata=meta)
-            emit("context", {"message": "ATLAS: trace recorded / session ended"})
-        except Exception as atlas_err:
-            emit("warn", {"message": f"ATLAS finalize failed: {atlas_err}"})
-            try:
-                atlas_adapter.abort()
-            except Exception:
-                pass
 
     # ── Feature G: LLM-as-Judge verification ──
     if learn and recorder and run_summary:

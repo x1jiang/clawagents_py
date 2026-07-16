@@ -358,6 +358,7 @@ def resolve_sandbox(
             allow_paths=prof.allow_paths or (".",),
             deny_paths=prof.deny_paths,
             env_allow=prof.env_allow,
+            require_binary=prof.require_binary,
             description=prof.description,
         )
     elif (
@@ -373,6 +374,7 @@ def resolve_sandbox(
             allow_paths=prof.allow_paths or (".",),
             deny_paths=prof.deny_paths,
             env_allow=prof.env_allow,
+            require_binary=prof.require_binary,
             description=prof.description,
         )
 

@@ -1,6 +1,6 @@
 """Goal autopilot product API — Grok /goal-class long-horizon driver.
 
-Prefer this over ATLAS. Wraps planner (fail-closed) → agent execute →
+Wraps planner (fail-closed) → agent execute →
 majority verifier → fail-open strategist.
 """
 

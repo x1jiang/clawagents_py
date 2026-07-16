@@ -1,6 +1,6 @@
 """Goal autopilot product — Grok /goal-style planner → execute → verify → strategize.
 
-Replaces ATLAS as the long-horizon completion gate when a goal is active:
+Long-horizon completion gate when a goal is active:
   - Planner: fail-closed (must produce plan.md)
   - Worker: update_goal progress reports
   - Verifier: N skeptic LLM votes (majority must accept) — fail-closed

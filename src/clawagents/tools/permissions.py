@@ -51,6 +51,10 @@ class PermissionEngine:
     def __init__(self, default_decision: str = "allow"):
         self._rules: List[PermissionRule] = []
         self._default = default_decision
+        # Optional host callback for "ask" decisions:
+        # ``(tool_name, args, message) -> bool`` (True = approved).
+        # When unset, ask is fail-closed (denied) — same as gate() historically.
+        self.ask_handler: Any = None
 
     def add_rule(self, rule: PermissionRule) -> "PermissionEngine":
         self._rules.append(rule)
@@ -122,16 +126,27 @@ class PermissionEngine:
         return winner.decision, winner.message
 
     def check(self, tool_name: str, args: dict[str, Any]) -> bool:
-        """before_tool-compatible: True only for allow (ask treated as deny here)."""
-        decision, _ = self.evaluate(tool_name, args)
-        return decision == "allow"
+        """before_tool-compatible: True for allow, or ask approved by ask_handler."""
+        ok, _ = self.gate(tool_name, args)
+        return ok
 
     def gate(self, tool_name: str, args: dict[str, Any]) -> tuple[bool, str]:
-        """Registry gate: (allowed, error_message). ask → not allowed without host."""
+        """Registry gate: (allowed, error_message).
+
+        ``ask`` invokes ``ask_handler`` when set (host approval UI); otherwise
+        fail-closed as deny so scripts without a host stay safe.
+        """
         decision, message = self.evaluate(tool_name, args)
         if decision == "allow":
             return True, ""
         if decision == "ask":
+            handler = self.ask_handler
+            if callable(handler):
+                try:
+                    if bool(handler(tool_name, args if isinstance(args, dict) else {}, message or "")):
+                        return True, ""
+                except Exception:
+                    pass
             return False, message or f"Permission ask required for {tool_name}"
         return False, message or f"Denied by permission rule: {tool_name}"
 

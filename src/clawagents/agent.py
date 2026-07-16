@@ -3,6 +3,7 @@ import re
 import asyncio
 import difflib
 import unicodedata
+import warnings
 from pathlib import Path
 from typing import Callable, Optional, List, Dict, Any, Union
 
@@ -117,8 +118,8 @@ class ClawAgent:
             trajectory: Whether to log full trajectory data
             rethink: Enables logic to backtrack on consecutive execution failures
             learn: Whether to use post-trajectory reflection to extract permanent lessons
-            atlas: Enable ATLAS failure-taxonomy supervision (requires ``atlas-skill``)
-            atlas_config: Path to ``atlas.json`` (or None to auto-discover)
+            atlas: Deprecated no-op (ATLAS removed; use goal_mode / start_goal)
+            atlas_config: Deprecated no-op
             max_iterations: Maximum loop turns before returning early
             preview_chars: Number of characters to log in console output for tool results
             response_chars: Number of characters to log from LLM free-text response
@@ -142,8 +143,8 @@ class ClawAgent:
         self.trajectory = trajectory
         self.rethink = rethink
         self.learn = learn
-        self.atlas = atlas
-        self.atlas_config = atlas_config
+        self.atlas = False  # ATLAS removed
+        self.atlas_config = None
         self.max_iterations = max_iterations
         self.preview_chars = preview_chars
         self.response_chars = response_chars
@@ -629,14 +630,8 @@ def create_claw_agent(
                         over time — without model fine-tuning.
                         Automatically enables trajectory when True.
                         Default: from CLAW_LEARN env / False.
-        atlas:          Enable ATLAS adaptive failure-taxonomy supervision.
-                        Requires ``atlas-skill`` from GitHub. Reflects at
-                        tool-failure / subagent boundaries and blocks completion
-                        until the final ATLAS gate passes (or repair budget
-                        exhausts). Automatically enables trajectory when True.
-                        Default: from CLAW_ATLAS env / False.
-        atlas_config:   Path to ``atlas.json``. Default: ``CLAW_ATLAS_CONFIG`` or
-                        ``./atlas.json`` when present.
+        atlas:          Deprecated no-op (ATLAS removed in 6.16). Use ``goal_mode``.
+        atlas_config:   Deprecated no-op.
         max_iterations: Max tool rounds before the agent stops.
                         Default: from MAX_ITERATIONS env / 200.
         preview_chars:  Max chars for tool-output previews in trajectory logs.
@@ -668,9 +663,9 @@ def create_claw_agent(
         permission_rules: Extra declarative allow/deny/ask rules (deny wins).
                         Defaults load from ``.clawagents/permissions.json`` when
                         ``permission_rules`` feature is on.
-        goal_mode:      Prefer Goal autopilot (planner→verify→strategist) over ATLAS.
-                        Forces ``atlas=False``. Register ``start_goal`` / ``update_goal``
-                        tools when ``goal_autopilot`` is enabled.
+        goal_mode:      Inject GOAL autopilot instruction (``start_goal`` /
+                        ``update_goal`` nudge). Goal tools register when
+                        ``goal_autopilot`` is enabled.
 
     Examples:
         # Zero-config (uses env vars)
@@ -712,13 +707,17 @@ def create_claw_agent(
         rethink = os.environ.get("CLAW_RETHINK", "").lower() in ("1", "true", "yes")
     if learn is None:
         learn = os.environ.get("CLAW_LEARN", "").lower() in ("1", "true", "yes")
-    if atlas is None:
-        # Default off — goal_autopilot is the preferred long-horizon gate.
-        # Opt in with CLAW_ATLAS=1 or atlas=True.
-        atlas = os.environ.get("CLAW_ATLAS", "").lower() in ("1", "true", "yes")
-    if atlas_config is None:
-        atlas_config = os.environ.get("CLAW_ATLAS_CONFIG") or None
-    if learn or atlas:
+    # ATLAS removed (6.16+): kwargs / CLAW_ATLAS are ignored.
+    if atlas or atlas_config or os.environ.get("CLAW_ATLAS", "").lower() in ("1", "true", "yes"):
+        warnings.warn(
+            "ATLAS was removed in clawagents 6.16; use goal_mode / start_goal instead. "
+            "atlas= and CLAW_ATLAS are ignored.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+    atlas = False
+    atlas_config = None
+    if learn:
         trajectory = True
     if max_iterations is None:
         raw = os.environ.get("MAX_ITERATIONS", "")
@@ -1012,10 +1011,6 @@ def create_claw_agent(
             if registry.get(t.name) is None:
                 registry.register(t)
 
-    # Goal autopilot is the long-horizon product; ATLAS stays opt-in legacy.
-    if goal_mode:
-        atlas = False
-
     # ── Auto-discover memory from default locations ────────────────────
     memory_paths = _to_list(memory) if memory is not None else _auto_discover_memory()
     composed_before_llm = _compose_before_llm(
@@ -1059,13 +1054,41 @@ def create_claw_agent(
             (resolved_instruction or "") + "\n\n" + CODEACT_SYSTEM_ADDENDUM
         ).strip() or CODEACT_SYSTEM_ADDENDUM
 
+    if goal_mode:
+        _goal_nudge = (
+            "You are in GOAL mode (planner→verify→strategist autopilot). For any "
+            "multi-step objective, call `start_goal` first to write a verifier "
+            "contract, then work the plan and report via `update_goal`. Do not "
+            "claim the goal is done until the verifier accepts."
+        )
+        if resolved_instruction and str(resolved_instruction).strip():
+            resolved_instruction = (
+                _goal_nudge.rstrip() + "\n\n" + str(resolved_instruction).lstrip()
+            )
+        else:
+            resolved_instruction = _goal_nudge
+
+    # Wire permission "ask" → approval_handler when the host provides one.
+    if approval_handler is not None and callable(approval_handler):
+        def _perm_ask(tool_name: str, args: dict, message: str) -> bool:
+            try:
+                result = approval_handler(tool_name, args, "")
+                if hasattr(result, "__await__"):
+                    # Sync gate cannot await; fall through as deny.
+                    return False
+                return bool(result)
+            except Exception:
+                return False
+
+        _perm_engine.ask_handler = _perm_ask
+
     agent = ClawAgent(
         llm=llm, tools=registry, system_prompt=resolved_instruction,
         streaming=streaming, use_native_tools=use_native_tools,
         context_window=context_window, on_event=on_event,
         before_llm=composed_before_llm, trajectory=trajectory,
-        rethink=rethink, learn=learn, atlas=bool(atlas),
-        atlas_config=atlas_config, max_iterations=max_iterations,
+        rethink=rethink, learn=learn, atlas=False,
+        atlas_config=None, max_iterations=max_iterations,
         preview_chars=preview_chars, response_chars=response_chars,
         advisor_llm=resolved_advisor_llm, advisor_max_calls=resolved_advisor_max_calls,
         handoffs=handoffs, name=name,

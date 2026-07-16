@@ -108,6 +108,24 @@ def _write_text(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
+def _safe_workspace_file(store: HunkStore, path: str) -> tuple[str, Path]:
+    """Resolve ``path`` under ``store.workspace``; reject absolute/``..`` escapes."""
+    raw = (path or "").strip()
+    if not raw:
+        raise ValueError("empty path")
+    if Path(raw).is_absolute():
+        raise ValueError(f"absolute paths not allowed: {path}")
+    if ".." in Path(raw).parts:
+        raise ValueError(f"path escapes workspace: {path}")
+    ws = store.workspace.resolve()
+    abs_path = (ws / raw).resolve()
+    try:
+        rel = abs_path.relative_to(ws).as_posix()
+    except ValueError as exc:
+        raise ValueError(f"path escapes workspace: {path}") from exc
+    return rel, abs_path
+
+
 def _parse_hunk_header(header: str) -> tuple[int, int, int, int]:
     # @@ -a,b +c,d @@
     try:
@@ -197,7 +215,7 @@ def refresh_file_hunks(
 ) -> list[AttributedHunk]:
     """Recompute hunks for one file relative to its baseline."""
     store = HunkStore.load(workspace)
-    abs_path = (store.workspace / rel_path).resolve()
+    rel_path, abs_path = _safe_workspace_file(store, rel_path)
     current = _read_text(abs_path)
     if rel_path not in store.baselines:
         if seed_baseline_if_missing:
@@ -291,7 +309,10 @@ def accept_hunk(
     store.baselines[hunk.path] = _apply_single_hunk_to_baseline(baseline, hunk)
     del store.hunks[hunk_id]
     # Recompute remaining hunks against new baseline
-    abs_path = store.workspace / hunk.path
+    try:
+        _, abs_path = _safe_workspace_file(store, hunk.path)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
     current = _read_text(abs_path)
     remaining = compute_hunks(hunk.path, store.baselines[hunk.path], current)
     store.hunks = {k: v for k, v in store.hunks.items() if v.path != hunk.path}
@@ -311,7 +332,10 @@ def reject_hunk(
     hunk = store.hunks.get(hunk_id)
     if hunk is None:
         return {"ok": False, "error": f"unknown hunk: {hunk_id}"}
-    abs_path = store.workspace / hunk.path
+    try:
+        _, abs_path = _safe_workspace_file(store, hunk.path)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
     baseline = store.baselines.get(hunk.path, "")
     current = _read_text(abs_path)
     restored = _revert_hunk_on_current(current, baseline, hunk)
@@ -332,7 +356,10 @@ def accept_all(
 ) -> dict[str, Any]:
     """Accept all pending hunks for a path (baseline := current)."""
     store = HunkStore.load(workspace)
-    abs_path = store.workspace / path
+    try:
+        path, abs_path = _safe_workspace_file(store, path)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
     store.baselines[path] = _read_text(abs_path)
     removed = [hid for hid, h in store.hunks.items() if h.path == path]
     for hid in removed:
