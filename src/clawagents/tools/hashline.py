@@ -791,6 +791,13 @@ class HashlineReadTool:
             return ToolResult(False, "", f"hashline_read failed: {exc}")
 
 
+_HASHLINE_GREP_MAX_FILE_BYTES = 1_048_576
+_HASHLINE_GREP_MAX_FILES = 200
+_HASHLINE_GREP_MAX_HEAD = 200
+_HASHLINE_GREP_MAX_CONTEXT = 10
+_HASHLINE_GREP_MAX_PATTERN_LEN = 512
+
+
 class HashlineGrepTool:
     name = "hashline_grep"
     cacheable = True
@@ -828,6 +835,16 @@ class HashlineGrepTool:
     def __init__(self, sb: Any):
         self._sb = sb
 
+    @staticmethod
+    def _truthy(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return False
+
     async def execute(self, args: Dict[str, Any]) -> ToolResult:
         import re
 
@@ -841,17 +858,23 @@ class HashlineGrepTool:
         pattern = str(args.get("pattern") or "")
         if not pattern:
             return ToolResult(False, "", "hashline_grep failed: pattern required")
+        if len(pattern) > _HASHLINE_GREP_MAX_PATTERN_LEN:
+            return ToolResult(
+                False,
+                "",
+                f"hashline_grep failed: pattern longer than {_HASHLINE_GREP_MAX_PATTERN_LEN} chars",
+            )
         raw_path = str(args.get("path") or "").strip() or "."
         file_path = sb.safe_path(raw_path)
         glob_filter = str(args.get("glob_filter") or "*")
-        recursive = bool(args.get("recursive", True))
+        recursive = self._truthy(args.get("recursive", True))
         try:
-            ctx = max(0, int(args.get("context", 0)))
+            ctx = max(0, min(_HASHLINE_GREP_MAX_CONTEXT, int(args.get("context", 0))))
         except (TypeError, ValueError):
             ctx = 0
-        case_i = bool(args.get("case_insensitive", False))
+        case_i = self._truthy(args.get("case_insensitive", False))
         try:
-            head_limit = max(1, int(args.get("head_limit", 50)))
+            head_limit = max(1, min(_HASHLINE_GREP_MAX_HEAD, int(args.get("head_limit", 50))))
         except (TypeError, ValueError):
             head_limit = 50
 
@@ -869,11 +892,15 @@ class HashlineGrepTool:
             return ToolResult(False, "", f"hashline_grep failed: path not found: {file_path}")
 
         paths: List[str] = []
+        truncated_files = False
         if st.is_file:
             paths = [file_path]
         elif st.is_directory:
             async for fp in _walk_dir(sb, file_path, glob_filter, recursive):
                 paths.append(fp)
+                if len(paths) >= _HASHLINE_GREP_MAX_FILES:
+                    truncated_files = True
+                    break
         else:
             return ToolResult(False, "", f"hashline_grep failed: not a file or directory: {file_path}")
 
@@ -882,6 +909,8 @@ class HashlineGrepTool:
 
         blocks: List[str] = []
         matches = 0
+        skipped_binary = 0
+        skipped_large = 0
         for path in paths:
             if matches >= head_limit:
                 break
@@ -889,10 +918,20 @@ class HashlineGrepTool:
                 content = await sb.read_file(path)
             except Exception:
                 continue
+            if "\x00" in content:
+                skipped_binary += 1
+                continue
+            if len(content.encode("utf-8", errors="replace")) > _HASHLINE_GREP_MAX_FILE_BYTES:
+                skipped_large += 1
+                continue
             lines = split_lines(content)
             hit_lines: List[int] = []
             for i, line in enumerate(lines):
-                if rx.search(line):
+                try:
+                    hit = rx.search(line) is not None
+                except re.error:
+                    return ToolResult(False, "", "hashline_grep failed: regex runtime error")
+                if hit:
                     hit_lines.append(i + 1)
                     matches += 1
                     if matches >= head_limit:
@@ -904,7 +943,14 @@ class HashlineGrepTool:
 
         if not blocks:
             return ToolResult(True, f"No matches for {pattern!r} under {file_path}")
-        footer = f"\n\n({matches} match line(s); use anchors with hashline_edit)"
+        notes: List[str] = [f"{matches} match line(s); use anchors with hashline_edit"]
+        if truncated_files:
+            notes.append(f"file walk capped at {_HASHLINE_GREP_MAX_FILES}")
+        if skipped_binary:
+            notes.append(f"skipped {skipped_binary} binary file(s)")
+        if skipped_large:
+            notes.append(f"skipped {skipped_large} oversized file(s)")
+        footer = "\n\n(" + "; ".join(notes) + ")"
         return ToolResult(True, "\n\n".join(blocks) + footer)
 
 

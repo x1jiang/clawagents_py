@@ -300,30 +300,40 @@ class EditFileTool:
             params.pop("create_if_missing", None)
         return params
 
+    @staticmethod
+    def _truthy(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return False
+
     async def execute(self, args: Dict[str, Any]) -> ToolResult:
         sb = self._sb
         file_path = sb.safe_path(str(args.get("path", "")))
         target = str(args.get("target", ""))
         replacement = str(args.get("replacement", ""))
-        replace_all = bool(args.get("replace_all", False))
-        create_if_missing = bool(args.get("create_if_missing", False))
+        replace_all = self._truthy(args.get("replace_all", False))
+        create_if_missing = self._truthy(args.get("create_if_missing", False))
 
-        # Empty target: only allowed for create_if_missing on a missing path.
+        # Empty target: only allowed for create_if_missing when the path is absent.
         # ``str.replace("", repl)`` would otherwise corrupt existing files.
         if target == "":
             if create_if_missing:
                 try:
                     if await sb.exists(file_path):
-                        existing = await sb.read_file(file_path)
-                        if existing != "":
-                            return ToolResult(
-                                success=False,
-                                output="",
-                                error=(
-                                    "edit_file failed: create_if_missing with empty "
-                                    f"target refuses non-empty file {file_path}."
-                                ),
-                            )
+                        return ToolResult(
+                            success=False,
+                            output="",
+                            error=(
+                                "edit_file failed: create_if_missing with empty "
+                                f"target refuses existing path {file_path}. "
+                                "Use write_file to overwrite, or a non-empty target "
+                                "to edit."
+                            ),
+                        )
                     parent = sb.dirname(file_path)
                     if parent and not await sb.exists(parent):
                         await sb.mkdir(parent, recursive=True)

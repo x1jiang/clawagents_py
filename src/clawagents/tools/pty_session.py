@@ -12,6 +12,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional  # noqa: F401 — Any used by PtyStartTool
 
 
@@ -361,11 +362,29 @@ def create_pty_tools():
                 sess_state = getattr(run_context, "shell_session", None)
                 if sess_state is not None and getattr(sess_state, "cwd", None):
                     cwd = str(sess_state.cwd)
+            if cwd is not None:
+                try:
+                    cwd = str(Path(cwd).expanduser().resolve())
+                except OSError as exc:
+                    return ToolResult(
+                        success=False, output="", error=f"pty_start invalid cwd: {exc}"
+                    )
+                if not os.path.isdir(cwd):
+                    return ToolResult(
+                        success=False,
+                        output="",
+                        error=f"pty_start failed: cwd is not a directory: {cwd}",
+                    )
+            try:
+                cols = max(20, min(500, int(args.get("cols") or 120)))
+                rows = max(5, min(200, int(args.get("rows") or 40)))
+            except (TypeError, ValueError):
+                cols, rows = 120, 40
             try:
                 sess = PtySession(
                     args.get("command"),
-                    cols=int(args.get("cols") or 120),
-                    rows=int(args.get("rows") or 40),
+                    cols=cols,
+                    rows=rows,
                     cwd=cwd,
                 )
             except Exception as exc:  # noqa: BLE001

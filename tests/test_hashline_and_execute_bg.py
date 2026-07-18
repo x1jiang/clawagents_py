@@ -191,7 +191,7 @@ async def test_edit_file_create_if_missing(tmp_path: Path, monkeypatch: pytest.M
     assert r.success, r.error
     assert (tmp_path / "new.txt").read_text(encoding="utf-8") == "created\n"
 
-    # Empty target on existing non-empty file still refused
+    # Empty target on existing path still refused (even if empty file)
     bad = await tool.execute(
         {
             "path": "new.txt",
@@ -201,7 +201,20 @@ async def test_edit_file_create_if_missing(tmp_path: Path, monkeypatch: pytest.M
         }
     )
     assert not bad.success
-    assert "non-empty" in (bad.error or "").lower()
+    assert "existing" in (bad.error or "").lower()
+
+    # String "false" must not enable create_if_missing
+    (tmp_path / "emptyish.txt").write_text("", encoding="utf-8")
+    no = await tool.execute(
+        {
+            "path": "other.txt",
+            "target": "",
+            "replacement": "x",
+            "create_if_missing": "false",
+        }
+    )
+    assert not no.success
+    assert "non-empty" in (no.error or "").lower()
 
 
 @pytest.mark.asyncio
@@ -241,6 +254,15 @@ async def test_execute_is_background(monkeypatch: pytest.MonkeyPatch):
     out_t = next(t for t in create_background_task_tools() if t.name == "task_output")
     out = await out_t.execute({"job_id": job_id})
     assert "claw-bg-ok" in out.output
+
+
+def test_resolve_block_until_ms_rejects_negative():
+    from clawagents.tools.exec import DEFAULT_TIMEOUT_MS, _resolve_block_until_ms
+
+    assert _resolve_block_until_ms({"block_until_ms": 0}) == (0, True)
+    assert _resolve_block_until_ms({"block_until_ms": -5}) == (DEFAULT_TIMEOUT_MS, False)
+    assert _resolve_block_until_ms({"block_until_ms": 50})[0] == 100
+    assert _resolve_block_until_ms({"timeout": -1}) == (DEFAULT_TIMEOUT_MS, False)
 
 
 @pytest.mark.asyncio

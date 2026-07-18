@@ -185,20 +185,25 @@ def _resolve_block_until_ms(args: Dict[str, Any]) -> tuple[int, bool]:
     """Return ``(block_until_ms, immediate_background)``.
 
     ``block_until_ms`` aliases ``timeout``. ``0`` means immediate background.
+    Negative / unparseable values fall back to the default timeout.
     """
     if "block_until_ms" in args and args.get("block_until_ms") is not None:
         try:
             raw = int(args.get("block_until_ms"))
         except (TypeError, ValueError):
-            raw = DEFAULT_TIMEOUT_MS
+            return DEFAULT_TIMEOUT_MS, False
         if raw == 0:
             return 0, True
+        if raw < 0:
+            return DEFAULT_TIMEOUT_MS, False
         return max(100, raw), False
     try:
-        timeout_ms = max(100, int(args.get("timeout", DEFAULT_TIMEOUT_MS)))
+        timeout_ms = int(args.get("timeout", DEFAULT_TIMEOUT_MS))
     except (TypeError, ValueError):
-        timeout_ms = DEFAULT_TIMEOUT_MS
-    return timeout_ms, False
+        return DEFAULT_TIMEOUT_MS, False
+    if timeout_ms < 0:
+        return DEFAULT_TIMEOUT_MS, False
+    return max(100, timeout_ms), False
 
 
 async def _exec_foreground_with_autobg(
@@ -258,22 +263,30 @@ async def _exec_foreground_with_autobg(
             raise
 
     # Streaming path: pump pipes; emit on_chunk; adopt with drain task on timeout.
+    # Cap retained output so a runaway process cannot blow memory; still drain pipes.
     out_parts: list[str] = []
     err_parts: list[str] = []
     total = 0
+    retained = 0
+    retain_cap = MAX_OUTPUT_CHARS * 4
 
     async def _pump(stream: Any, parts: list[str]) -> str:
-        nonlocal total
+        nonlocal total, retained
         while True:
             chunk = await stream.read(4096)
             if not chunk:
                 break
             text = chunk.decode("utf-8", errors="replace")
-            parts.append(text)
             total += len(text)
+            if retained < retain_cap:
+                take = text[: max(0, retain_cap - retained)]
+                if take:
+                    parts.append(take)
+                    retained += len(take)
             if on_chunk is not None:
                 try:
-                    on_chunk(text, total)
+                    # Bound event payload size for hosts that forward progress live.
+                    on_chunk(text[:2000], total)
                 except Exception:
                     pass
         return "".join(parts)
