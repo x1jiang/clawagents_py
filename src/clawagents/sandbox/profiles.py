@@ -304,9 +304,12 @@ def _seatbelt_profile_text(
     ]
     if not network:
         lines.append("(deny network*)")
-    if read_only:
-        lines.append('(allow file-write-data (literal "/dev/null"))')
-    else:
+    # CLIs (gcloud, git, shells) redirect to /dev/null constantly. Allow it in
+    # both read-only and writable profiles — otherwise every `> /dev/null`
+    # fails with "Operation not permitted" even when the real work is fine.
+    lines.append('(allow file-write-data (literal "/dev/null"))')
+    lines.append('(allow file-write-data (literal "/private/dev/null"))')
+    if not read_only:
         for root in cwd_roots + tmp_roots:
             lines.append(f'(allow file-write* (subpath "{_sb_str(root)}"))')
     # Secret deny rules LAST so they win over the workspace write-allow above

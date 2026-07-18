@@ -66,6 +66,15 @@ def test_seatbelt_denies_writes_outside_first():
     assert text.index("(deny file-write*)") < text.index('(allow file-write* (subpath "/ws"))')
 
 
+def test_seatbelt_allows_dev_null_in_writable_profile():
+    from clawagents.sandbox.profiles import _seatbelt_profile_text
+
+    text = _seatbelt_profile_text(cwd="/ws", network=True, read_only=False)
+    assert '(allow file-write-data (literal "/dev/null"))' in text
+    ro = _seatbelt_profile_text(cwd="/ws", network=False, read_only=True)
+    assert '(allow file-write-data (literal "/dev/null"))' in ro
+
+
 @pytest.mark.asyncio
 async def test_goal_verifier_majority():
     from clawagents.goal import run_verifier

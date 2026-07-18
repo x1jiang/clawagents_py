@@ -86,16 +86,29 @@ def _sandbox_write_hint(stdout: str, stderr: str) -> str | None:
     blob = f"{stdout}\n{stderr}"
     if "Operation not permitted" not in blob and "EPERM" not in blob:
         return None
-    if "/tmp" not in blob and "private/tmp" not in blob.lower():
-        # Still useful when any path outside the sandbox is denied.
-        if "not permitted" not in blob.lower():
-            return None
+    if "not permitted" not in blob.lower() and "EPERM" not in blob:
+        return None
     try:
         import tempfile
 
         scratch = tempfile.gettempdir()
     except Exception:
         scratch = "<system temp>"
+    home_config = (
+        "gcloud" in blob.lower()
+        or ".config/" in blob
+        or "credentials.db" in blob
+        or "/dev/null" in blob
+    )
+    if home_config:
+        return (
+            "OS sandbox (seatbelt/bwrap) blocked a write outside the workspace "
+            f"(home config, credentials, or /dev/null). Workspace + {scratch} "
+            "+ /tmp are allowed by default. For gcloud/deploy/auth that need "
+            "~/.config, use mode=full_access with Settings → Allow Full Access "
+            "(disables the OS sandbox), set CLAW_SANDBOX_PROFILE=off, or run "
+            "the command in a normal macOS Terminal."
+        )
     return (
         f"Sandbox write denied. Prefer the workspace or session scratch "
         f"({scratch}); /tmp and /private/tmp are also allowed when the OS "

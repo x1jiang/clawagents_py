@@ -1,6 +1,11 @@
 # ClawAgents Changelog
 
 
+### v6.20.17 — Seatbelt /dev/null + clearer sandbox hints (July 2026)
+
+- Seatbelt writable profiles always allow ``/dev/null`` (CLIs redirect there constantly).
+- ``execute`` sandbox hints call out home-config / gcloud credential denials and how to disable the OS sandbox.
+
 ### v6.20.16 — snapshot_diff file-cap note (July 2026)
 
 - ``snapshot_diff``: when more than 40 files are present, header says ``showing 40 of N`` (no silent cap).

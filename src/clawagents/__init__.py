@@ -1,4 +1,4 @@
-__version__ = "6.20.16"
+__version__ = "6.20.17"
 
 from clawagents.agent import ClawAgent, create_claw_agent
 from clawagents.run_result import RunResult
