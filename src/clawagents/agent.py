@@ -264,6 +264,20 @@ class ClawAgent:
             run_context._metadata["skill_store"] = store
         # Gate Goal reminder + final verifier on this turn's mode (Act ≠ Goal).
         run_context._metadata["goal_mode"] = bool(getattr(self, "goal_mode", False))
+        # OS sandbox contract — used by execute unsandboxed retry + env banner.
+        if not isinstance(run_context._metadata, dict):
+            run_context._metadata = {}
+        run_context._metadata["sandbox_profile"] = getattr(
+            self, "_sandbox_profile_name", "workspace"
+        )
+        run_context._metadata["chat_mode"] = getattr(self, "_chat_mode", None)
+        run_context._metadata["allow_full_access"] = bool(
+            getattr(self, "_allow_full_access", False)
+        )
+        run_context._metadata["allow_unsandboxed_exec"] = bool(
+            getattr(self, "_allow_full_access", False)
+            and getattr(self, "_chat_mode", None) == "full_access"
+        )
 
         return await run_agent_graph(
             task=task,
@@ -612,6 +626,8 @@ def create_claw_agent(
     memory: Union[str, List[Union[str, os.PathLike]], None] = None,
     sandbox: Any = None,
     sandbox_profile: str | None = None,
+    chat_mode: str | None = None,
+    allow_full_access: bool = False,
     streaming: bool = True,
     context_window: Optional[int] = None,
     max_tokens: Optional[int] = None,
@@ -726,6 +742,12 @@ def create_claw_agent(
                         ``seatbelt``, ``bwrap``, …). Default: ``CLAW_SANDBOX_PROFILE``
                         or ``workspace`` (path-confined; upgrades to seatbelt/bwrap
                         when available). Pass ``sandbox=`` to inject a custom backend.
+        chat_mode:      Host UI mode (``ask`` / ``read_only`` / ``auto`` /
+                        ``full_access``). Coupled to the OS sandbox: ``full_access``
+                        with ``allow_full_access`` → profile ``off``; ``read_only``
+                        → ``read-only``. Explicit ``sandbox_profile`` still wins.
+        allow_full_access: Settings gate required before ``chat_mode=full_access``
+                        disables the OS sandbox (VS Code / Desktop parity).
         permission_rules: Extra declarative allow/deny/ask rules (deny wins).
                         Defaults load from ``.clawagents/permissions.json`` when
                         ``permission_rules`` feature is on.
@@ -853,18 +875,36 @@ def create_claw_agent(
         resolved_advisor_llm = _resolve_model(advisor_spec, streaming, adv_key, context_window)
 
     # ── Resolve sandbox backend ────────────────────────────────────────
+    # Chat UI mode and seatbelt are one contract — see sandbox_profile_for_chat_mode.
+    sandbox_profile_name = "off"
     if sandbox is not None:
         sb = sandbox
+        sandbox_profile_name = str(
+            getattr(getattr(sb, "_profile", None), "name", None)
+            or getattr(sb, "kind", "custom")
+        )
     else:
-        from clawagents.sandbox.profiles import resolve_sandbox
+        from clawagents.sandbox.profiles import (
+            resolve_sandbox,
+            sandbox_profile_for_chat_mode,
+        )
 
-        # Default workspace confinement when profiles enabled; honor explicit profile.
         env_profile = (os.environ.get("CLAW_SANDBOX_PROFILE") or "").strip() or None
-        chosen = sandbox_profile or env_profile
+        chosen = sandbox_profile_for_chat_mode(
+            chat_mode,
+            allow_full_access=bool(allow_full_access),
+            explicit=sandbox_profile,
+            env_profile=env_profile,
+        )
         sb = resolve_sandbox(
             chosen,
             workspace=workspace_root,
             default="workspace",
+        )
+        sandbox_profile_name = str(
+            getattr(getattr(sb, "_profile", None), "name", None)
+            or chosen
+            or "workspace"
         )
 
     registry = ToolRegistry()
@@ -1181,6 +1221,9 @@ def create_claw_agent(
         agent.skill_store = skill_store  # type: ignore[attr-defined]
     agent._permission_engine = _perm_engine  # type: ignore[attr-defined]
     agent._sandbox_backend = sb  # type: ignore[attr-defined]
+    agent._sandbox_profile_name = sandbox_profile_name  # type: ignore[attr-defined]
+    agent._chat_mode = str(chat_mode or "").strip().lower() or None  # type: ignore[attr-defined]
+    agent._allow_full_access = bool(allow_full_access)  # type: ignore[attr-defined]
 
     # Compose permission deny-gate with mode before_tool (HookResult-aware).
     from clawagents.graph.agent_loop import HookResult

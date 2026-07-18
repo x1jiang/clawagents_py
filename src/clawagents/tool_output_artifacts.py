@@ -264,6 +264,7 @@ def prepare_tool_output_for_context(
     crush_threshold: int | None = None,
     inline_limit: int | None = None,
     target_chars: int | None = None,
+    success: bool | None = None,
 ) -> tuple[str, Optional[str]]:
     """Crush oversized outputs and store full text when crushed or huge.
 
@@ -273,9 +274,33 @@ def prepare_tool_output_for_context(
     thresholds unless the caller overrides ``crush_threshold`` /
     ``inline_limit`` / ``target_chars``. Code/log/diff outputs use a higher
     floor (~4K) so edit tools are not fed compressed views.
+
+    Failed tool results (``success=False``) are never aggressively crushed —
+    denial paths (e.g. credentials.db EPERM) must stay verbatim for diagnosis.
     """
     if not isinstance(output, str):
         output = str(output)
+
+    # Failures: keep full text in context (still archive if enormous).
+    if success is False:
+        hard_cap = 48_000
+        if len(output) <= hard_cap:
+            return output, None
+        artifact_id, _path = store_tool_artifact(
+            tool_name=tool_name,
+            tool_use_id=tool_use_id,
+            output=output,
+            kind="prose",
+            workspace=workspace,
+            extra_meta={"did_crush": False, "failed_tool_verbatim": True},
+        )
+        preview = output[:12_000]
+        header = (
+            f"[Failed tool output archived id={artifact_id}]\n"
+            f"Original: {len(output)} chars (not crushed). "
+            f"Call retrieve_tool_result(id=\"{artifact_id}\") for the remainder.\n\n"
+        )
+        return header + preview, artifact_id
 
     thresh = crush_threshold
     inline = inline_limit

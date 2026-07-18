@@ -1,0 +1,93 @@
+{
+  "model": "gpt-5-nano",
+  "mode": "always_injected_procedure",
+  "results": {
+    "none": {
+      "mean": 0.6666666666666666,
+      "scores": [
+        0.5,
+        0.5,
+        1.0
+      ],
+      "sec": 10.01,
+      "details": [
+        {
+          "gold": "arXiv:1706.03762",
+          "score": 0.5,
+          "status": "done",
+          "out": "1706.03762"
+        },
+        {
+          "gold": "arXiv:2307.09288",
+          "score": 0.5,
+          "status": "done",
+          "out": "2307.09288"
+        },
+        {
+          "gold": "arXiv:2401.12345",
+          "score": 1.0,
+          "status": "done",
+          "out": "arXiv:2401.12345"
+        }
+      ]
+    },
+    "harmful_ungated": {
+      "mean": 0.0,
+      "scores": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "sec": 36.04,
+      "details": [
+        {
+          "gold": "arXiv:1706.03762",
+          "score": 0.0,
+          "status": "done",
+          "out": "Attention Is All You Need"
+        },
+        {
+          "gold": "arXiv:2307.09288",
+          "score": 0.0,
+          "status": "done",
+          "out": "Llama 2: Open Foundation and Fine-Tuned Chat Models"
+        },
+        {
+          "gold": "arXiv:2401.12345",
+          "score": 0.0,
+          "status": "done",
+          "out": "Distributionally Robust Receive Combining"
+        }
+      ]
+    },
+    "skillopt_gated": {
+      "mean": 1.0,
+      "scores": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "sec": 8.44,
+      "details": [
+        {
+          "gold": "arXiv:1706.03762",
+          "score": 1.0,
+          "status": "done",
+          "out": "<answer>arXiv:1706.03762</answer>"
+        },
+        {
+          "gold": "arXiv:2307.09288",
+          "score": 1.0,
+          "status": "done",
+          "out": "<answer>arXiv:2307.09288</answer>"
+        },
+        {
+          "gold": "arXiv:2401.12345",
+          "score": 1.0,
+          "status": "done",
+          "out": "<answer>arXiv:2401.12345</answer>"
+        }
+      ]
+    }
+  }
+}

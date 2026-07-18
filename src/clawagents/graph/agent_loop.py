@@ -2806,10 +2806,15 @@ async def _run_agent_graph_core(
                 ws = str(getattr(run_context, "workspace", None) or _P.cwd())
                 git_ok = is_git_work_tree(ws)
                 scratch = tempfile.gettempdir()
+                meta = getattr(run_context, "_metadata", None)
+                sb_name = "workspace"
+                if isinstance(meta, dict):
+                    sb_name = str(meta.get("sandbox_profile") or sb_name)
                 dynamic_parts.append(
                     "## Workspace env\n"
                     f"- workspace: `{ws}`\n"
                     f"- is_git_repo: {'true' if git_ok else 'false'}\n"
+                    f"- sandbox: `{sb_name}`\n"
                     f"- scratch_dir: `{scratch}` (also /tmp when sandbox allows)\n"
                     + (
                         "- Prefer `snapshot_diff` to review edits (no git).\n"
@@ -2817,6 +2822,11 @@ async def _run_agent_graph_core(
                         else "- Prefer `git_status` / `git_diff` to review edits.\n"
                     )
                     + "- Do not chain `&& git …` after syntax checks when is_git_repo is false.\n"
+                    + (
+                        "- OS sandbox is off — home config CLIs (gcloud/aws/docker) may run.\n"
+                        if sb_name == "off"
+                        else ""
+                    )
                 )
             except Exception:
                 logger.debug("workspace env preamble failed", exc_info=True)
@@ -4216,6 +4226,7 @@ async def _run_agent_graph_core(
                         tool_use_id=native_tc.tool_call_id if native_tc else call.tool_name,
                         output=raw_output,
                         workspace=_run_context_workspace(run_context),
+                        success=bool(tool_result.success),
                     )
                     if artifact_id is not None:
                         emit("context", {"message": f"tool output crushed/stored id={artifact_id}"})
@@ -4640,6 +4651,7 @@ async def _run_agent_graph_core(
                             tool_use_id=_call_id,
                             output=raw_out,
                             workspace=_run_context_workspace(run_context),
+                            success=bool(result.success),
                         )
                         if artifact_id is not None:
                             emit("context", {"message": f"tool output crushed/stored id={artifact_id}"})
