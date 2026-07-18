@@ -53,7 +53,10 @@ class TestCreateClawAgent:
             result = _resolve_model("gemini-3-flash", True)
 
             assert result is mock_provider
-            mock_create.assert_called_once_with("gemini-3-flash", mock_cfg)
+            # provider_hint is classify_model(...) when no explicit provider=
+            mock_create.assert_called_once_with(
+                "gemini-3-flash", mock_cfg, provider_hint="gemini"
+            )
 
     def test_factory_with_openai_string(self):
         """create_claw_agent('gpt-5') should pass model string to create_provider."""
@@ -67,7 +70,9 @@ class TestCreateClawAgent:
 
             _resolve_model("gpt-5", True)
 
-            mock_create.assert_called_once_with("gpt-5", mock_cfg)
+            mock_create.assert_called_once_with(
+                "gpt-5", mock_cfg, provider_hint="openai"
+            )
 
     def test_factory_with_none_auto_detects(self):
         """create_claw_agent() should auto-detect from env."""
