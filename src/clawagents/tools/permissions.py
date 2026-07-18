@@ -182,14 +182,42 @@ class PermissionEngine:
         return engine
 
 
-_DEFAULT_SECURE_RULES = [
-    PermissionRule(tool="execute", arg_pattern="*rm -rf /**", decision="deny", priority=100, message="Refused destructive rm"),
-    PermissionRule(tool="execute", arg_pattern="*sudo *", decision="ask", priority=50, message="sudo requires approval"),
-    PermissionRule(tool="write_file", path_pattern="*.env", decision="ask", priority=40, message="Writing .env requires approval"),
-    PermissionRule(tool="write_file", path_pattern="**/.env", decision="ask", priority=40),
-    PermissionRule(tool="write_file", path_pattern="**/credentials*", decision="deny", priority=80),
-    PermissionRule(tool="edit_file", path_pattern="**/credentials*", decision="deny", priority=80),
-]
+def _build_default_secure_rules() -> list[PermissionRule]:
+    """Secure defaults — path patterns from ``clawagents.security.secret_paths``."""
+    from clawagents.security.secret_paths import default_secure_path_rules
+
+    rules: list[PermissionRule] = [
+        PermissionRule(
+            tool="execute",
+            arg_pattern="*rm -rf /**",
+            decision="deny",
+            priority=100,
+            message="Refused destructive rm",
+        ),
+        PermissionRule(
+            tool="execute",
+            arg_pattern="*sudo *",
+            decision="ask",
+            priority=50,
+            message="sudo requires approval",
+        ),
+    ]
+    for path_pattern, decision, message in default_secure_path_rules():
+        priority = 80 if decision == "deny" else 40
+        # Named against write_file; PermissionEngine aliases cover all FS writers.
+        rules.append(
+            PermissionRule(
+                tool="write_file",
+                path_pattern=path_pattern,
+                decision=decision,
+                priority=priority,
+                message=message,
+            )
+        )
+    return rules
+
+
+_DEFAULT_SECURE_RULES = _build_default_secure_rules()
 
 
 def load_permission_engine(

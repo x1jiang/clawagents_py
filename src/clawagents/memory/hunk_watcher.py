@@ -43,38 +43,11 @@ class RewindSnapshot:
 
 def is_secret_or_ignored_path(rel: str) -> bool:
     """True for VCS/build noise or secret-like paths that must never be snapshotted."""
-    parts = Path(rel).parts
-    ignore_dirs = {
-        ".git",
-        ".clawagents",
-        "node_modules",
-        ".venv",
-        "venv",
-        "__pycache__",
-        "dist",
-        "build",
-        ".tox",
-    }
-    if any(p in ignore_dirs for p in parts):
-        return True
-    name = Path(rel).name
-    secret_names = {
-        ".env",
-        ".env.local",
-        ".env.production",
-        ".env.development",
-        "credentials.json",
-        "secrets.json",
-        "id_rsa",
-        "id_ed25519",
-    }
-    if name in secret_names or name.startswith(".env."):
-        return True
-    if name.endswith((".pem", ".key", ".p12", ".pfx")):
-        return True
-    if "credentials" in name.lower() or "secret" in name.lower():
-        return True
-    return False
+    from clawagents.security.secret_paths import (
+        is_secret_or_ignored_path as _central,
+    )
+
+    return _central(rel)
 
 
 class HunkWatcher:

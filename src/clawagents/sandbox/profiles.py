@@ -12,24 +12,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-BackendName = Literal["local", "docker", "seatbelt", "bwrap"]
-
-# Secret files denied for read+write under a fail-closed sandbox. Kept in sync
-# with the rewind watcher's ``is_secret_or_ignored_path`` (private keys, PKCS
-# bundles). ``**/`` variants match nested files; the matcher's basename check
-# and the seatbelt regex also cover the top-level occurrence.
-_DEFAULT_SECRET_GLOBS: tuple[str, ...] = (
-    ".env",
-    ".env.*",
-    "**/credentials*",
-    "**/secrets*",
-    "**/*.pem",
-    "**/*.key",
-    "**/*.p12",
-    "**/*.pfx",
-    "**/id_rsa",
-    "**/id_ed25519",
+from clawagents.security.secret_paths import (
+    DEFAULT_SECRET_GLOBS as _DEFAULT_SECRET_GLOBS,
+    default_secret_globs as _default_secret_globs_central,
+    path_matches_secret_globs as _path_matches_secret_globs_central,
 )
+
+BackendName = Literal["local", "docker", "seatbelt", "bwrap"]
 
 
 @dataclass(frozen=True)
@@ -111,7 +100,7 @@ _BUILTIN: dict[str, OSSandboxProfile] = {
 
 
 def _default_secret_globs() -> tuple[str, ...]:
-    return _DEFAULT_SECRET_GLOBS
+    return _default_secret_globs_central()
 
 
 def _path_matches_secret_globs(
@@ -120,28 +109,7 @@ def _path_matches_secret_globs(
     secret_globs: tuple[str, ...],
 ) -> bool:
     """True when ``resolved`` is a secret path under ``cwd`` (or basename match)."""
-    name = os.path.basename(resolved)
-    try:
-        rel = os.path.relpath(resolved, cwd)
-    except ValueError:
-        rel = name
-    rel_posix = rel.replace(os.sep, "/")
-    for pattern in secret_globs:
-        pat = pattern.replace("\\", "/")
-        # Match the glob's basename against the file's basename so a top-level
-        # ``key.pem`` is caught, not only ``sub/key.pem``. ``pat.lstrip("*/")``
-        # used to reduce ``**/*.pem`` to the literal ``.pem`` (matching no real
-        # file); ``os.path.basename`` yields ``*.pem`` which fnmatch honours.
-        if fnmatch.fnmatch(name, os.path.basename(pat)) or fnmatch.fnmatch(rel_posix, pat):
-            return True
-        if pat in {".env", "credentials", "secrets"} and (
-            name == pat or name.startswith(pat + ".")
-        ):
-            return True
-    # Always treat workspace .env as secret when any secret globs are configured.
-    if secret_globs and name == ".env":
-        return True
-    return False
+    return _path_matches_secret_globs_central(resolved, cwd, secret_globs)
 
 
 def _resolve_secret_overlay_paths(
