@@ -1,6 +1,12 @@
 # ClawAgents Changelog
 
 
+### v6.20.15 — Skill-loading auto-continuation (July 2026)
+
+- Multi-page ``use_skill``: when a skill page is pending, the harness auto-finishes remaining pages (deterministic name/offset/hash) then runs the tool the model asked for — no refusal loop / wasted turns.
+- Hash-mismatch / non-contiguous continuation clears pending state so ``restart at offset 0`` is executable (fixes permanent deadlock when the skill file changes mid-load).
+- ``use_skill(abort=true)`` escape hatch clears a pending load without reading to EOF.
+
 ### v6.20.14 — apply_patch corruption guard + snapshot_diff + crush floor (July 2026)
 
 - ``apply_patch``: line-based SEARCH/REPLACE parser (empty REPLACE = deletion); refuse writes that introduce fence markers; return unified diff of applied change; stricter unified-diff hunks.

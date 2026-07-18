@@ -491,6 +491,94 @@ class ToolRegistry:
 
         return []
 
+    async def _auto_drain_pending_skill(
+        self, run_context: Any
+    ) -> tuple[str, str | None]:
+        """Synthesize remaining ``use_skill`` pages until EOF or failure.
+
+        Returns ``(combined_pages, error)``. On success ``error`` is ``None``
+        and pending skill state is cleared via normal ``record_skill_page`` EOF.
+        Parallel callers share a lock so only one drain runs.
+        """
+        if run_context is None:
+            return "", "No run context; cannot finish pending skill."
+
+        lock = getattr(run_context, "_skill_drain_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            run_context._skill_drain_lock = lock
+
+        async with lock:
+            skill_name = getattr(run_context, "pending_skill_name", None)
+            if not skill_name:
+                return "", None
+
+            use_tool = self.get("use_skill")
+            if use_tool is None:
+                return "", (
+                    f"use_skill is not registered; cannot finish pending skill "
+                    f"'{skill_name}'."
+                )
+
+            pages: list[str] = []
+            try:
+                for _ in range(64):
+                    pending = getattr(run_context, "pending_skill_name", None)
+                    if not pending:
+                        break
+                    offset = getattr(run_context, "pending_skill_next_offset", None)
+                    expected_hash = getattr(
+                        run_context, "pending_skill_content_hash", None
+                    )
+                    if offset is None or not expected_hash:
+                        break
+                    page_args = {
+                        "name": pending,
+                        "offset": int(offset),
+                        "expected_hash": expected_hash,
+                    }
+                    result = await asyncio.wait_for(
+                        _call_tool_execute(use_tool, page_args, run_context),
+                        timeout=self._tool_timeout_s,
+                    )
+                    if not result.success:
+                        if hasattr(run_context, "clear_pending_skill"):
+                            run_context.clear_pending_skill()
+                        err = result.error or "skill continuation failed"
+                        pages.append(err)
+                        return "\n\n".join(pages), (
+                            f"Auto-continuation of skill '{pending}' failed: {err} "
+                            "Pending load cleared; call use_skill at offset 0 to reload."
+                        )
+                    out = (
+                        result.output
+                        if isinstance(result.output, str)
+                        else str(result.output)
+                    )
+                    pages.append(out)
+                else:
+                    if hasattr(run_context, "clear_pending_skill"):
+                        run_context.clear_pending_skill()
+                    return "\n\n".join(pages), (
+                        f"Auto-continuation of skill '{skill_name}' exceeded "
+                        "page limit; pending cleared."
+                    )
+            except asyncio.TimeoutError:
+                if hasattr(run_context, "clear_pending_skill"):
+                    run_context.clear_pending_skill()
+                return "\n\n".join(pages), (
+                    f"Auto-continuation of skill '{skill_name}' timed out; "
+                    "pending cleared."
+                )
+
+            if not pages:
+                return "", None
+            banner = (
+                f"[Harness auto-continued skill '{skill_name}' to EOF "
+                f"({len(pages)} page(s)).]\n\n"
+            )
+            return banner + "\n\n".join(pages), None
+
     async def execute_tool(
         self,
         tool_name: str,
@@ -505,8 +593,11 @@ class ToolRegistry:
         def _skill_key(value: object) -> str:
             return re.sub(r"[\s\-]+", "_", str(value or "").strip().lower())
 
-        # Partial instructions are not actionable. Until every contiguous page
-        # is read, only the exact next use_skill continuation may execute.
+        # Partial multi-page skill loads: the harness finishes remaining pages
+        # itself (name/offset/hash are deterministic) then runs the tool the
+        # model actually asked for. Exact continuations and abort=true still
+        # go through use_skill without auto-drain.
+        auto_skill_prefix = ""
         pending_name = getattr(run_context, "pending_skill_name", None)
         if pending_name:
             expected_offset = getattr(run_context, "pending_skill_next_offset", None)
@@ -521,16 +612,18 @@ class ToolRegistry:
                 and supplied_offset == expected_offset
                 and args.get("expected_hash") == expected_hash
             )
-            if not continuing:
-                return ToolResult(
-                    success=False,
-                    output="",
-                    error=(
-                        f"Refused: finish loading skill '{pending_name}' first. "
-                        f"Call use_skill with offset={expected_offset} and "
-                        f"expected_hash={expected_hash}."
-                    ),
+            aborting = tool_name == "use_skill" and bool(args.get("abort"))
+            if not continuing and not aborting:
+                drain_text, drain_err = await self._auto_drain_pending_skill(
+                    run_context
                 )
+                if drain_err:
+                    return ToolResult(
+                        success=False,
+                        output=drain_text or "",
+                        error=drain_err,
+                    )
+                auto_skill_prefix = drain_text or ""
 
         # Completed skills compose by intersection. Skill discovery/loading is
         # control-plane behavior; it may add restrictions but never widen them.
@@ -614,6 +707,13 @@ class ToolRegistry:
         if is_cacheable:
             cached = self._result_cache.get(tool_name, effective_args)
             if cached is not None:
+                if auto_skill_prefix and isinstance(cached.output, str):
+                    return ToolResult(
+                        success=cached.success,
+                        output=f"{auto_skill_prefix}\n\n--- then executed {tool_name} ---\n\n{cached.output}",
+                        error=cached.error,
+                        raw_output=cached.raw_output,
+                    )
                 return cached
 
         try:
@@ -630,6 +730,29 @@ class ToolRegistry:
             # / retrieve_tool_result can archive the real dump. ``output`` is a
             # bounded preview for UI/cache hot paths.
             full_output = result.output
+            if auto_skill_prefix and isinstance(full_output, str):
+                full_output = (
+                    f"{auto_skill_prefix}\n\n"
+                    f"--- then executed {tool_name} ---\n\n"
+                    f"{full_output}"
+                )
+            elif auto_skill_prefix and not isinstance(full_output, str):
+                # Non-string tool output: keep skill pages as the string preview
+                # and leave structured output on raw_output unchanged.
+                preview_with_skill = (
+                    f"{auto_skill_prefix}\n\n"
+                    f"--- then executed {tool_name} (structured output) ---"
+                )
+                preview_output = truncate_tool_output(preview_with_skill)
+                wrapped = ToolResult(
+                    success=result.success,
+                    output=preview_output,
+                    error=result.error,
+                    raw_output=result.output,
+                )
+                if is_cacheable and wrapped.success:
+                    self._result_cache.set(tool_name, effective_args, wrapped)
+                return wrapped
             preview_output = (
                 truncate_tool_output(full_output)
                 if isinstance(full_output, str)

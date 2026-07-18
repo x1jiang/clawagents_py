@@ -1145,8 +1145,9 @@ def create_skill_tools(
             "Read instructions for one skill by name in contiguous pages. Call this early when "
             "a listed skill matches the user's task (project setup, cohort/SQL "
             "workflows, document formats, etc.) — do not reinvent that workflow. "
-            "Follow next_offset until complete. Names are matched case-insensitively; "
-            "hyphens/underscores are equivalent."
+            "After page 1, the harness auto-finishes remaining pages when you call any "
+            "other tool; you may also continue with next_offset or abort=true to stop. "
+            "Names are matched case-insensitively; hyphens/underscores are equivalent."
         )
         parameters = {
             "name": {"type": "string", "description": "Name of the skill to load", "required": True},
@@ -1165,6 +1166,14 @@ def create_skill_tools(
                 "description": "Required content hash for continuation pages",
                 "required": False,
             },
+            "abort": {
+                "type": "boolean",
+                "description": (
+                    "Clear a pending multi-page load without reading the remaining "
+                    "pages (partial load; skill not fully activated)"
+                ),
+                "required": False,
+            },
             "arguments": {
                 "type": "string",
                 "description": (
@@ -1177,6 +1186,19 @@ def create_skill_tools(
 
         async def execute(self, args: Dict[str, Any], run_context: Any = None) -> ToolResult:
             name = str(args.get("name", "")).strip()
+            if args.get("abort"):
+                pending = getattr(run_context, "pending_skill_name", None) if run_context else None
+                cleared = pending or name or "(unknown)"
+                if run_context is not None and hasattr(run_context, "clear_pending_skill"):
+                    run_context.clear_pending_skill()
+                return ToolResult(
+                    success=True,
+                    output=(
+                        f"[Skill '{cleared}' partially loaded; remaining pages aborted. "
+                        "Proceed without the unread instructions, or call use_skill "
+                        "at offset 0 to reload.]"
+                    ),
+                )
             skill = resolve_skill(store, name)
 
             if skill is not None and skill.disable_model_invocation:
@@ -1370,12 +1392,19 @@ def create_skill_tools(
                     or expected_hash != getattr(run_context, "pending_skill_content_hash", None)
                     or content_hash != getattr(run_context, "pending_skill_content_hash", None)
                 ):
+                    # Clear pending before returning — otherwise "restart at
+                    # offset 0" is itself refused by the registry gate / contiguity
+                    # check and the session wedges permanently.
+                    if run_context is not None and hasattr(
+                        run_context, "clear_pending_skill"
+                    ):
+                        run_context.clear_pending_skill()
                     return ToolResult(
                         success=False,
                         output="",
                         error=(
                             "Skill continuation is not contiguous or its content hash "
-                            "changed; restart at offset 0."
+                            "changed; pending load cleared — restart at offset 0."
                         ),
                     )
             elif offset != 0:

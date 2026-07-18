@@ -119,6 +119,15 @@ class RunContext(Generic[TContext]):
             total_chars=0,
         )
 
+    def clear_pending_skill(self) -> None:
+        """Drop in-flight multi-page skill state without activating the skill."""
+        self.pending_skill_name = None
+        self.pending_skill_content_hash = None
+        self.pending_skill_next_offset = None
+        self.pending_skill_total_chars = None
+        self.pending_skill_allowed_tools = None
+        self.pending_skill_boundary_declared = False
+
     def record_skill_page(
         self,
         name: str,

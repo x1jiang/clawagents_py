@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.20.14-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.20.15-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -23,7 +23,7 @@ This repo is the **Python framework** (`pip install clawagents`). Ready-made cli
 |---------|--------|------------|------|
 | **ClawAgents Desktop** | **v0.2.4** | Native macOS app — project chats, file editor, SSH remotes, Settings (incl. AWS Bedrock), Developer ID signed + notarized | [Repo](https://github.com/x1jiang/clawagents-desktop) · [Download DMG](https://github.com/x1jiang/clawagents-desktop/releases/tag/v0.2.4) |
 | **ClawAgents for VS Code / Cursor** | **v1.0.55** | Editor extension — companion lockstep (context-mode / rtk), full caveman skill, chat, Bedrock | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Release + VSIX](https://github.com/x1jiang/clawagents-vscode/releases/tag/v1.0.55) |
-| **Python package** | **v6.20.14** | This library — apply_patch guard + snapshot_diff · `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/) · [Release](https://github.com/x1jiang/clawagents_py/releases) |
+| **Python package** | **v6.20.15** | This library — skill auto-continuation · `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/) · [Release](https://github.com/x1jiang/clawagents_py/releases) |
 | **TypeScript package** | **v6.12.13** | Node/TS sibling — `npm install git+https://github.com/x1jiang/clawagents.git` | [Repo](https://github.com/x1jiang/clawagents) |
 
 ## Installation
@@ -36,7 +36,7 @@ pip install -U 'clawagents[bedrock]'   # + Amazon Bedrock (Claude via IAM + Nova
 pip install -U 'clawagents[all]'       # All providers + tiktoken
 ```
 
-> **Version 6.20.14** — Strict apply_patch (no fence corruption), snapshot_diff, code crush floor, /tmp sandbox allow (July 2026).
+> **Version 6.20.15** — Skill-loading auto-continuation (no refusal loop / mid-load deadlock) (July 2026).
 >
 > **Version 6.20.8** — Artifact path containment + preserve raw tool output for retrieval (July 2026).
 
