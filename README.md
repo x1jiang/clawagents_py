@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.19.0-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.20.0-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -23,7 +23,7 @@ This repo is the **Python framework** (`pip install clawagents`). Ready-made cli
 |---------|--------|------------|------|
 | **ClawAgents Desktop** | **v0.2.4** | Native macOS app — project chats, file editor, SSH remotes, Settings (incl. AWS Bedrock), Developer ID signed + notarized | [Repo](https://github.com/x1jiang/clawagents-desktop) · [Download DMG](https://github.com/x1jiang/clawagents-desktop/releases/tag/v0.2.4) |
 | **ClawAgents for VS Code / Cursor** | **v1.0.55** | Editor extension — companion lockstep (context-mode / rtk), full caveman skill, chat, Bedrock | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Release + VSIX](https://github.com/x1jiang/clawagents-vscode/releases/tag/v1.0.55) |
-| **Python package** | **v6.19.0** | This library — companion floors + doctor probes (context-mode / rtk) · `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/) · [Release](https://github.com/x1jiang/clawagents_py/releases) |
+| **Python package** | **v6.20.0** | This library — Grok harness ports (edit depth, execute stream/env, hashline_grep, PTY routing) · `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/) · [Release](https://github.com/x1jiang/clawagents_py/releases) |
 | **TypeScript package** | **v6.12.13** | Node/TS sibling — `npm install git+https://github.com/x1jiang/clawagents.git` | [Repo](https://github.com/x1jiang/clawagents) |
 
 ## Installation
@@ -36,11 +36,19 @@ pip install -U 'clawagents[bedrock]'   # + Amazon Bedrock (Claude via IAM + Nova
 pip install -U 'clawagents[all]'       # All providers + tiktoken
 ```
 
+> **Version 6.20.0** — Grok harness ports (July 2026).
+
 > **Version 6.19.0** — Companion lockstep (July 2026).
 
 > **Version 6.18.0** — Grok-inspired edit/execute harness (July 2026).
 
 > **Version 6.17.8** — Close residual P1/P2 gaps (July 2026).
+
+### New In v6.20.0
+- **edit_file:** external-mod miss hint; optional `create_if_missing` (empty target → new file only); soft read-before-edit description
+- **execute:** `block_until_ms` (alias of timeout; `0` → background); streaming `tool_progress` events; sticky shell env overlay (`__CLAW_ENV__`)
+- **hashline_grep:** regex search returning hashline anchors; description nudge grep→edit
+- **PTY routing:** execute vs pty_* descriptions; `pty_start` inherits shell_session cwd
 
 ### New In v6.19.0
 - **Companions module:** `clawagents.companions` probes `context-mode` (≥1.0.169) and `rtk` (≥0.43.0)
@@ -1566,6 +1574,14 @@ parity sweep.
 ---
 
 ## Changelog
+
+### v6.20.0 — Grok harness ports (July 2026)
+
+- Deeper `edit_file` (external-mod miss text, `create_if_missing`, soft RBE guidance)
+- `execute` `block_until_ms` + streaming `tool_progress` + sticky session env (feature-gated)
+- `hashline_grep` + registry path/parallel-safe + prompt nudge
+- Execute↔PTY description routing; `pty_start` uses shell_session cwd
+- VS Code companion pin: **≥6.20.0**
 
 ### v6.19.0 — Companion lockstep (July 2026)
 

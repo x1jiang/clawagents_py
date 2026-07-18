@@ -703,6 +703,37 @@ def apply_edits(
 
 # ─── Tools ────────────────────────────────────────────────────────────────────
 
+def inject_hashline_anchors(
+    content: str,
+    match_line_numbers: Sequence[int],
+    *,
+    context: int = 0,
+    scheme: ChunkFingerprint = DEFAULT_SCHEME,
+) -> str:
+    """Render file lines with hashline anchors; highlight match lines.
+
+    ``match_line_numbers`` are 1-based. When ``context`` > 0, include
+    surrounding lines (like grep -C).
+    """
+    lines = split_lines(content)
+    if not lines:
+        return ""
+    anchors = scheme.generate_anchors(lines)
+    wanted: set[int] = set()
+    for ln in match_line_numbers:
+        for i in range(max(1, ln - context), min(len(lines), ln + context) + 1):
+            wanted.add(i)
+    if not wanted:
+        return ""
+    out: list[str] = []
+    for ln in sorted(wanted):
+        idx = ln - 1
+        prefix = ":" if ln in match_line_numbers else "-"
+        body = lines[idx]
+        out.append(f"{anchors[idx].render()}{ARROW}{prefix}{body}")
+    return "\n".join(out)
+
+
 class HashlineReadTool:
     name = "hashline_read"
     cacheable = True
@@ -710,7 +741,8 @@ class HashlineReadTool:
     description = (
         "Read a file with line-anchored output for use with hashline_edit. "
         f"Each line is ANCHOR{ARROW}CONTENT (e.g. 22:abc:rst{ARROW}  let x = 1;). "
-        "Pass the ANCHOR (before the arrow) to hashline_edit. Anchors are valid "
+        "Pass the ANCHOR (before the arrow) to hashline_edit. Prefer hashline_grep "
+        "to find match sites with anchors, then hashline_edit. Anchors are valid "
         "only for the file state at read time — after any edit, use fresh anchors "
         "from hashline_edit or re-read."
     )
@@ -759,15 +791,133 @@ class HashlineReadTool:
             return ToolResult(False, "", f"hashline_read failed: {exc}")
 
 
+class HashlineGrepTool:
+    name = "hashline_grep"
+    cacheable = True
+    keywords = ["hashline", "search anchors", "grep anchors"]
+    description = (
+        "Search file contents and return matches with hashline anchors for "
+        "hashline_edit. Workflow: hashline_grep → hashline_edit (prefer this over "
+        "plain grep + edit_file for multi-hunk edits). Pattern is a Python regex."
+    )
+    parameters: Dict[str, Dict[str, Any]] = {
+        "pattern": {"type": "string", "description": "Regex pattern to search", "required": True},
+        "path": {"type": "string", "description": "File or directory to search", "required": True},
+        "glob_filter": {
+            "type": "string",
+            "description": "Glob filter when path is a directory (e.g. '*.py')",
+        },
+        "recursive": {
+            "type": "boolean",
+            "description": "Search subdirectories when path is a directory. Default: true",
+        },
+        "context": {
+            "type": "number",
+            "description": "Context lines around each match (like grep -C). Default: 0",
+        },
+        "case_insensitive": {
+            "type": "boolean",
+            "description": "Case-insensitive match. Default: false",
+        },
+        "head_limit": {
+            "type": "number",
+            "description": "Max match lines to return across files. Default: 50",
+        },
+    }
+
+    def __init__(self, sb: Any):
+        self._sb = sb
+
+    async def execute(self, args: Dict[str, Any]) -> ToolResult:
+        import re
+
+        from clawagents.config.features import is_enabled
+        from clawagents.tools.filesystem import _walk_dir
+
+        if not is_enabled("hashline_tools"):
+            return ToolResult(False, "", "hashline_tools feature disabled")
+
+        sb = self._sb
+        pattern = str(args.get("pattern") or "")
+        if not pattern:
+            return ToolResult(False, "", "hashline_grep failed: pattern required")
+        raw_path = str(args.get("path") or "").strip() or "."
+        file_path = sb.safe_path(raw_path)
+        glob_filter = str(args.get("glob_filter") or "*")
+        recursive = bool(args.get("recursive", True))
+        try:
+            ctx = max(0, int(args.get("context", 0)))
+        except (TypeError, ValueError):
+            ctx = 0
+        case_i = bool(args.get("case_insensitive", False))
+        try:
+            head_limit = max(1, int(args.get("head_limit", 50)))
+        except (TypeError, ValueError):
+            head_limit = 50
+
+        flags = re.MULTILINE
+        if case_i:
+            flags |= re.IGNORECASE
+        try:
+            rx = re.compile(pattern, flags)
+        except re.error as exc:
+            return ToolResult(False, "", f"hashline_grep failed: invalid regex: {exc}")
+
+        try:
+            st = await sb.stat(file_path)
+        except (FileNotFoundError, OSError):
+            return ToolResult(False, "", f"hashline_grep failed: path not found: {file_path}")
+
+        paths: List[str] = []
+        if st.is_file:
+            paths = [file_path]
+        elif st.is_directory:
+            async for fp in _walk_dir(sb, file_path, glob_filter, recursive):
+                paths.append(fp)
+        else:
+            return ToolResult(False, "", f"hashline_grep failed: not a file or directory: {file_path}")
+
+        if not paths:
+            return ToolResult(False, "", f"hashline_grep failed: no files under {file_path}")
+
+        blocks: List[str] = []
+        matches = 0
+        for path in paths:
+            if matches >= head_limit:
+                break
+            try:
+                content = await sb.read_file(path)
+            except Exception:
+                continue
+            lines = split_lines(content)
+            hit_lines: List[int] = []
+            for i, line in enumerate(lines):
+                if rx.search(line):
+                    hit_lines.append(i + 1)
+                    matches += 1
+                    if matches >= head_limit:
+                        break
+            if not hit_lines:
+                continue
+            anchored = inject_hashline_anchors(content, hit_lines, context=ctx)
+            blocks.append(f"File: {path}\n{anchored}")
+
+        if not blocks:
+            return ToolResult(True, f"No matches for {pattern!r} under {file_path}")
+        footer = f"\n\n({matches} match line(s); use anchors with hashline_edit)"
+        return ToolResult(True, "\n\n".join(blocks) + footer)
+
+
 class HashlineEditTool:
     name = "hashline_edit"
     keywords = ["hashline", "anchor edit", "replace by anchor"]
     description = (
-        "Edit a file using anchors from hashline_read. Ops: "
+        "Edit a file using anchors from hashline_read or hashline_grep. Ops: "
         'replace {op, anchor, end_anchor?, content}, '
         'insert_after {op, anchor|"0:"|"EOF", content}, '
         "write {op, content} (sole op). Batch is atomic — all validate or none apply. "
-        "On success returns a fresh-anchor snippet; on stale anchors returns recovery context."
+        "On success returns a fresh-anchor snippet; on stale anchors returns recovery context. "
+        "Prefer: hashline_grep → hashline_edit for multi-hunk work."
     )
     parameters: Dict[str, Dict[str, Any]] = {
         "path": {"type": "string", "description": "Path of the file to edit", "required": True},
@@ -812,15 +962,21 @@ class HashlineEditTool:
 
 
 def create_hashline_tools(backend: Any) -> List[Tool]:
-    return [HashlineReadTool(backend), HashlineEditTool(backend)]
+    return [
+        HashlineReadTool(backend),
+        HashlineGrepTool(backend),
+        HashlineEditTool(backend),
+    ]
 
 
 __all__ = [
     "HashlineReadTool",
+    "HashlineGrepTool",
     "HashlineEditTool",
     "create_hashline_tools",
     "apply_edits",
     "format_hashline_content",
+    "inject_hashline_anchors",
     "line_hash",
     "encode_hash",
     "ChunkFingerprint",

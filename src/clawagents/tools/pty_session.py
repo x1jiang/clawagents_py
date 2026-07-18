@@ -12,7 +12,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional  # noqa: F401 — Any used by PtyStartTool
 
 
 def _pty_available() -> bool:
@@ -330,17 +330,22 @@ def create_pty_tools():
     class PtyStartTool:
         name = "pty_start"
         description = (
-            "Start an interactive PTY shell session (dev servers, REPLs, vim, ssh). "
-            "Returns session_id. Requires clawagents[pty]."
+            "Start an interactive PTY shell session for TTY apps (dev servers, "
+            "REPLs, vim, ssh prompts). Returns session_id. Requires clawagents[pty]. "
+            "For non-interactive scripts and builds, prefer execute instead."
         )
         parameters = {
             "command": {"type": "string", "description": "Shell command (default $SHELL)"},
             "cols": {"type": "number", "description": "Columns (default 120)"},
             "rows": {"type": "number", "description": "Rows (default 40)"},
+            "cwd": {
+                "type": "string",
+                "description": "Working directory (default: execute shell_session cwd when available)",
+            },
         }
         keywords = ["pty", "shell", "terminal", "repl"]
 
-        async def execute(self, args: dict) -> ToolResult:
+        async def execute(self, args: dict, run_context: Any = None) -> ToolResult:
             from clawagents.config.features import is_enabled
 
             if not is_enabled("pty_sessions"):
@@ -351,11 +356,17 @@ def create_pty_tools():
                     output="",
                     error="Install PTY deps: pip install 'clawagents[pty]'",
                 )
+            cwd = str(args.get("cwd") or "").strip() or None
+            if cwd is None and run_context is not None:
+                sess_state = getattr(run_context, "shell_session", None)
+                if sess_state is not None and getattr(sess_state, "cwd", None):
+                    cwd = str(sess_state.cwd)
             try:
                 sess = PtySession(
                     args.get("command"),
                     cols=int(args.get("cols") or 120),
                     rows=int(args.get("rows") or 40),
+                    cwd=cwd,
                 )
             except Exception as exc:  # noqa: BLE001
                 return ToolResult(success=False, output="", error=str(exc))
@@ -366,7 +377,7 @@ def create_pty_tools():
             screen = sess.screen_text()
             return ToolResult(
                 success=True,
-                output=f"session_id={sess.session_id}\n{screen[-2000:]}",
+                output=f"session_id={sess.session_id}\ncwd={cwd or ''}\n{screen[-2000:]}",
             )
 
     class PtyKeysTool:

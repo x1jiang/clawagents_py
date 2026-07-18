@@ -170,12 +170,45 @@ def _shell_argv(command: str) -> list[str]:
     return ["/bin/sh", "-c", command]
 
 
+def _child_env() -> dict[str, str]:
+    env = {**os.environ, "PAGER": "cat"}
+    try:
+        from clawagents.redact import is_secret_name
+
+        env = {k: v for k, v in env.items() if not is_secret_name(k)}
+    except Exception:
+        pass
+    return env
+
+
+def _resolve_block_until_ms(args: Dict[str, Any]) -> tuple[int, bool]:
+    """Return ``(block_until_ms, immediate_background)``.
+
+    ``block_until_ms`` aliases ``timeout``. ``0`` means immediate background.
+    """
+    if "block_until_ms" in args and args.get("block_until_ms") is not None:
+        try:
+            raw = int(args.get("block_until_ms"))
+        except (TypeError, ValueError):
+            raw = DEFAULT_TIMEOUT_MS
+        if raw == 0:
+            return 0, True
+        return max(100, raw), False
+    try:
+        timeout_ms = max(100, int(args.get("timeout", DEFAULT_TIMEOUT_MS)))
+    except (TypeError, ValueError):
+        timeout_ms = DEFAULT_TIMEOUT_MS
+    return timeout_ms, False
+
+
 async def _exec_foreground_with_autobg(
     command: str,
     *,
     cwd: str,
     timeout_ms: int,
     mgr: Any,
+    on_chunk: Any | None = None,
+    streaming: bool = False,
 ) -> tuple[str, str, int, bool, Optional[str]]:
     """Run shell; on timeout adopt the process into ``mgr``.
 
@@ -183,15 +216,7 @@ async def _exec_foreground_with_autobg(
     """
     import signal
 
-    env = {**os.environ, "PAGER": "cat"}
-    # Drop obvious secrets from child env (same spirit as LocalBackend).
-    try:
-        from clawagents.redact import is_secret_name
-
-        env = {k: v for k, v in env.items() if not is_secret_name(k)}
-    except Exception:
-        pass
-
+    env = _child_env()
     timeout_s = max(0.1, timeout_ms / 1000.0)
     proc = await asyncio.create_subprocess_shell(
         command,
@@ -201,40 +226,92 @@ async def _exec_foreground_with_autobg(
         env=env,
         start_new_session=True,
     )
-    comm = asyncio.create_task(proc.communicate())
-    try:
-        out_b, err_b = await asyncio.wait_for(asyncio.shield(comm), timeout=timeout_s)
-        return (
-            (out_b or b"").decode("utf-8", errors="replace"),
-            (err_b or b"").decode("utf-8", errors="replace"),
-            proc.returncode or 0,
-            False,
-            None,
+
+    if not streaming:
+        comm = asyncio.create_task(proc.communicate())
+        try:
+            out_b, err_b = await asyncio.wait_for(asyncio.shield(comm), timeout=timeout_s)
+            return (
+                (out_b or b"").decode("utf-8", errors="replace"),
+                (err_b or b"").decode("utf-8", errors="replace"),
+                proc.returncode or 0,
+                False,
+                None,
+            )
+        except asyncio.TimeoutError:
+            argv = _shell_argv(command)
+            job = await mgr.adopt(proc, argv, cwd=cwd, communicate_task=comm)
+            return ("", "", 0, True, job.id)
+        except Exception:
+            if not comm.done():
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
+                try:
+                    await comm
+                except Exception:
+                    pass
+            raise
+
+    # Streaming path: pump pipes; emit on_chunk; adopt with drain task on timeout.
+    out_parts: list[str] = []
+    err_parts: list[str] = []
+    total = 0
+
+    async def _pump(stream: Any, parts: list[str]) -> str:
+        nonlocal total
+        while True:
+            chunk = await stream.read(4096)
+            if not chunk:
+                break
+            text = chunk.decode("utf-8", errors="replace")
+            parts.append(text)
+            total += len(text)
+            if on_chunk is not None:
+                try:
+                    on_chunk(text, total)
+                except Exception:
+                    pass
+        return "".join(parts)
+
+    out_t = asyncio.create_task(_pump(proc.stdout, out_parts))
+    err_t = asyncio.create_task(_pump(proc.stderr, err_parts))
+    wait_t = asyncio.create_task(proc.wait())
+
+    async def _finish_comm() -> tuple[bytes, bytes]:
+        out_s = await out_t
+        err_s = await err_t
+        if not wait_t.done():
+            await wait_t
+        return out_s.encode("utf-8", errors="replace"), err_s.encode(
+            "utf-8", errors="replace"
         )
+
+    try:
+        await asyncio.wait_for(asyncio.shield(wait_t), timeout=timeout_s)
+        stdout = await out_t
+        stderr = await err_t
+        return stdout, stderr, proc.returncode or 0, False, None
     except asyncio.TimeoutError:
         argv = _shell_argv(command)
+        comm = asyncio.create_task(_finish_comm())
         job = await mgr.adopt(proc, argv, cwd=cwd, communicate_task=comm)
-        return (
-            "",
-            "",
-            0,
-            True,
-            job.id,
-        )
+        return ("", "", 0, True, job.id)
     except Exception:
-        # Ensure we don't leak a running process on unexpected errors.
-        if not comm.done():
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
             try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError, OSError):
-                try:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
-            try:
-                await comm
-            except Exception:
+                proc.kill()
+            except ProcessLookupError:
                 pass
+        for t in (out_t, err_t, wait_t):
+            if not t.done():
+                t.cancel()
         raise
 
 
@@ -242,16 +319,27 @@ class ExecTool:
     name = "execute"
     keywords = ["shell", "bash", "command", "run script", "terminal"]
     description = (
-        "Execute a shell command and return its output. Working directory "
-        "persists across calls in this session (cd sticks). Noisy commands "
-        "(pytest, git status/log/diff, ls, rg, …) may be auto-wrapped with rtk "
-        "when installed. Set is_background=true for long-running commands; "
-        "foreground timeouts may auto-background and return a job_id — use "
-        "task_status / task_output / task_stop."
+        "Execute a non-interactive shell command and return its output. "
+        "Working directory and (when enabled) env exports persist across calls "
+        "in this session. Noisy commands (pytest, git status/log/diff, ls, rg, …) "
+        "may be auto-wrapped with rtk when installed. "
+        "Use block_until_ms (alias of timeout) for the foreground wait; "
+        "block_until_ms=0 or is_background=true returns a job_id immediately. "
+        "Foreground deadlines may auto-background — use task_status / task_output / "
+        "task_stop. Not for interactive TTY apps (vim, ssh prompts, REPLs that need "
+        "a screen) — use pty_start / pty_keys / pty_wait / pty_screen / pty_stop."
     )
     parameters: Dict[str, Dict[str, Any]] = {
         "command": {"type": "string", "description": "The shell command to execute", "required": True},
         "timeout": {"type": "number", "description": f"Timeout in milliseconds. Default: {DEFAULT_TIMEOUT_MS}"},
+        "block_until_ms": {
+            "type": "number",
+            "description": (
+                "Foreground wait budget in ms (alias of timeout). "
+                "0 = immediate background when execute_background is on. "
+                f"Default: timeout / {DEFAULT_TIMEOUT_MS}."
+            ),
+        },
         "description": {
             "type": "string",
             "description": "One-sentence explanation of why this command is needed (recommended).",
@@ -274,16 +362,13 @@ class ExecTool:
 
         sb = self._sb
         command = str(args.get("command", ""))
-        try:
-            timeout_ms = max(100, int(args.get("timeout", DEFAULT_TIMEOUT_MS)))
-        except (TypeError, ValueError):
-            timeout_ms = DEFAULT_TIMEOUT_MS
+        timeout_ms, immediate_bg = _resolve_block_until_ms(args)
 
         if not command:
             return ToolResult(success=False, output="", error="No command provided")
 
         permission_mode = getattr(run_context, "permission_mode", PermissionMode.DEFAULT)
-        is_background = _truthy(args.get("is_background"))
+        is_background = _truthy(args.get("is_background")) or immediate_bg
         desc = str(args.get("description") or "").strip()
 
         with tool_span("exec.validate", command=command):
@@ -309,11 +394,16 @@ class ExecTool:
         # Session + auto-bg adopt need a real local shell. Other backends
         # (in-memory / docker / test doubles) keep the classic sb.exec path.
         is_local_sb = getattr(sb, "kind", None) == "local"
+        sticky_env = is_enabled("execute_shell_env")
         if is_enabled("execute_shell_session") and is_local_sb:
             session = session_for(run_context, sb)
             run_cwd = session.cwd
-            command = session.wrap(command)
-            warning_prefix += f"[shell_session: cwd={run_cwd}]\n"
+            command = session.wrap(command, sticky_env=sticky_env)
+            env_n = len(session.env) if sticky_env else 0
+            warning_prefix += f"[shell_session: cwd={run_cwd}"
+            if sticky_env:
+                warning_prefix += f" env_keys={env_n}"
+            warning_prefix += "]\n"
 
         if is_background:
             if not is_enabled("execute_background"):
@@ -354,6 +444,24 @@ class ExecTool:
         )
         if use_autobg:
             mgr = _bg_manager(run_context)
+            on_chunk = None
+            streaming = is_enabled("execute_streaming")
+            on_event = getattr(run_context, "on_event", None) if run_context else None
+            if streaming and callable(on_event):
+
+                def on_chunk(delta: str, total_bytes: int) -> None:
+                    try:
+                        on_event(
+                            "tool_progress",
+                            {
+                                "tool_name": "execute",
+                                "delta": delta[-2000:],
+                                "total_bytes": total_bytes,
+                            },
+                        )
+                    except Exception:
+                        pass
+
             with tool_span("exec.run", command=command, timeout_ms=timeout_ms):
                 try:
                     stdout, stderr, exit_code, bgd, job_id = await _exec_foreground_with_autobg(
@@ -361,6 +469,8 @@ class ExecTool:
                         cwd=run_cwd,
                         timeout_ms=timeout_ms,
                         mgr=mgr,
+                        on_chunk=on_chunk,
+                        streaming=streaming,
                     )
                 except Exception as e:
                     return ToolResult(
@@ -373,6 +483,7 @@ class ExecTool:
                     "auto_background_on_timeout": True,
                     "job_id": job_id,
                     "timeout_ms": timeout_ms,
+                    "block_until_ms": timeout_ms,
                     "command": str(args.get("command", "")),
                     "cwd": run_cwd,
                     "description": desc or None,
@@ -387,7 +498,7 @@ class ExecTool:
                 )
 
             if session is not None:
-                stdout = session.consume_stdout(stdout)
+                stdout = session.consume_stdout(stdout, sticky_env=sticky_env)
 
             success = exit_code == 0
             if not success:
@@ -445,7 +556,7 @@ class ExecTool:
 
             stdout = result.stdout or ""
             if session is not None:
-                stdout = session.consume_stdout(stdout)
+                stdout = session.consume_stdout(stdout, sticky_env=sticky_env)
 
             success = result.exit_code == 0
             if not success:

@@ -79,7 +79,7 @@ _NEVER_PARALLEL_TOOLS: frozenset[str] = frozenset({
 # their target paths are independent. Write-side tools are intentionally
 # excluded — they run sequentially via the snapshot path.
 _DEFAULT_PARALLEL_SAFE: frozenset[str] = frozenset({
-    "read_file", "hashline_read", "list_dir", "glob", "search_files", "grep",
+    "read_file", "hashline_read", "hashline_grep", "list_dir", "glob", "search_files", "grep",
     "web_fetch", "web_search", "shell",  # stateless reads
 })
 
@@ -88,6 +88,7 @@ _DEFAULT_PARALLEL_SAFE: frozenset[str] = frozenset({
 _DEFAULT_PATH_SCOPED_ARGS: Dict[str, str] = {
     "read_file": "path",
     "hashline_read": "path",
+    "hashline_grep": "path",
     "hashline_edit": "path",
     "list_dir": "path",
     "glob": "path",

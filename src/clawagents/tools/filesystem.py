@@ -266,16 +266,39 @@ class WriteFileTool:
 class EditFileTool:
     name = "edit_file"
     keywords = ["replace text", "modify file", "patch file", "change file", "update file"]
-    description = "Edit a file by replacing a specific block of text. The target must exactly match existing content."
-    parameters: Dict[str, Dict[str, Any]] = {
+    description = (
+        "Edit a file by replacing a specific block of text. The target must exactly "
+        "match existing content. Prefer read_file or hashline_read before editing so "
+        "the target matches the current file. For multi-hunk edits, prefer hashline_grep "
+        "→ hashline_edit. Set create_if_missing=true with an empty target to create a "
+        "new file (only when the path does not already exist)."
+    )
+    _BASE_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "path": {"type": "string", "description": "Path to the file to edit", "required": True},
         "target": {"type": "string", "description": "The exact block of text to replace", "required": True},
         "replacement": {"type": "string", "description": "The new text", "required": True},
         "replace_all": {"type": "boolean", "description": "Replace all occurrences (default: false, requires unique match)"},
+        "create_if_missing": {
+            "type": "boolean",
+            "description": (
+                "If true and target is empty: create the file with replacement when it "
+                "does not exist. Refused when the file already has content. Default: false."
+            ),
+        },
     }
 
     def __init__(self, sb: Any):
         self._sb = sb
+
+    @property
+    def parameters(self) -> Dict[str, Dict[str, Any]]:
+        # Feature flag only gates advertising; behavior still honors create_if_missing.
+        from clawagents.config.features import is_enabled
+
+        params = dict(self._BASE_PARAMETERS)
+        if not is_enabled("edit_file_create_empty"):
+            params.pop("create_if_missing", None)
+        return params
 
     async def execute(self, args: Dict[str, Any]) -> ToolResult:
         sb = self._sb
@@ -283,10 +306,39 @@ class EditFileTool:
         target = str(args.get("target", ""))
         replacement = str(args.get("replacement", ""))
         replace_all = bool(args.get("replace_all", False))
+        create_if_missing = bool(args.get("create_if_missing", False))
 
-        # Empty target is never valid: ``str.replace("", repl)`` inserts
-        # ``repl`` between every character, silently corrupting the file.
+        # Empty target: only allowed for create_if_missing on a missing path.
+        # ``str.replace("", repl)`` would otherwise corrupt existing files.
         if target == "":
+            if create_if_missing:
+                try:
+                    if await sb.exists(file_path):
+                        existing = await sb.read_file(file_path)
+                        if existing != "":
+                            return ToolResult(
+                                success=False,
+                                output="",
+                                error=(
+                                    "edit_file failed: create_if_missing with empty "
+                                    f"target refuses non-empty file {file_path}."
+                                ),
+                            )
+                    parent = sb.dirname(file_path)
+                    if parent and not await sb.exists(parent):
+                        await sb.mkdir(parent, recursive=True)
+                    await sb.write_file(file_path, replacement)
+                    return ToolResult(
+                        success=True,
+                        output=(
+                            f"Created {file_path} ({len(replacement)} bytes) "
+                            "via create_if_missing."
+                        ),
+                    )
+                except Exception as e:
+                    return ToolResult(
+                        success=False, output="", error=f"edit_file failed: {str(e)}"
+                    )
             return ToolResult(
                 success=False, output="",
                 error="edit_file failed: 'target' must be a non-empty string.",
@@ -294,7 +346,15 @@ class EditFileTool:
 
         try:
             if not await sb.exists(file_path):
-                return ToolResult(success=False, output="", error=f"edit_file failed: File does not exist at {file_path}")
+                return ToolResult(
+                    success=False,
+                    output="",
+                    error=(
+                        f"edit_file failed: File does not exist at {file_path}. "
+                        "Use create_if_missing=true with an empty target to create it, "
+                        "or write_file."
+                    ),
+                )
 
             content = await sb.read_file(file_path)
 
@@ -305,7 +365,8 @@ class EditFileTool:
                     output="",
                     error=(
                         f"edit_file failed: Could not find exact target text in {file_path}. "
-                        "Check whitespace and line endings. Use read_file (or hashline_read) "
+                        "Check whitespace and line endings. The user may have changed the "
+                        "file since you last read it. Use read_file (or hashline_read) "
                         f"to see the current content.{hint}"
                     ),
                 )

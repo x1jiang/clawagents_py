@@ -125,7 +125,9 @@ async def test_hashline_tools_end_to_end(tmp_path: Path, monkeypatch: pytest.Mon
     f = tmp_path / "demo.py"
     f.write_text("def f():\n    return 1\n", encoding="utf-8")
     sb = LocalBackend(root=str(tmp_path))
-    read_t, edit_t = create_hashline_tools(sb)
+    tools = create_hashline_tools(sb)
+    assert [t.name for t in tools] == ["hashline_read", "hashline_grep", "hashline_edit"]
+    read_t, grep_t, edit_t = tools
     r = await read_t.execute({"path": "demo.py", "limit": 20})
     assert r.success
     assert "→" in r.output
@@ -141,6 +143,11 @@ async def test_hashline_tools_end_to_end(tmp_path: Path, monkeypatch: pytest.Mon
     )
     assert er.success, er.error
     assert "def f():" in f.read_text(encoding="utf-8")
+
+    gr = await grep_t.execute({"pattern": r"def f", "path": "."})
+    assert gr.success, gr.error
+    assert "→" in gr.output
+    assert "hashline_edit" in gr.output
 
 
 def test_nearest_edit_hint():
@@ -159,6 +166,42 @@ async def test_edit_file_miss_has_hint(tmp_path: Path):
     r = await tool.execute({"path": "a.txt", "target": "hello wrld", "replacement": "x"})
     assert not r.success
     assert "Nearest similar" in (r.error or "")
+    assert "user may have changed" in (r.error or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_edit_file_create_if_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("CLAW_FEATURE_EDIT_FILE_CREATE_EMPTY", "1")
+    from clawagents.config import features as feat
+
+    feat._resolved = None  # type: ignore[attr-defined]
+
+    from clawagents.sandbox.local import LocalBackend
+
+    tool = EditFileTool(LocalBackend(root=str(tmp_path)))
+    assert "create_if_missing" in tool.parameters
+    r = await tool.execute(
+        {
+            "path": "new.txt",
+            "target": "",
+            "replacement": "created\n",
+            "create_if_missing": True,
+        }
+    )
+    assert r.success, r.error
+    assert (tmp_path / "new.txt").read_text(encoding="utf-8") == "created\n"
+
+    # Empty target on existing non-empty file still refused
+    bad = await tool.execute(
+        {
+            "path": "new.txt",
+            "target": "",
+            "replacement": "overwrite",
+            "create_if_missing": True,
+        }
+    )
+    assert not bad.success
+    assert "non-empty" in (bad.error or "").lower()
 
 
 @pytest.mark.asyncio
@@ -198,3 +241,59 @@ async def test_execute_is_background(monkeypatch: pytest.MonkeyPatch):
     out_t = next(t for t in create_background_task_tools() if t.name == "task_output")
     out = await out_t.execute({"job_id": job_id})
     assert "claw-bg-ok" in out.output
+
+
+@pytest.mark.asyncio
+async def test_execute_block_until_ms_zero_backgrounds(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("CLAW_FEATURE_EXECUTE_BACKGROUND", "1")
+    monkeypatch.setenv("CLAW_FEATURE_RTK_WRAP", "0")
+    from clawagents.config import features as feat
+
+    feat._resolved = None  # type: ignore[attr-defined]
+
+    from clawagents.sandbox.local import LocalBackend
+    from clawagents.tools.exec import ExecTool
+
+    tool = ExecTool(LocalBackend())
+    r = await tool.execute(
+        {"command": "echo via-block-until", "block_until_ms": 0, "description": "bg"}
+    )
+    assert r.success, r.error
+    start = r.output.find("{")
+    payload = json.loads(r.output[start:])
+    assert payload["backgrounded"] is True
+    assert payload["job_id"]
+
+
+@pytest.mark.asyncio
+async def test_execute_streaming_emits_tool_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("CLAW_FEATURE_EXECUTE_SHELL_SESSION", "0")
+    monkeypatch.setenv("CLAW_FEATURE_EXECUTE_AUTO_BACKGROUND", "1")
+    monkeypatch.setenv("CLAW_FEATURE_EXECUTE_BACKGROUND", "1")
+    monkeypatch.setenv("CLAW_FEATURE_EXECUTE_STREAMING", "1")
+    monkeypatch.setenv("CLAW_FEATURE_RTK_WRAP", "0")
+    from clawagents.config import features as feat
+
+    feat._resolved = None  # type: ignore[attr-defined]
+
+    from clawagents.sandbox.local import LocalBackend
+    from clawagents.tools.exec import ExecTool
+
+    events: list[tuple[str, dict]] = []
+
+    class Ctx:
+        def on_event(self, kind: str, payload: dict) -> None:
+            events.append((kind, payload))
+
+    tool = ExecTool(LocalBackend(root=str(tmp_path)))
+    r = await tool.execute(
+        {"command": "printf 'stream-ok\\n'", "timeout": 5000},
+        run_context=Ctx(),
+    )
+    assert r.success, r.error
+    assert "stream-ok" in r.output
+    progress = [p for k, p in events if k == "tool_progress"]
+    assert progress, "expected tool_progress events"
+    assert any("stream-ok" in (p.get("delta") or "") for p in progress)

@@ -86,7 +86,10 @@ _FEATURE_DEFAULTS: dict[str, str] = {
     "rtk_wrap":             "1",   # Auto-wrap noisy execute cmds with rtk (if installed)
     "aggressive_tool_crush": "1",  # Lower crush thresholds in agent_loop (not hooks)
     "execute_shell_session": "1",  # Persist cwd across execute (Grok shell-state slice)
+    "execute_shell_env":    "1",   # Sticky env overlay across execute (with shell_session)
     "execute_auto_background": "1",  # On FG timeout, adopt process as background job
+    "execute_streaming":    "1",   # Progressive stdout/stderr via tool_progress events
+    "edit_file_create_empty": "1",  # Advertise create_if_missing on edit_file
     "structured_output":    "1",   # Native provider json_schema / response_format
     "doom_loop":            "1",   # Generation tail-repetition resample
     "history_then_steps":   "1",   # Graduated compaction mode
