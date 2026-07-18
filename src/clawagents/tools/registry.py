@@ -15,12 +15,22 @@ from typing import Any, Dict, List, Optional, Protocol
 
 
 class ToolResult:
-    __slots__ = ("success", "output", "error")
+    __slots__ = ("success", "output", "error", "raw_output")
 
-    def __init__(self, success: bool, output: str | list[dict[str, Any]], error: Optional[str] = None):
+    def __init__(
+        self,
+        success: bool,
+        output: str | list[dict[str, Any]],
+        error: Optional[str] = None,
+        *,
+        raw_output: str | list[dict[str, Any]] | None = None,
+    ):
         self.success = success
         self.output = output
         self.error = error
+        # Full pre-truncation payload for artifact archival / retrieve_tool_result.
+        # ``output`` may be a UI/model preview; ``raw_output`` keeps the original.
+        self.raw_output = output if raw_output is None else raw_output
 
 
 def _tool_error_debug_enabled() -> bool:
@@ -616,17 +626,27 @@ class ToolRegistry:
                 execute_awaitable,
                 timeout=self._tool_timeout_s,
             )
-            truncated = ToolResult(
+            # Keep full output on ``raw_output`` so prepare_tool_output_for_context
+            # / retrieve_tool_result can archive the real dump. ``output`` is a
+            # bounded preview for UI/cache hot paths.
+            full_output = result.output
+            preview_output = (
+                truncate_tool_output(full_output)
+                if isinstance(full_output, str)
+                else full_output
+            )
+            wrapped = ToolResult(
                 success=result.success,
-                output=truncate_tool_output(result.output),
+                output=preview_output,
                 error=result.error,
+                raw_output=full_output,
             )
 
             # Cache successful results for cacheable tools
-            if is_cacheable and truncated.success:
-                self._result_cache.set(tool_name, effective_args, truncated)
+            if is_cacheable and wrapped.success:
+                self._result_cache.set(tool_name, effective_args, wrapped)
 
-            if truncated.success and tool_name in _WRITE_TOOLS:
+            if wrapped.success and tool_name in _WRITE_TOOLS:
                 prompt_idx = None
                 if run_context is not None and isinstance(
                     getattr(run_context, "_metadata", None), dict
@@ -640,7 +660,7 @@ class ToolRegistry:
                     tool_name, effective_args, prompt_index=prompt_idx,
                 )
 
-            return truncated
+            return wrapped
         except asyncio.TimeoutError:
             return ToolResult(
                 success=False, output="",

@@ -217,12 +217,16 @@ def _evict_large_tool_result(tool_name: str, output: str) -> str:
 
 
 def _tool_observation(result: ToolResult) -> str | list[dict[str, Any]]:
+    """Observation text for the model — prefers full ``raw_output`` when present."""
+    payload = getattr(result, "raw_output", None)
+    if payload is None:
+        payload = result.output
     if result.success:
-        return result.output
+        return payload
     error = f"Error: {result.error}" if result.error else "Error: Tool failed"
-    if isinstance(result.output, list):
-        return [{"type": "text", "text": error}, *result.output]
-    output = str(result.output or "").strip()
+    if isinstance(payload, list):
+        return [{"type": "text", "text": error}, *payload]
+    output = str(payload or "").strip()
     return f"{error}\nOutput:\n{output}" if output else error
 
 
