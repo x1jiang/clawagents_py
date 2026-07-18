@@ -1,6 +1,10 @@
 # ClawAgents Changelog
 
 
+### v6.20.11 — Omit temperature for Claude Opus 4.7+ (July 2026)
+
+- Anthropic Messages / Mantle Claude: do not send ``temperature`` (or sampling params) for Opus 4.7+ — API returns 400 ``temperature is deprecated for this model``.
+
 ### v6.20.10 — Provider/model resolution hardening (July 2026)
 
 - Canonical `providers.model_classify` (geo prefixes, LiteLLM `provider/` strip, key-field routing).

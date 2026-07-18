@@ -623,6 +623,27 @@ def _resolve_temperature(model: str, requested: float) -> float:
     return requested
 
 
+def anthropic_model_rejects_sampling_params(model: str) -> bool:
+    """True when the Anthropic API rejects ``temperature`` / ``top_p`` / ``top_k``.
+
+    Claude Opus 4.7+ (including Mantle ``anthropic.claude-opus-4-8``) return
+    HTTP 400 ``temperature is deprecated for this model`` if those fields are
+    present. Omit them and guide behavior via prompting instead.
+    """
+    import re
+
+    m = (model or "").strip().lower().replace("_", "-")
+    # Collapse dotted minors: opus-4.8 → opus-4-8; keep geo/FM prefixes intact.
+    m = re.sub(r"(opus-4)\.(\d+)", r"\1-\2", m)
+    hit = re.search(r"opus-4-(\d+)", m)
+    if hit:
+        return int(hit.group(1)) >= 7
+    # Future Opus 5+ generations inherit the same restriction.
+    if re.search(r"opus-([5-9]|[1-9]\d+)(?:-|\b)", m):
+        return True
+    return False
+
+
 def _chat_completions_needs_reasoning_none(model: str) -> bool:
     """True when Chat Completions rejects tools + default reasoning_effort.
 
@@ -2502,7 +2523,12 @@ class AnthropicProvider(LLMProvider):
         # dropped ``temperature=0`` — the config default — so Anthropic silently
         # sampled at the API default of 1.0 while OpenAI/Gemini honoured 0,
         # making "temperature: 0" runs non-deterministic only on Claude.
-        if self._temperature is not None and self._temperature >= 0:
+        # Opus 4.7+ reject the field entirely (400) — omit it for those models.
+        if (
+            not anthropic_model_rejects_sampling_params(self.model)
+            and self._temperature is not None
+            and self._temperature >= 0
+        ):
             kwargs["temperature"] = self._temperature
         schema = getattr(self, "_structured_json_schema", None)
         if isinstance(schema, dict) and schema and not tools:
