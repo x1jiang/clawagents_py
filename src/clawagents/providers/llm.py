@@ -623,6 +623,37 @@ def _resolve_temperature(model: str, requested: float) -> float:
     return requested
 
 
+def openai_model_rejects_temperature(model: str) -> bool:
+    """True when OpenAI / Mantle Responses reject an explicit ``temperature``.
+
+    GPT-5.5 / 5.6 (incl. ``openai.gpt-5.6-luna``), o-series, and similar
+    reasoning models return 400 if ``temperature`` is present. Omit the field.
+    """
+    m = (model or "").strip().lower()
+    if m.startswith("openai."):
+        m = m[len("openai.") :]
+    if m.startswith(("o1", "o3", "o4")):
+        return True
+    if m.startswith(("gpt-5.3", "gpt-5.4", "gpt-5.5", "gpt-5.6")):
+        return True
+    if m.startswith("gpt-5") and "codex" in m:
+        return True
+    return False
+
+
+def _with_temperature(
+    kwargs: dict[str, Any], model: str, temperature: float | None
+) -> dict[str, Any]:
+    """Attach ``temperature`` only when the model accepts it."""
+    if temperature is None:
+        return kwargs
+    if openai_model_rejects_temperature(model):
+        kwargs.pop("temperature", None)
+        return kwargs
+    kwargs["temperature"] = temperature
+    return kwargs
+
+
 def anthropic_model_rejects_sampling_params(model: str) -> bool:
     """True when the Anthropic API rejects ``temperature`` / ``top_p`` / ``top_k``.
 
@@ -1186,8 +1217,8 @@ class OpenAIProvider(LLMProvider):
             "model": self.model,
             "messages": messages,
             "max_completion_tokens": self._max_tokens,
-            "temperature": self._temperature,
         }
+        _with_temperature(kwargs, self.model, self._temperature)
         if oai_tools:
             kwargs["tools"] = oai_tools
         schema = getattr(self, "_structured_json_schema", None)
@@ -1238,9 +1269,9 @@ class OpenAIProvider(LLMProvider):
             "model": self.model,
             "input": input_items,
             "max_output_tokens": self._max_tokens,
-            "temperature": self._temperature,
             "store": False,
         }
+        _with_temperature(kwargs, self.model, self._temperature)
         if instructions:
             kwargs["instructions"] = instructions
         resp_tools = _chat_tools_to_responses_tools(oai_tools)
@@ -1521,10 +1552,10 @@ class OpenAIProvider(LLMProvider):
                     "model": self.model,
                     "messages": messages,
                     "max_completion_tokens": self._max_tokens,
-                    "temperature": self._temperature,
                     "stream": True,
                     "stream_options": {"include_usage": True},
                 }
+                _with_temperature(kwargs, self.model, self._temperature)
                 if oai_tools:
                     kwargs["tools"] = oai_tools
                 _apply_tool_reasoning_compat(
@@ -3100,14 +3131,27 @@ def is_mantle_anthropic_model(model: str) -> bool:
 def is_mantle_openai_responses_model(model: str) -> bool:
     """Frontier OpenAI IDs on Mantle that need ``/openai/v1/responses``.
 
-    ``openai.gpt-oss-*`` stays on chat completions; GPT-5.4/5.5/5.6 do not.
+    ``openai.gpt-oss-*`` stays on chat completions; GPT-5.3/5.4/5.5/5.6 do not.
+    Accepts bare ``gpt-5.6-luna`` as well as ``openai.gpt-5.6-luna``.
     """
     m = (model or "").strip().lower()
-    if not m.startswith("openai."):
-        return False
+    if m.startswith("openai."):
+        m = m[len("openai.") :]
     if "gpt-oss" in m:
         return False
     return any(token in m for token in ("gpt-5.3", "gpt-5.4", "gpt-5.5", "gpt-5.6"))
+
+
+def _mantle_openai_model_id(model: str) -> str:
+    """Ensure Mantle Responses models use the ``openai.`` catalog prefix."""
+    m = (model or "").strip()
+    if not m:
+        return m
+    if m.lower().startswith("openai."):
+        return m
+    if is_mantle_openai_responses_model(m):
+        return f"openai.{m}"
+    return m
 
 
 def create_provider(
@@ -3187,7 +3231,8 @@ def create_provider(
             # These models reject /v1/chat/completions even when wire_api was
             # saved as chat_completions from an older Mantle default.
             config.openai_wire_api = "responses"
-            config.openai_model = model_name
+            # Mantle catalog requires ``openai.gpt-5.6-*`` (bare ids 404 /v1).
+            config.openai_model = _mantle_openai_model_id(model_name)
             return OpenAIProvider(config)
         # Chat-completions catalog: keep …/v1 (or normalize to it).
         if _normalize_wire_api(config.openai_wire_api) == "auto":

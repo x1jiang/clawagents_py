@@ -6,7 +6,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from clawagents.providers.llm import anthropic_model_rejects_sampling_params
+from clawagents.providers.llm import (
+    anthropic_model_rejects_sampling_params,
+    is_mantle_openai_responses_model,
+    openai_model_rejects_temperature,
+    _mantle_openai_model_id,
+    _with_temperature,
+)
 
 
 @pytest.mark.parametrize(
@@ -64,6 +70,35 @@ async def test_anthropic_provider_omits_temperature_for_opus_48():
 
     assert "temperature" not in captured
     assert captured.get("model") == "anthropic.claude-opus-4-8"
+
+
+@pytest.mark.parametrize(
+    "model,rejects",
+    [
+        ("openai.gpt-5.6-luna", True),
+        ("gpt-5.6-luna", True),
+        ("openai.gpt-5.5", True),
+        ("o3-mini", True),
+        ("gpt-4o", False),
+        ("openai.gpt-oss-20b", False),
+    ],
+)
+def test_openai_model_rejects_temperature(model: str, rejects: bool):
+    assert openai_model_rejects_temperature(model) is rejects
+
+
+def test_with_temperature_omits_for_gpt56_luna():
+    kwargs = _with_temperature({"model": "x"}, "openai.gpt-5.6-luna", 0.0)
+    assert "temperature" not in kwargs
+    kwargs2 = _with_temperature({"model": "x"}, "gpt-4o", 0.2)
+    assert kwargs2["temperature"] == 0.2
+
+
+def test_mantle_openai_responses_accepts_bare_gpt56():
+    assert is_mantle_openai_responses_model("gpt-5.6-luna")
+    assert is_mantle_openai_responses_model("openai.gpt-5.6-luna")
+    assert _mantle_openai_model_id("gpt-5.6-luna") == "openai.gpt-5.6-luna"
+    assert not is_mantle_openai_responses_model("openai.gpt-oss-20b")
 
 
 @pytest.mark.asyncio

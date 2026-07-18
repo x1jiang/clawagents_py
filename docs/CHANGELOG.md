@@ -1,6 +1,11 @@
 # ClawAgents Changelog
 
 
+### v6.20.12 — Omit temperature for Mantle GPT-5.6 / Responses (July 2026)
+
+- OpenAI / Mantle Responses: do not send ``temperature`` for GPT-5.5/5.6 (incl. ``openai.gpt-5.6-luna``) and o-series — API returns 400 ``temperature is deprecated for this model``.
+- Mantle: bare ``gpt-5.6-*`` routes to ``/openai/v1/responses`` and is normalized to ``openai.gpt-5.6-*`` (bare ids 404).
+
 ### v6.20.11 — Omit temperature for Claude Opus 4.7+ (July 2026)
 
 - Anthropic Messages / Mantle Claude: do not send ``temperature`` (or sampling params) for Opus 4.7+ — API returns 400 ``temperature is deprecated for this model``.
