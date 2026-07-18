@@ -341,8 +341,17 @@ class SnapshotDiffTool:
         else:
             files = [p for p in snap_dir.rglob("*") if p.is_file()]
 
-        parts: list[str] = [f"Snapshot baseline: {snap_dir.name} ({len(files)} file(s))"]
-        for snap_file in files[:40]:
+        total_files = len(files)
+        file_cap = 40
+        shown_files = files[:file_cap]
+        header = f"Snapshot baseline: {snap_dir.name} ({total_files} file(s))"
+        if total_files > file_cap:
+            header += (
+                f" — showing {file_cap} of {total_files}; "
+                "pass path= to focus on a specific file"
+            )
+        parts: list[str] = [header]
+        for snap_file in shown_files:
             try:
                 rel_path = snap_file.relative_to(snap_dir)
             except ValueError:

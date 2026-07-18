@@ -1,6 +1,10 @@
 # ClawAgents Changelog
 
 
+### v6.20.16 — snapshot_diff file-cap note (July 2026)
+
+- ``snapshot_diff``: when more than 40 files are present, header says ``showing 40 of N`` (no silent cap).
+
 ### v6.20.15 — Skill-loading auto-continuation (July 2026)
 
 - Multi-page ``use_skill``: when a skill page is pending, the harness auto-finishes remaining pages (deterministic name/offset/hash) then runs the tool the model asked for — no refusal loop / wasted turns.

@@ -42,3 +42,20 @@ def test_snapshot_diff_shows_change(tmp_path: Path):
     assert result.success, result.error
     assert "echo one" in (result.output or "") or "-echo one" in (result.output or "")
     assert "echo two" in (result.output or "") or "+echo two" in (result.output or "")
+
+
+def test_snapshot_diff_notes_file_cap(tmp_path: Path):
+    ws = tmp_path
+    snap = ws / ".clawagents" / "snapshots" / str(int(time.time()) - 10)
+    snap.mkdir(parents=True)
+    for i in range(45):
+        p = snap / f"f{i:02d}.txt"
+        p.write_text(f"before {i}\n", encoding="utf-8")
+        (ws / f"f{i:02d}.txt").write_text(f"after {i}\n", encoding="utf-8")
+
+    tool = SnapshotDiffTool(str(ws))
+    result = asyncio.run(tool.execute({}))
+    assert result.success, result.error
+    assert "45 file(s)" in (result.output or "")
+    assert "showing 40 of 45" in (result.output or "")
+    assert "path=" in (result.output or "")
