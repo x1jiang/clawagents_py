@@ -482,8 +482,8 @@ class ProfileBackend:
                     command,
                 ]
                 # Pass as a shell-escaped single command for LocalBackend.exec
-                import shlex
-
+                # (use module-level ``shlex`` — a local import here makes
+                # ``shlex`` unbound on the seatbelt branch of this method.)
                 wrapped = " ".join(shlex.quote(p) for p in parts)
             else:
                 msg = "bwrap unavailable; falling back to local exec"

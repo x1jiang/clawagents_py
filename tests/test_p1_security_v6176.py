@@ -59,6 +59,39 @@ class TestSeatbeltQuoting:
         bad = f"{binary} -f {profile_path} /bin/sh -c {command!r}"
         assert bad != wrapped
 
+    def test_seatbelt_exec_does_not_unbound_shlex(self, tmp_path, monkeypatch):
+        """Regression: local ``import shlex`` in bwrap branch unbound seatbelt path."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from clawagents.sandbox.profiles import OSSandboxProfile, ProfileBackend
+
+        profile = OSSandboxProfile(
+            name="workspace",
+            backend="seatbelt",
+            network=False,
+            read_only=False,
+            require_binary=False,
+        )
+        inner = MagicMock()
+        inner.cwd = str(tmp_path)
+        result = MagicMock(stdout="hi\n", stderr="", exit_code=0, killed=False)
+        inner.exec = AsyncMock(return_value=result)
+        pb = ProfileBackend(inner, profile)
+
+        async def _run():
+            with patch(
+                "clawagents.sandbox.profiles.shutil.which",
+                return_value="/usr/bin/sandbox-exec",
+            ):
+                out = await pb.exec("echo hi", timeout=5000, cwd=str(tmp_path))
+            assert out.exit_code == 0
+            # Inner received a sandbox-exec wrapped command
+            cmd = inner.exec.await_args.args[0]
+            assert "sandbox-exec" in cmd
+            assert "echo hi" in cmd
+
+        asyncio.run(_run())
+
 
 class TestSecretPathReadDeny:
     def test_workspace_profile_denies_dotenv(self, tmp_path, monkeypatch):
