@@ -24,15 +24,43 @@ def _git(args: list[str], cwd: str, *, timeout: int = 60) -> tuple[int, str, str
         return 1, "", str(exc)
 
 
+def _is_git_work_tree(cwd: str) -> bool:
+    code, out, _err = _git(["rev-parse", "--is-inside-work-tree"], cwd)
+    return code == 0 and out.strip().lower() == "true"
+
+
+def _not_a_repo_message(cwd: str) -> str:
+    return (
+        f"Not a git repository: {cwd}\n"
+        "No .git directory here (or in parent dirs). "
+        "Skip git_status / git_diff / git_commit and do not run shell `git …` "
+        "commands in this workspace — use filesystem tools instead."
+    )
+
+
+def _not_a_repo_result(*, fatal: bool, cwd: str) -> ToolResult:
+    """status/diff → soft informational success; commit/undo → hard fail."""
+    msg = _not_a_repo_message(cwd)
+    if fatal:
+        return ToolResult(success=False, output="", error=msg)
+    return ToolResult(success=True, output=msg)
+
+
 class GitStatusTool:
     name = "git_status"
-    description = "Show git status (short) for the workspace."
+    description = (
+        "Show git status (short) for the workspace. "
+        "If the workspace is not a git repo, returns a clear notice "
+        "(do not treat as a tool bug; skip further git commands)."
+    )
     parameters: dict[str, Any] = {}
 
     def __init__(self, workspace: str | None = None) -> None:
         self._workspace = workspace or os.getcwd()
 
     async def execute(self, args: dict[str, Any]) -> ToolResult:
+        if not _is_git_work_tree(self._workspace):
+            return _not_a_repo_result(fatal=False, cwd=self._workspace)
         code, out, err = _git(["status", "-sb"], self._workspace)
         if code != 0:
             return ToolResult(success=False, output="", error=err or out)
@@ -41,7 +69,11 @@ class GitStatusTool:
 
 class GitDiffTool:
     name = "git_diff"
-    description = "Show git diff (unstaged + staged summary)."
+    description = (
+        "Show git diff (unstaged + staged summary). "
+        "If the workspace is not a git repo, returns a clear notice "
+        "(skip further git commands)."
+    )
     parameters = {
         "staged": {"type": "boolean", "description": "If true, show --staged only"},
         "path": {"type": "string", "description": "Optional path limiter"},
@@ -51,6 +83,8 @@ class GitDiffTool:
         self._workspace = workspace or os.getcwd()
 
     async def execute(self, args: dict[str, Any]) -> ToolResult:
+        if not _is_git_work_tree(self._workspace):
+            return _not_a_repo_result(fatal=False, cwd=self._workspace)
         cmd = ["diff"]
         if args.get("staged"):
             cmd.append("--staged")
@@ -70,7 +104,8 @@ class GitCommitTool:
     name = "git_commit"
     description = (
         "Stage listed paths (or all tracked changes with all=true) and create a commit. "
-        "Records a context-ledger entry on success."
+        "Records a context-ledger entry on success. "
+        "Fails clearly when the workspace is not a git repository."
     )
     parameters = {
         "message": {"type": "string", "description": "Commit message", "required": True},
@@ -86,6 +121,8 @@ class GitCommitTool:
         self._workspace = workspace or os.getcwd()
 
     async def execute(self, args: dict[str, Any]) -> ToolResult:
+        if not _is_git_work_tree(self._workspace):
+            return _not_a_repo_result(fatal=True, cwd=self._workspace)
         msg = str(args.get("message") or "").strip()
         if not msg:
             return ToolResult(success=False, output="", error="message is required")
@@ -131,7 +168,7 @@ class GitUndoAiTool:
     description = (
         "Undo the last commit if it was created in this workspace session style "
         "(soft reset by default). Refuses if the commit is not HEAD or already pushed "
-        "when require_unpushed=true."
+        "when require_unpushed=true. Fails clearly when not a git repository."
     )
     parameters = {
         "hard": {"type": "boolean", "description": "Use reset --hard (destructive)"},
@@ -145,6 +182,8 @@ class GitUndoAiTool:
         self._workspace = workspace or os.getcwd()
 
     async def execute(self, args: dict[str, Any]) -> ToolResult:
+        if not _is_git_work_tree(self._workspace):
+            return _not_a_repo_result(fatal=True, cwd=self._workspace)
         require_unpushed = args.get("require_unpushed", True)
         if require_unpushed:
             code, out, err = _git(["status", "-sb"], self._workspace)

@@ -71,6 +71,17 @@ def _truncate_exec_output(output: str) -> str:
     )
 
 
+def _git_not_a_repo_signal(command: str, exit_code: int, stdout: str, stderr: str) -> bool:
+    if exit_code != 128:
+        return False
+    blob = f"{stdout}\n{stderr}".lower()
+    if "not a git repository" in blob:
+        return True
+    # Common when agents chain ``node --check … && git diff`` outside a repo.
+    cmd = (command or "").lower()
+    return "git " in f" {cmd} " or cmd.strip().startswith("git")
+
+
 def _format_nonzero_command_output(
     command: str,
     exit_code: int,
@@ -78,6 +89,17 @@ def _format_nonzero_command_output(
     stderr: str,
     warning_prefix: str,
 ) -> str:
+    interpretation = (
+        "The command ran and exited nonzero. Treat stdout/stderr as "
+        "diagnostic feedback, not as a tool transport failure."
+    )
+    if _git_not_a_repo_signal(command, exit_code, stdout, stderr):
+        interpretation = (
+            "Git exited 128 because this working directory is not a git "
+            "repository. Do not retry git here. Run syntax/tests in a "
+            "separate execute call without chaining `&& git …` "
+            "(e.g. `node --check file.js` alone)."
+        )
     payload: dict[str, Any] = {
         "command_executed": True,
         "success": False,
@@ -85,10 +107,7 @@ def _format_nonzero_command_output(
         "command": command,
         "stdout": _truncate_exec_output(stdout or ""),
         "stderr": _truncate_exec_output(stderr or ""),
-        "interpretation": (
-            "The command ran and exited nonzero. Treat stdout/stderr as "
-            "diagnostic feedback, not as a tool transport failure."
-        ),
+        "interpretation": interpretation,
     }
     warning = warning_prefix.strip()
     if warning:
@@ -363,6 +382,9 @@ class ExecTool:
         "Working directory and (when enabled) env exports persist across calls "
         "in this session. Noisy commands (pytest, git status/log/diff, ls, rg, …) "
         "may be auto-wrapped with rtk when installed. "
+        "Do not chain git with other checks via `&&` when the workspace may not "
+        "be a git repo — run `node --check` / tests alone, and prefer git_status / "
+        "git_diff tools (they report clearly when there is no .git). "
         "Use block_until_ms (alias of timeout) for the foreground wait; "
         "block_until_ms=0 or is_background=true returns a job_id immediately. "
         "Foreground deadlines may auto-background — use task_status / task_output / "

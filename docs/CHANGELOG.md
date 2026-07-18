@@ -1,6 +1,13 @@
 # ClawAgents Changelog
 
 
+### v6.20.13 — Clearer git / hashline / execute DX (July 2026)
+
+- ``git_status`` / ``git_diff``: soft success with a clear notice when cwd is not a git repo (skip further git); commit/undo still hard-fail.
+- ``execute``: exit 128 “not a git repository” gets an interpretation that says not to chain ``&& git`` after syntax checks.
+- ``hashline_edit``: malformed anchors include sample valid ``LINE:HASH…`` anchors from the file; tool description insists on full anchors.
+- ``apply_patch`` SEARCH-miss message points at re-read / hashline_edit.
+
 ### v6.20.12 — Omit temperature for Mantle GPT-5.6 / Responses (July 2026)
 
 - OpenAI / Mantle Responses: do not send ``temperature`` for GPT-5.5/5.6 (incl. ``openai.gpt-5.6-luna``) and o-series — API returns 400 ``temperature is deprecated for this model``.

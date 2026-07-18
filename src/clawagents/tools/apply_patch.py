@@ -25,13 +25,24 @@ def _apply_search_replace(content: str, search: str, replace: str) -> tuple[bool
         n_content = norm(content)
         n_search = norm(search)
         if n_search not in n_content:
-            return False, content, "SEARCH block not found (even after whitespace normalize)"
+            return (
+                False,
+                content,
+                "SEARCH block not found (even after whitespace normalize). "
+                "Re-read the file (or use hashline_grep → hashline_edit) and "
+                "copy the exact current text into SEARCH.",
+            )
         # apply on normalized then rebuild is lossy — fall back to exact fail message
         # Try replace on original by locating first line
         first = search.splitlines()[0].rstrip() if search.splitlines() else ""
         idx = next((i for i, ln in enumerate(content.splitlines()) if ln.rstrip() == first), -1)
         if idx < 0:
-            return False, content, "SEARCH block not found"
+            return (
+                False,
+                content,
+                "SEARCH block not found. Re-read the file and copy exact text, "
+                "or use hashline_edit with anchors from hashline_read/grep.",
+            )
         return False, content, "SEARCH whitespace mismatch — provide exact file text"
     if content.count(search) > 1:
         return False, content, "SEARCH block matches multiple locations — make it unique"

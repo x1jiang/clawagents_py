@@ -348,6 +348,19 @@ def _render_anchored(a: Anchor, content: str) -> str:
     return f"{a.line}:{a.suffix()}{ARROW}{content}"
 
 
+def _sample_anchors(
+    lines: Sequence[str], scheme: ChunkFingerprint, *, limit: int = 4
+) -> list[str]:
+    """Fresh ``LINE:HASH1:HASH2`` samples for malformed-anchor recovery hints."""
+    if not lines:
+        return []
+    anchors = scheme.generate_anchors(lines)
+    out: list[str] = []
+    for a in anchors[: max(0, limit)]:
+        out.append(a.render())
+    return out
+
+
 def _validate_anchor(
     anchor_str: str, lines: Sequence[str], scheme: ChunkFingerprint
 ) -> Tuple[Optional[int], Optional[ApplyError]]:
@@ -356,13 +369,32 @@ def _validate_anchor(
     if parsed is None:
         recovered = _recover_by_suffix(cleaned, lines, scheme)
         if recovered is None:
+            samples = _sample_anchors(lines, scheme)
+            hint = ""
+            if samples:
+                shown = ", ".join(f'"{s}"' for s in samples)
+                hint = (
+                    f" Valid anchors from this file (copy exactly, including the "
+                    f"line number): {shown}. Prefer hashline_read / hashline_grep, "
+                    f"then paste the ANCHOR before the arrow."
+                )
             return None, ApplyError(
                 kind="invalid_input",
                 message=(
                     f'Malformed anchor: "{cleaned}". '
-                    'Expected format: "LINE:HASH1:HASH2" (e.g. "22:abc:rst").'
+                    'Expected format: "LINE:HASH1:HASH2" (e.g. "22:abc:rst"). '
+                    "Do not pass bare HASH1:HASH2 without the line number unless "
+                    "it uniquely matches a suffix in the file."
+                    f"{hint}"
                 ),
                 requested_anchor=cleaned,
+                context="\n".join(
+                    _render_anchored(a, lines[a.line - 1])
+                    for a in scheme.generate_anchors(lines)[:4]
+                    if 0 < a.line <= len(lines)
+                )
+                or None,
+                context_start_line=1 if lines else None,
             )
         parsed = recovered
 
@@ -962,7 +994,10 @@ class HashlineEditTool:
         'replace {op, anchor, end_anchor?, content}, '
         'insert_after {op, anchor|"0:"|"EOF", content}, '
         "write {op, content} (sole op). Batch is atomic — all validate or none apply. "
-        "On success returns a fresh-anchor snippet; on stale anchors returns recovery context. "
+        "Anchors must be full LINE:HASH1:HASH2 (e.g. 22:abc:rst) copied from "
+        "hashline_read/grep BEFORE the arrow — never invent short hashes. "
+        "On success returns a fresh-anchor snippet; on stale/malformed anchors "
+        "returns recovery context with valid samples. "
         "Prefer: hashline_grep → hashline_edit for multi-hunk work."
     )
     parameters: Dict[str, Dict[str, Any]] = {

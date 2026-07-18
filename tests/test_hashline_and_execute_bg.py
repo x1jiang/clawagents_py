@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from clawagents.tools.exec import _format_nonzero_command_output, _git_not_a_repo_signal
 from clawagents.tools.hashline import (
     ChunkFingerprint,
     ParsedAnchor,
@@ -18,6 +19,24 @@ from clawagents.tools.hashline import (
     split_lines,
 )
 from clawagents.tools.filesystem import EditFileTool, _nearest_edit_hint
+
+
+def test_execute_git_not_a_repo_interpretation():
+    assert _git_not_a_repo_signal(
+        "git status",
+        128,
+        "",
+        "fatal: not a git repository (or any of the parent directories): .git",
+    )
+    blob = _format_nonzero_command_output(
+        "node --check a.js && git diff --stat",
+        128,
+        "",
+        "fatal: not a git repository (or any of the parent directories): .git",
+        "",
+    )
+    assert "not a git repository" in blob.lower()
+    assert "separate execute" in blob.lower() or "without chaining" in blob.lower()
 
 
 def test_line_hash_whitespace_normalization():
@@ -74,6 +93,22 @@ def test_stale_anchor_returns_recovery():
     assert new_content is None
     assert result["status"] == "error"
     assert result["error"] in {"anchor_stale", "ambiguous_anchor"}
+    assert "context" in result
+
+
+def test_malformed_anchor_suggests_valid_samples():
+    content = "alpha\nbeta\ngamma\n"
+    new_content, result = apply_edits(
+        content,
+        [{"op": "replace", "anchor": "ddg:ejc", "content": "BETA"}],
+        path="t.txt",
+    )
+    assert new_content is None
+    assert result["status"] == "error"
+    assert result["error"] == "invalid_input"
+    assert "Malformed anchor" in result["message"]
+    assert "LINE:HASH1:HASH2" in result["message"]
+    assert "Valid anchors from this file" in result["message"]
     assert "context" in result
 
 
