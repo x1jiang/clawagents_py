@@ -806,6 +806,7 @@ def create_claw_agent(
         context_window = _lc().context_window  # default: 1_000_000
 
     # ── Resolve optional provider profile before model construction ─────
+    provider_hint: Optional[str] = None
     if profile:
         from clawagents.provider_profiles import resolve_provider_profile
         resolved_profile = resolve_provider_profile(
@@ -820,11 +821,15 @@ def create_claw_agent(
         api_key = resolved_profile.api_key
         base_url = resolved_profile.base_url
         api_version = resolved_profile.api_version
+        # Declared profile provider drives routing/key fields (not re-inferred
+        # solely from the model string — aliases like internal-claude-* need this).
+        provider_hint = (resolved_profile.provider or "").strip() or None
 
     # ── Resolve model → LLMProvider ────────────────────────────────────
     llm = _resolve_model(
         model, streaming, api_key, context_window, max_tokens, temperature,
         base_url, api_version, reasoning_effort, wire_api, ssl_verify,
+        provider=provider_hint,
     )
 
     # ── Resolve fallback providers ──────────────────────────────────────
@@ -1308,13 +1313,19 @@ def _resolve_model(
     reasoning_effort: Optional[str] = None,
     wire_api: Optional[str] = None,
     ssl_verify: Optional[bool] = None,
+    provider: Optional[str] = None,
 ) -> LLMProvider:
     """Accept a model name string, an LLMProvider, or None (auto-detect)."""
     if isinstance(model, LLMProvider):
         return model
 
-    from clawagents.config.config import load_config, get_default_model, is_bedrock_model_id
+    from clawagents.config.config import load_config, get_default_model
     from clawagents.providers.llm import create_provider, normalize_reasoning_effort, _normalize_wire_api
+    from clawagents.providers.model_classify import (
+        api_key_field_for,
+        classify_model,
+        parse_model_ref,
+    )
 
     config = load_config()
     config.streaming = streaming
@@ -1336,32 +1347,27 @@ def _resolve_model(
         config.openai_ssl_verify = bool(ssl_verify)
 
     active_model = model if isinstance(model, str) and model else get_default_model(config)
+    kind = classify_model(
+        active_model,
+        base_url=config.openai_base_url,
+        provider_hint=provider,
+    )
 
-    # Override the appropriate API key if provided.
-    # Route by model family so a single ``api_key`` parameter targets the
-    # correct provider config field. Without this, e.g. a Claude key
-    # silently lands in ``openai_api_key`` and the Anthropic provider
-    # falls back to the env var.
+    # Override the appropriate API key if provided — driven by the classifier
+    # (and optional profile provider hint), not ad-hoc startswith checks.
     if api_key:
-        lower = active_model.lower()
-        if lower.startswith("gemini"):
+        field = api_key_field_for(kind, base_url=config.openai_base_url)
+        if field == "gemini_api_key":
             config.gemini_api_key = api_key
-        elif is_bedrock_model_id(active_model) and not config.openai_base_url:
-            # Native Bedrock uses the AWS credential chain (IAM / profile /
-            # env keys) — do not stash a placeholder in anthropic_api_key.
-            pass
-        elif (
-            (lower.startswith("claude") or lower.startswith("anthropic"))
-            and not config.openai_base_url
-        ):
+        elif field == "anthropic_api_key":
             config.anthropic_api_key = api_key
-        else:
-            # OpenAI, Ollama, Bedrock gateway, Azure, and other OpenAI-compatible
-            # endpoints (including anthropic.* model IDs with a custom base_url).
+        elif field == "openai_api_key":
             config.openai_api_key = api_key
+        # field is None → native Bedrock IAM; leave key fields alone.
 
-    provider = create_provider(active_model, config)
-    return provider
+    # Strip litellm ``provider/`` before the factory (SDK must not see it).
+    sdk_name = parse_model_ref(active_model).bare_id
+    return create_provider(sdk_name, config, provider_hint=provider or kind)
 
 
 def _resolve_system_prompt(

@@ -3061,13 +3061,13 @@ def mantle_openai_base_url(url: str) -> str:
 
 def is_mantle_anthropic_model(model: str) -> bool:
     """Claude IDs that must use Mantle ``/anthropic/v1/messages`` (not chat)."""
-    m = (model or "").strip().lower()
-    if m.startswith("bedrock/"):
-        m = m[len("bedrock/") :]
-    for prefix in ("us.", "eu.", "ap.", "global."):
-        if m.startswith(prefix):
-            m = m[len(prefix) :]
-            break
+    from clawagents.providers.model_classify import (
+        parse_model_ref,
+        strip_bedrock_geo_prefix,
+    )
+
+    m = parse_model_ref(model or "").bare_id.strip().lower()
+    m = strip_bedrock_geo_prefix(m).lower()
     return m.startswith("anthropic.") or m.startswith("claude")
 
 
@@ -3084,18 +3084,41 @@ def is_mantle_openai_responses_model(model: str) -> bool:
     return any(token in m for token in ("gpt-5.3", "gpt-5.4", "gpt-5.5", "gpt-5.6"))
 
 
-def create_provider(model_name: str, config: EngineConfig) -> LLMProvider:
+def create_provider(
+    model_name: str,
+    config: EngineConfig,
+    *,
+    provider_hint: str | None = None,
+) -> LLMProvider:
     """Create a single LLM provider inferred from model name.
 
     Clones ``config`` before mutating provider-specific fields so callers
     can safely reuse one ``EngineConfig`` across providers (e.g. main +
     advisor) or in concurrent flows without cross-talk.
+
+    LiteLLM-style ``provider/model`` prefixes are stripped before the SDK
+    sees the model id. Optional ``provider_hint`` (profile / settings)
+    overrides id-shape inference.
     """
-    from clawagents.config.config import is_bedrock_model_id, strip_bedrock_prefix
+    from clawagents.providers.model_classify import (
+        classify_model,
+        is_bedrock_model_id,
+        parse_model_ref,
+        strip_bedrock_prefix,
+    )
 
     config = config.model_copy()
+    ref = parse_model_ref(model_name)
+    # Never send ``anthropic/…`` / ``openai/…`` / ``bedrock/…`` literals to SDKs.
+    model_name = ref.bare_id
     lower = model_name.lower()
-    if lower.startswith("gemini"):
+    kind = classify_model(
+        ref.raw or model_name,
+        base_url=config.openai_base_url,
+        provider_hint=provider_hint or ref.prefix_hint,
+    )
+
+    if kind == "gemini" or lower.startswith("gemini"):
         if not _HAS_GEMINI:
             raise ImportError(
                 "google-genai package not installed. Install with: pip install clawagents[gemini]"
@@ -3107,9 +3130,8 @@ def create_provider(model_name: str, config: EngineConfig) -> LLMProvider:
     # Prefer OpenAI-compatible gateway when openai_base_url is set (BAG / LiteLLM).
     # Otherwise route Bedrock model IDs to AsyncAnthropicBedrock (Claude) or
     # Converse (Nova / Llama / GPT-OSS / …).
-    explicit_bedrock = lower.startswith("bedrock/")
-    bedrock_id = is_bedrock_model_id(model_name)
-    if (explicit_bedrock or bedrock_id) and not config.openai_base_url:
+    bedrock_id = kind == "bedrock" or is_bedrock_model_id(model_name)
+    if bedrock_id and not config.openai_base_url:
         model_id = strip_bedrock_prefix(model_name)
         config.bedrock_model = model_id
         if _is_bedrock_claude_model(model_id):
@@ -3145,7 +3167,7 @@ def create_provider(model_name: str, config: EngineConfig) -> LLMProvider:
         if _normalize_wire_api(config.openai_wire_api) == "auto":
             config.openai_wire_api = "chat_completions"
 
-    if lower.startswith("claude") or lower.startswith("anthropic"):
+    if kind == "anthropic" or lower.startswith("claude") or lower.startswith("anthropic"):
         # Bedrock Access Gateway / LiteLLM / other OpenAI-compatible proxies set
         # openai_base_url and speak the OpenAI protocol — do not send those
         # requests to Anthropic's native API (model IDs look like
@@ -3159,9 +3181,9 @@ def create_provider(model_name: str, config: EngineConfig) -> LLMProvider:
         # Fully-qualified Bedrock IDs without base_url already handled above.
         config.anthropic_model = model_name
         return AnthropicProvider(config)
-    if _looks_like_ollama(model_name):
-        # Strip the explicit ``ollama/`` routing prefix; Ollama serves the bare tag.
-        tag = model_name[len("ollama/"):] if lower.startswith("ollama/") else model_name
+    if kind == "ollama" or _looks_like_ollama(model_name) or ref.prefix_hint == "ollama":
+        # ``ollama/`` already stripped via parse_model_ref.
+        tag = model_name
         if not config.openai_base_url:
             config.openai_base_url = _OLLAMA_DEFAULT_BASE_URL
         if not config.openai_api_key:

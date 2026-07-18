@@ -194,7 +194,7 @@ def test_resolve_model_skips_anthropic_key_for_native_bedrock(monkeypatch):
     fake.name = "bedrock"
     captured: dict = {}
 
-    def _capture(model_name, config):
+    def _capture(model_name, config, **_kwargs):
         captured["anthropic_api_key"] = config.anthropic_api_key
         captured["model"] = model_name
         return fake

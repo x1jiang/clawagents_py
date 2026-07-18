@@ -82,11 +82,12 @@ class PromptHook:
         ``payload`` is the event-shape dict the runtime would otherwise pass
         to a shell-based hook. ``llm_resolver`` is a callable that, given a
         model spec, returns a runnable :class:`LLMProvider`. If ``None``,
-        falls back to ``clawagents.providers.llm._resolve_model`` with the
-        agent's existing config.
+        falls back to ``clawagents.agent._resolve_model`` with the agent's
+        existing config.
 
-        Always returns a verdict — never raises. On any error it logs and
-        FAILS OPEN.
+        Always returns a verdict — never raises. Transient LLM/timeout errors
+        FAIL OPEN. Failure to load the default resolver FAILS CLOSED so a
+        broken guardrail cannot silently allow everything.
         """
         import asyncio
 
@@ -94,6 +95,12 @@ class PromptHook:
             llm = await self._resolve_llm(llm_resolver)
         except Exception as e:
             logger.warning("PromptHook: failed to resolve model %r: %s", self.model, e)
+            if llm_resolver is None and isinstance(
+                e, (ImportError, AttributeError, TypeError)
+            ):
+                return PromptHookVerdict(
+                    ok=False, reason=f"failed-closed (no model): {e}"
+                )
             return PromptHookVerdict(ok=True, reason=f"failed-open (no model): {e}")
 
         full_prompt = self._render_prompt(payload)
@@ -131,14 +138,15 @@ class PromptHook:
                 pass
             return res
 
+        from clawagents.agent import _resolve_model
         from clawagents.config.config import load_config
-        from clawagents.providers.llm import _resolve_model  # type: ignore[attr-defined]
+
         load_config()  # side effect: discover .env so _resolve_model sees provider keys
         return _resolve_model(
-            self.model or "",
+            self.model or None,
             streaming=False,
-            api_key_override=None,
-            context_window_override=None,
+            api_key=None,
+            context_window=None,
         )
 
     def _render_prompt(self, payload: dict[str, Any]) -> str:

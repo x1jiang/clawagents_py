@@ -172,65 +172,31 @@ def load_config() -> EngineConfig:
     return cfg
 
 
-def is_gemini_model(model: str) -> bool:
-    return model.lower().startswith("gemini")
-
-
-def is_anthropic_model(model: str) -> bool:
-    return model.lower().startswith("claude") or model.lower().startswith("anthropic")
-
-
-def is_bedrock_model_id(model: str) -> bool:
-    """True for Amazon Bedrock model / inference-profile IDs.
-
-    Examples:
-      - bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0  (explicit prefix)
-      - anthropic.claude-3-5-sonnet-20241022-v2:0
-      - us.anthropic.claude-sonnet-4-5-20250929-v1:0
-      - amazon.nova-pro-v1:0
-      - openai.gpt-oss-120b-1:0
-    """
-    lower = (model or "").lower().strip()
-    if not lower:
-        return False
-    if lower.startswith("bedrock/"):
-        return True
-    # Cross-region / global inference profiles
-    if lower.startswith(("us.", "eu.", "apac.", "global.")):
-        return True
-    # Foundation model IDs: provider.model-name-version
-    for prefix in (
-        "anthropic.",
-        "amazon.",
-        "meta.",
-        "cohere.",
-        "mistral.",
-        "ai21.",
-        "deepseek.",
-        "openai.",  # Bedrock GPT-OSS
-        "qwen.",
-    ):
-        if lower.startswith(prefix):
-            return True
-    return False
-
-
-def strip_bedrock_prefix(model: str) -> str:
-    lower = (model or "").strip()
-    if lower.lower().startswith("bedrock/"):
-        return lower[len("bedrock/") :]
-    return lower
+# Re-export canonical classifiers (single source of truth).
+from clawagents.providers.model_classify import (  # noqa: E402
+    BEDROCK_GEO_PREFIXES,
+    is_anthropic_model,
+    is_bedrock_model_id,
+    is_gemini_model,
+    strip_bedrock_prefix,
+)
 
 
 def get_default_model(config: EngineConfig) -> str:
-    hint = os.getenv("PROVIDER", "").lower()
-    if hint == "bedrock" or hint == "aws":
+    """Pick a default model from ``PROVIDER=`` hint or available keys.
+
+    ``PROVIDER=anthropic|openai|gemini|bedrock|aws`` is honored even when the
+    matching API key is missing — same as Bedrock. A missing key fails later
+    at provider construction instead of silently routing to another vendor.
+    """
+    hint = os.getenv("PROVIDER", "").lower().strip()
+    if hint in ("bedrock", "aws"):
         return config.bedrock_model or "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
-    if hint == "gemini" and config.gemini_api_key:
+    if hint == "gemini":
         return config.gemini_model
-    if hint == "anthropic" and config.anthropic_api_key:
+    if hint == "anthropic":
         return config.anthropic_model
-    if hint == "openai" and config.openai_api_key:
+    if hint == "openai":
         return config.openai_model
     if config.openai_api_key:
         return config.openai_model

@@ -123,3 +123,32 @@ async def test_evaluate_fails_open_on_llm_error():
     )
     assert verdict.ok is True
     assert verdict.reason and "failed-open" in verdict.reason
+
+
+@pytest.mark.asyncio
+async def test_default_resolver_import_path_is_not_broken():
+    """Fallback path must import ``agent._resolve_model`` (not a missing llm symbol)."""
+    from clawagents.hooks import prompt_hook as ph
+
+    hook = PromptHook(prompt="block writes outside the repo", model="gpt-4o-mini")
+    # Resolve only — stub create_provider so we don't need live keys.
+    from unittest.mock import MagicMock, patch
+
+    fake = MagicMock()
+
+    async def _chat(*_a, **_k):
+        from clawagents.providers.llm import LLMResponse
+
+        return LLMResponse(
+            content='{"ok": false, "reason": "blocked"}',
+            model="stub",
+            tokens_used=1,
+        )
+
+    fake.chat = _chat
+    with patch("clawagents.providers.llm.create_provider", return_value=fake):
+        verdict = await hook.evaluate(payload={"tool": "write_file", "path": "/etc/passwd"})
+    assert verdict.ok is False
+    assert verdict.reason == "blocked"
+    # Ensure we never hit the old failed-open import error string.
+    assert "cannot import name '_resolve_model'" not in (verdict.reason or "")

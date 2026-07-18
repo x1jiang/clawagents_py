@@ -1,7 +1,7 @@
-"""Three-tier provider fallback with quarantine.
+"""Provider fallback with quarantine.
 
-Chain: primary → named fallback → global fallback list.
-Providers that fail consecutively get quarantined.
+Chain: primary → named fallbacks (skip quarantined). Providers that fail
+consecutively get quarantined until a health-check clears them.
 """
 
 from __future__ import annotations
@@ -192,6 +192,10 @@ class FallbackProvider(LLMProvider):
                         "No active fallback providers remaining.",
                     )
 
+        if last_exc is None:
+            raise RuntimeError(
+                "All providers are quarantined; no provider was attempted this round."
+            )
         raise RuntimeError(
             f"All providers failed. Last error: {last_exc!r}"
         ) from last_exc

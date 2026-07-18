@@ -1,6 +1,13 @@
 # ClawAgents Changelog
 
 
+### v6.20.10 — Provider/model resolution hardening (July 2026)
+
+- Canonical `providers.model_classify` (geo prefixes, LiteLLM `provider/` strip, key-field routing).
+- `PROVIDER=` env hint no longer silently falls through when the matching key is missing.
+- PromptHook default resolver imports `agent._resolve_model` (was fail-open on ImportError).
+- Profile `provider` drives routing; `apac.` Mantle strip fixed; FallbackProvider quarantine message clarified.
+
 ### v6.20.9 — Capabilities contract + workspace-scoped artifacts (July 2026)
 
 - `clawagents.capabilities` / capability flags for hosts (`gemini_array_items`, `workspace_scoped_agent`, `raw_tool_output`, `artifact_workspace_arg`).
