@@ -366,3 +366,66 @@ async def test_agent_as_tool_missing_task_arg():
     result = await tool.execute({"task": ""})
     assert result.success is False
     assert "missing" in (result.error or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_handoff_child_skips_session_end_tail(monkeypatch, tmp_path):
+    """Nested (handoff-child) runs must not run the session-end memory tail.
+
+    Regression: with ``memory_dream`` on, every handoff child appended a
+    session log and could fire dream consolidation — burning an extra LLM
+    call per child (it consumed scripted mock responses in tests) and
+    rewriting MEMORY.md from subagent context mid-parent-run.
+    """
+    from clawagents.config import features as feat
+    from clawagents.memory import dream as dream_mod
+
+    appended: list[Any] = []
+    dreamed: list[Any] = []
+    monkeypatch.setattr(
+        dream_mod, "append_session_log", lambda *a, **k: appended.append(a)
+    )
+
+    async def _no_dream(*a: Any, **k: Any):
+        dreamed.append(a)
+
+        class _Out:
+            ok = False
+            reason = "test"
+
+        return _Out()
+
+    monkeypatch.setattr(dream_mod, "run_dream", _no_dream)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CLAW_FEATURE_MEMORY_DREAM", "1")
+    feat.reset()
+    try:
+        target, target_llm = _build_target_agent("billing answer")
+        h = handoff(target)
+        parent_llm = _NativeMockLLM([
+            LLMResponse(
+                content="",
+                model="mock",
+                tokens_used=1,
+                tool_calls=[NativeToolCall(h.name, {"reason": "r"}, tool_call_id="c1")],
+            ),
+            LLMResponse(content="parent fallback", model="mock", tokens_used=1),
+        ])
+        state = await run_agent_graph(
+            "Help me with my bill",
+            parent_llm,
+            tools=ToolRegistry(),
+            streaming=False,
+            on_event=lambda k, d: None,
+            use_native_tools=True,
+            max_iterations=4,
+            handoffs=[h],
+        )
+        assert state.result == "billing answer"
+        # Child LLM saw exactly the one handoff turn — no dream call.
+        assert len(target_llm.received_messages) == 1
+        # Only the top-level parent run appended a session log.
+        assert len(appended) == 1
+    finally:
+        monkeypatch.delenv("CLAW_FEATURE_MEMORY_DREAM", raising=False)
+        feat.reset()

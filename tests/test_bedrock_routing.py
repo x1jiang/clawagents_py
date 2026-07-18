@@ -103,6 +103,67 @@ def test_create_provider_plain_claude_stays_anthropic():
     bedrock_ctor.assert_not_called()
 
 
+def test_create_provider_mantle_claude_uses_anthropic_messages():
+    from clawagents.providers import llm as llm_mod
+
+    cfg = EngineConfig(
+        openai_base_url="https://bedrock-mantle.us-east-1.api.aws/v1",
+        openai_api_key="mantle-key",
+        openai_wire_api="chat_completions",
+    )
+    fake = MagicMock()
+    fake.name = "anthropic"
+    with patch.object(llm_mod, "AnthropicProvider", return_value=fake) as ctor:
+        with patch.object(llm_mod, "OpenAIProvider") as openai_ctor:
+            provider = llm_mod.create_provider("anthropic.claude-haiku-4-5", cfg)
+    assert provider is fake
+    openai_ctor.assert_not_called()
+    passed = ctor.call_args[0][0]
+    assert passed.anthropic_api_key == "mantle-key"
+    assert passed.anthropic_model == "anthropic.claude-haiku-4-5"
+    assert (
+        passed.anthropic_base_url
+        == "https://bedrock-mantle.us-east-1.api.aws/anthropic"
+    )
+
+
+def test_create_provider_mantle_gpt56_uses_openai_responses():
+    from clawagents.providers import llm as llm_mod
+
+    cfg = EngineConfig(
+        openai_base_url="https://bedrock-mantle.us-east-1.api.aws/v1",
+        openai_api_key="mantle-key",
+        openai_wire_api="chat_completions",
+    )
+    fake = MagicMock()
+    fake.name = "openai"
+    with patch.object(llm_mod, "OpenAIProvider", return_value=fake) as ctor:
+        provider = llm_mod.create_provider("openai.gpt-5.6-sol", cfg)
+    assert provider is fake
+    passed = ctor.call_args[0][0]
+    assert passed.openai_base_url == "https://bedrock-mantle.us-east-1.api.aws/openai"
+    assert passed.openai_wire_api == "responses"
+    assert passed.openai_model == "openai.gpt-5.6-sol"
+
+
+def test_create_provider_mantle_gpt_oss_stays_chat():
+    from clawagents.providers import llm as llm_mod
+
+    cfg = EngineConfig(
+        openai_base_url="https://bedrock-mantle.us-east-1.api.aws/v1",
+        openai_api_key="mantle-key",
+        openai_wire_api="auto",
+    )
+    fake = MagicMock()
+    fake.name = "openai"
+    with patch.object(llm_mod, "OpenAIProvider", return_value=fake) as ctor:
+        provider = llm_mod.create_provider("openai.gpt-oss-20b", cfg)
+    assert provider is fake
+    passed = ctor.call_args[0][0]
+    assert passed.openai_base_url == "https://bedrock-mantle.us-east-1.api.aws/v1"
+    assert passed.openai_wire_api == "chat_completions"
+
+
 def test_bedrock_profile_is_native():
     from clawagents.provider_profiles import resolve_provider_profile
 

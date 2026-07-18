@@ -40,6 +40,24 @@ class PermissionRule:
 
 _DECISION_RANK = {"deny": 3, "ask": 2, "allow": 1}
 
+# Filesystem writers that share one security class with write_file/edit_file.
+# Mirrors the file-writing members of
+# ``clawagents.permissions.mode.WRITE_CLASS_TOOLS`` (kept as a local literal to
+# avoid an import cycle; the test suite asserts the two stay in sync). Execute,
+# git and subagent tools are deliberately excluded — they are gated elsewhere.
+_FS_WRITE_TOOLS = frozenset({
+    "write_file",
+    "edit_file",
+    "apply_patch",
+    "hashline_edit",
+    "create_file",
+    "replace_in_file",
+    "insert_in_file",
+    "insert_lines",
+    "patch_file",
+    "delete_file",
+})
+
 
 class PermissionEngine:
     """Declarative permission engine.
@@ -78,7 +96,13 @@ class PermissionEngine:
         names = [tool_name]
         if tool_name in {"execute", "bash", "shell"}:
             names.extend(["execute", "Bash", "bash", "shell"])
-        if tool_name in {"write_file", "edit_file", "apply_patch"}:
+        # Every filesystem writer is one security class: a rule written against
+        # the common ``write_file``/``edit_file`` names (including the default
+        # secret-path deny/ask rules) must also gate the newer writers
+        # (hashline_edit, create_file, delete_file, …). Without this, those
+        # tools fall through to the ``allow`` default and can write ``.env`` /
+        # ``**/credentials*`` that write_file/edit_file are denied from touching.
+        if tool_name in _FS_WRITE_TOOLS:
             names.extend(["Edit", "Write", "edit_file", "write_file"])
         return names
 

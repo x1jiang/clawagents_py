@@ -41,6 +41,37 @@ EXCLUDED_STATE_KEYS: frozenset[str] = frozenset({
 _credential_proxy_env_lock = asyncio.Lock()
 
 
+def _pin_llm_model(llm: LLMProvider, model: str) -> LLMProvider:
+    """Return a provider clone that calls ``model`` instead of the parent's default."""
+    if not model:
+        return llm
+    if getattr(llm, "model", None) == model:
+        return llm
+    try:
+        from clawagents.providers.fallback import FallbackProvider
+
+        if isinstance(llm, FallbackProvider):
+            return FallbackProvider(
+                _pin_llm_model(llm.primary, model),
+                [_pin_llm_model(f, model) for f in llm.fallbacks],
+                quarantine_threshold=llm.quarantine_threshold,
+                health_check_interval_s=llm.health_check_interval_s,
+                on_event=llm.on_event,
+            )
+    except Exception:
+        pass
+    if hasattr(llm, "model"):
+        import copy
+
+        pinned = copy.copy(llm)
+        pinned.model = model
+        return pinned
+    from clawagents.config.config import load_config
+    from clawagents.providers.llm import create_provider
+
+    return create_provider(model, load_config())
+
+
 async def _fire_parent_hook(
     run_context: Optional[RunContext],
     method_name: str,
@@ -316,12 +347,18 @@ class TaskTool:
                         "ANTHROPIC_API_KEY": "proxy",
                     }
 
+            child_llm = (
+                _pin_llm_model(self._llm, resolved.model)
+                if resolved.model
+                else self._llm
+            )
+
             # Build kwargs, stripping any parent-context keys to keep the
             # child agent isolated (M1: subagent state isolation).
             run_kwargs: Dict[str, Any] = {
                 k: v for k, v in {
                     "task": description,
-                    "llm": self._llm,
+                    "llm": child_llm,
                     "tools": child_tools,
                     "system_prompt": effective_prompt,
                     "max_iterations": effective_max_iter,
@@ -374,8 +411,18 @@ class TaskTool:
             child_ctx._metadata["workspace"] = child_workspace
             child_ctx._metadata["isolation"] = resolved.isolation
             child_ctx._metadata["subagent_type"] = resolved.type
-            if resolved.model:
-                child_ctx._metadata["model_pin"] = resolved.model
+            if run_context is not None:
+                parent_on_event = getattr(run_context, "on_event", None)
+                if callable(parent_on_event):
+                    child_ctx.on_event = parent_on_event
+                parent_session_id = getattr(run_context, "session_id", None) or (
+                    run_context._metadata.get("session_id")
+                    if isinstance(getattr(run_context, "_metadata", None), dict)
+                    else None
+                )
+                if parent_session_id:
+                    child_ctx.session_id = str(parent_session_id)
+                    child_ctx._metadata["session_id"] = str(parent_session_id)
             # Forward parent gates so the child is not ungated.
             if run_context is not None and isinstance(run_context._metadata, dict):
                 parent_meta = run_context._metadata
@@ -397,6 +444,8 @@ class TaskTool:
                         "taxonomy_dispatcher"
                     ]
             run_kwargs["run_context"] = child_ctx
+            # Subagent completion is not a session end: no session log, no dream.
+            run_kwargs["session_end_tail"] = False
 
             parent_name = "ClawAgent"
             child_label = resolved.type

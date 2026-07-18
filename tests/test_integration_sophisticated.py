@@ -792,10 +792,19 @@ class TestAutoDiscoveryWithFactory:
             assert "use_skill" in tool_names  # auto-discovered skills
             assert "list_skills" in tool_names  # overflow catalog tool
 
-            # Verify hooks can be applied
+            # Verify hooks can be applied. On a factory agent, block_tools
+            # composes with (not replaces) the permission/plan-mode gate, so the
+            # result is a HookResult, not a bare bool — see block_tools docstring.
+            # (Replacing the gate was a security footgun fixed in v6.20.5.)
             agent.block_tools("execute")
             agent.inject_context("Review code carefully")
             agent.truncate_output(2000)
 
-            assert agent.before_tool("execute", {}) is False
-            assert agent.before_tool("calculate", {}) is True
+            def _blocked(r):
+                return r is False or getattr(r, "allowed", None) is False
+
+            def _ok(r):
+                return r is True or getattr(r, "allowed", None) is True
+
+            assert _blocked(agent.before_tool("execute", {}))
+            assert _ok(agent.before_tool("calculate", {}))

@@ -7,6 +7,8 @@ heuristic and logs a one-time warning.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import math
 import warnings
@@ -102,12 +104,40 @@ def count_tokens(text: str, model: str | None = None) -> int:
     return math.ceil(len(text) / _CHARS_PER_TOKEN_FALLBACK)
 
 
+# Per-message content token cache (hash → tokens). Cleared when it grows too large.
+_CONTENT_TOKEN_CACHE: dict[tuple[Any, ...], int] = {}
+_CONTENT_TOKEN_CACHE_MAX = 4096
+
+
+def _content_cache_key(
+    content: str | list[dict[str, Any]],
+    model: str | None,
+    multiplier: float,
+) -> tuple[Any, ...]:
+    if isinstance(content, str):
+        payload = content
+    else:
+        payload = json.dumps(content, sort_keys=True, default=str)
+    digest = hashlib.sha256(payload.encode("utf-8", "surrogatepass")).hexdigest()[:32]
+    return (digest, model or "", round(float(multiplier), 6))
+
+
+def clear_token_cache() -> None:
+    """Clear memoized per-message token counts (mainly for tests)."""
+    _CONTENT_TOKEN_CACHE.clear()
+
+
 def count_tokens_content(
     content: str | list[dict[str, Any]],
     model: str | None = None,
     multiplier: float = 1.0,
 ) -> int:
     """Count tokens for a message content field (str or multimodal list)."""
+    cache_key = _content_cache_key(content, model, multiplier)
+    cached = _CONTENT_TOKEN_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
     if isinstance(content, str):
         base = count_tokens(content, model)
     else:
@@ -126,19 +156,34 @@ def count_tokens_content(
             if p.get("type") == "file"
         )
         base = count_tokens(text, model) + image_count * 500 + file_b64_len // 32
-    return math.ceil(base * multiplier)
+    result = math.ceil(base * multiplier)
+    if len(_CONTENT_TOKEN_CACHE) >= _CONTENT_TOKEN_CACHE_MAX:
+        _CONTENT_TOKEN_CACHE.clear()
+    _CONTENT_TOKEN_CACHE[cache_key] = result
+    return result
 
 
 def count_messages_tokens(
     messages: list["LLMMessage"],
     model: str | None = None,
     multiplier: float = 1.0,
+    *,
+    cached_system_tokens: int | None = None,
 ) -> int:
     """Count total tokens across a list of LLMMessage objects.
 
     Adds per-message overhead (~4 tokens for role/delimiters).
+    When ``cached_system_tokens`` is set, reuses that count for the first
+    system message instead of re-tokenizing its (usually static) body.
     """
     total = 0
-    for m in messages:
-        total += count_tokens_content(m.content, model, multiplier) + _PER_MESSAGE_OVERHEAD
+    for i, m in enumerate(messages):
+        if (
+            i == 0
+            and m.role == "system"
+            and cached_system_tokens is not None
+        ):
+            total += cached_system_tokens + _PER_MESSAGE_OVERHEAD
+        else:
+            total += count_tokens_content(m.content, model, multiplier) + _PER_MESSAGE_OVERHEAD
     return total

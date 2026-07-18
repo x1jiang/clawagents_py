@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import re
 import shlex
 import shutil
 import tempfile
@@ -12,6 +13,23 @@ from pathlib import Path
 from typing import Any, Literal
 
 BackendName = Literal["local", "docker", "seatbelt", "bwrap"]
+
+# Secret files denied for read+write under a fail-closed sandbox. Kept in sync
+# with the rewind watcher's ``is_secret_or_ignored_path`` (private keys, PKCS
+# bundles). ``**/`` variants match nested files; the matcher's basename check
+# and the seatbelt regex also cover the top-level occurrence.
+_DEFAULT_SECRET_GLOBS: tuple[str, ...] = (
+    ".env",
+    ".env.*",
+    "**/credentials*",
+    "**/secrets*",
+    "**/*.pem",
+    "**/*.key",
+    "**/*.p12",
+    "**/*.pfx",
+    "**/id_rsa",
+    "**/id_ed25519",
+)
 
 
 @dataclass(frozen=True)
@@ -27,9 +45,7 @@ class OSSandboxProfile:
     # When True, missing seatbelt/bwrap raises instead of soft-fallback.
     require_binary: bool = False
     # Paths denied for read+write (secret files) when fail-closed sandbox is on.
-    secret_deny_paths: tuple[str, ...] = (
-        ".env", ".env.*", "**/credentials*", "**/secrets*", "**/*.pem",
-    )
+    secret_deny_paths: tuple[str, ...] = _DEFAULT_SECRET_GLOBS
     auto_allow_bash: bool = False
 
 
@@ -95,7 +111,7 @@ _BUILTIN: dict[str, OSSandboxProfile] = {
 
 
 def _default_secret_globs() -> tuple[str, ...]:
-    return (".env", ".env.*", "**/credentials*", "**/secrets*", "**/*.pem")
+    return _DEFAULT_SECRET_GLOBS
 
 
 def _path_matches_secret_globs(
@@ -112,7 +128,11 @@ def _path_matches_secret_globs(
     rel_posix = rel.replace(os.sep, "/")
     for pattern in secret_globs:
         pat = pattern.replace("\\", "/")
-        if fnmatch.fnmatch(name, pat.lstrip("*/")) or fnmatch.fnmatch(rel_posix, pat):
+        # Match the glob's basename against the file's basename so a top-level
+        # ``key.pem`` is caught, not only ``sub/key.pem``. ``pat.lstrip("*/")``
+        # used to reduce ``**/*.pem`` to the literal ``.pem`` (matching no real
+        # file); ``os.path.basename`` yields ``*.pem`` which fnmatch honours.
+        if fnmatch.fnmatch(name, os.path.basename(pat)) or fnmatch.fnmatch(rel_posix, pat):
             return True
         if pat in {".env", "credentials", "secrets"} and (
             name == pat or name.startswith(pat + ".")
@@ -241,6 +261,27 @@ def list_profiles() -> list[OSSandboxProfile]:
     return [_BUILTIN[k] for k in sorted(_BUILTIN)]
 
 
+def _seatbelt_basename_regex(glob: str) -> str:
+    """Convert a secret glob to an anchored SBPL path-regex fragment.
+
+    Mirrors ``_path_matches_secret_globs``: match the glob's basename component
+    against any file under the workspace subtree (``([^/]+/)*`` = zero or more
+    intermediate dirs), so both top-level ``key.pem`` and nested
+    ``sub/key.pem`` are covered. The caller prepends the (regex-escaped)
+    workspace root and wraps the result for ``(regex #"…")``.
+    """
+    base = os.path.basename(glob.replace("\\", "/").rstrip("/")) or glob
+    frag = []
+    for ch in base:
+        if ch == "*":
+            frag.append("[^/]*")
+        elif ch == "?":
+            frag.append("[^/]")
+        else:
+            frag.append(re.escape(ch))
+    return "([^/]+/)*" + "".join(frag)
+
+
 def _seatbelt_profile_text(
     *,
     cwd: str,
@@ -253,40 +294,61 @@ def _seatbelt_profile_text(
     ``(allow default)`` alone would still permit arbitrary writes — we always
     deny ``file-write*`` first, then re-allow only workspace (+ temp), matching
     Grok-style path enforcement rather than soft allow-default writes.
+
+    SBPL is **last-match-wins**, so the secret deny rules are emitted *after*
+    the workspace write-allow — otherwise the trailing ``(allow file-write*
+    (subpath cwd))`` would silently override every secret write-deny. Secrets
+    are matched by regex against the resolved path (literals only ever caught
+    one exact filename and the old glob→literal reduction produced names like
+    ``.pem``/``credentials`` that match no real file).
     """
-    safe = cwd.replace("\\", "\\\\").replace('"', '\\"')
-    tmp = tempfile.gettempdir().replace("\\", "\\\\").replace('"', '\\"')
+    # Seatbelt canonicalises paths (resolves symlinks) before matching, so the
+    # profile must anchor on the *real* path the child sees — e.g. macOS maps
+    # ``/var/…`` → ``/private/var/…``. Emit both the real and abspath forms of
+    # each root for allows and denies so neither can be bypassed via the
+    # alternate spelling.
+    def _roots(p: str) -> list[str]:
+        seen: list[str] = []
+        for form in (os.path.realpath(p), os.path.abspath(p)):
+            if form not in seen:
+                seen.append(form)
+        return seen
+
+    def _sb_str(s: str) -> str:
+        # SBPL string literal: only backslash and double-quote need escaping.
+        return s.replace("\\", "\\\\").replace('"', '\\"')
+
+    cwd_roots = _roots(cwd)
+    tmp_roots = _roots(tempfile.gettempdir())
     lines = [
         "(version 1)",
         "(allow default)",
         "(deny file-write*)",
     ]
-    # Fail-closed secret reads: deny literal .env-class files under workspace.
-    for glob in secret_deny_paths or ():
-        base = glob.replace("**/", "").replace("*", "")
-        if not base or "/" in base.strip("."):
-            # Only emit simple basename literals for seatbelt (full glob
-            # expansion is Linux/bwrap's job).
-            if glob in {".env", "credentials", "secrets"} or glob.startswith(".env"):
-                lit = f"{safe}/{glob}".replace("\\", "\\\\").replace('"', '\\"')
-                lines.append(f'(deny file-read* (literal "{lit}"))')
-                lines.append(f'(deny file-write* (literal "{lit}"))')
-            continue
-        lit = f'{safe}/{base}'.replace("\\", "\\\\").replace('"', '\\"')
-        lines.append(f'(deny file-read* (literal "{lit}"))')
-        lines.append(f'(deny file-write* (literal "{lit}"))')
-    # Always deny workspace/.env when secrets enabled
-    if secret_deny_paths:
-        env_lit = f'{safe}/.env'.replace("\\", "\\\\").replace('"', '\\"')
-        lines.append(f'(deny file-read* (literal "{env_lit}"))')
-        lines.append(f'(deny file-write* (literal "{env_lit}"))')
     if not network:
         lines.append("(deny network*)")
     if read_only:
         lines.append('(allow file-write-data (literal "/dev/null"))')
     else:
-        lines.append(f'(allow file-write* (subpath "{safe}"))')
-        lines.append(f'(allow file-write* (subpath "{tmp}"))')
+        for root in cwd_roots + tmp_roots:
+            lines.append(f'(allow file-write* (subpath "{_sb_str(root)}"))')
+    # Secret deny rules LAST so they win over the workspace write-allow above
+    # (SBPL is last-match-wins). Regexes keep single backslashes: inside a
+    # ``#"…"`` literal only ``"`` needs escaping, so the regex ``\.env`` is
+    # written verbatim (double-escaping produced ``\\.env`` which matched
+    # nothing).
+    if secret_deny_paths:
+        emitted: set[str] = set()
+        for root in cwd_roots:
+            root_re = re.escape(root)
+            for glob in secret_deny_paths:
+                pattern = f'^{root_re}/{_seatbelt_basename_regex(glob)}$'
+                if pattern in emitted:
+                    continue
+                emitted.add(pattern)
+                sb = pattern.replace('"', '\\"')
+                lines.append(f'(deny file-read* (regex #"{sb}"))')
+                lines.append(f'(deny file-write* (regex #"{sb}"))')
     return "\n".join(lines) + "\n"
 
 

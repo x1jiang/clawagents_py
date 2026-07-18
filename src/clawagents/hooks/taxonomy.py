@@ -169,6 +169,29 @@ def validate_hook_url(url: str) -> tuple[bool, str]:
     return target is not None, reason
 
 
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS connection dialed to a pinned IP with SNI/cert checks for the real host.
+
+    ``HTTPSConnection`` has no ``server_hostname`` parameter, so pinning must
+    override ``connect()``: dial the IP, then TLS-wrap with the original
+    hostname so SNI and certificate verification still match the host.
+    """
+
+    def __init__(self, ip: str, port: int, *, sni_host: str, timeout: float, context: ssl.SSLContext):
+        super().__init__(ip, port, timeout=timeout, context=context)
+        self._sni_host = sni_host
+
+    def connect(self) -> None:
+        sock = socket.create_connection(
+            (self.host, self.port), self.timeout, self.source_address
+        )
+        try:
+            self.sock = self._context.wrap_socket(sock, server_hostname=self._sni_host)
+        except BaseException:
+            sock.close()
+            raise
+
+
 def _post_hook_pinned(
     target: HookPinnedTarget,
     data: bytes,
@@ -182,13 +205,12 @@ def _post_hook_pinned(
         "Connection": "close",
         "Accept-Encoding": "identity",
     }
-    ctx = ssl.create_default_context()
-    conn = http.client.HTTPSConnection(
+    conn = _PinnedHTTPSConnection(
         target.ip,
         target.port,
+        sni_host=target.host,
         timeout=max(0.5, timeout_s),
-        context=ctx,
-        server_hostname=target.host,
+        context=ssl.create_default_context(),
     )
     try:
         conn.request("POST", target.path, body=data, headers=headers)

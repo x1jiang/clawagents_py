@@ -12,7 +12,12 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import os
+from contextlib import contextmanager
+from typing import Iterator
+
+logger = logging.getLogger(__name__)
 
 
 # ─── Feature Registry ─────────────────────────────────────────────────────
@@ -99,6 +104,7 @@ _FEATURE_DEFAULTS: dict[str, str] = {
     "hook_taxonomy":        "0",   # Opt-in; requires external_hooks too (was RCE default-on)
     "sandbox_fail_closed":  "0",   # Refuse soft-fallback; secret path deny binds
     "provider_circuit_breaker": "0",  # Off by default — concurrency burns retries on BreakerOpen
+    "tool_error_traceback": "0",   # Include short traceback in ToolResult.error (also CLAW_DEBUG)
 }
 
 
@@ -150,9 +156,41 @@ def reset() -> None:
     _resolved = None
 
 def set_overrides(overrides: dict[str, bool]) -> None:
-    """Explicitly override feature flags (useful for constructor injection)."""
+    """Explicitly override feature flags (useful for constructor injection).
+
+    Unknown flag names are applied but logged at WARNING — a typo like
+    ``micro_compat`` (for ``micro_compact``) is otherwise a silent no-op that
+    leaves the developer believing they toggled a feature they didn't.
+    """
     global _resolved
     if _resolved is None:
         _resolved = _resolve_features()
+    unknown = [k for k in overrides if k not in _FEATURE_DEFAULTS]
+    if unknown:
+        logger.warning(
+            "set_overrides: unknown feature flag(s) %s — check spelling against "
+            "clawagents.config.features._FEATURE_DEFAULTS (known: %s)",
+            ", ".join(sorted(unknown)),
+            ", ".join(sorted(_FEATURE_DEFAULTS)),
+        )
     for k, v in overrides.items():
         _resolved[k] = bool(v)
+
+
+@contextmanager
+def temporary_overrides(overrides: dict[str, bool]) -> Iterator[None]:
+    """Apply feature overrides for a scope, restoring prior values on exit.
+
+    ``run_agent_graph(features=...)`` uses this so per-invoke flags do not
+    leak into subsequent runs in the same process.
+    """
+    global _resolved
+    if _resolved is None:
+        _resolved = _resolve_features()
+    prior = dict(_resolved)
+    set_overrides(overrides)
+    try:
+        yield
+    finally:
+        _resolved.clear()
+        _resolved.update(prior)

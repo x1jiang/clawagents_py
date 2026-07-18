@@ -121,6 +121,7 @@ async def run_forked_agent(
         trajectory=False,
         learn=False,
         rethink=False,
+        session_end_tail=False,
     )
 
     return state

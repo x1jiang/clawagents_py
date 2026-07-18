@@ -38,7 +38,7 @@ Example
     await run_agent_graph(
         ...,
         run_context=rc,
-        run_hooks=SteerHook(),
+        hooks=SteerHook(),
     )
 """
 

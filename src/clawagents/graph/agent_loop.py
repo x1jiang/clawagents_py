@@ -604,8 +604,19 @@ def _estimate_tokens(content: str | list[dict], multiplier: float = 1.0, model: 
     return count_tokens_content(content, model=model, multiplier=multiplier)
 
 
-def _estimate_messages_tokens(messages: list[LLMMessage], multiplier: float = 1.0, model: str | None = None) -> int:
-    return _count_messages_tokens(messages, model=model, multiplier=multiplier)
+def _estimate_messages_tokens(
+    messages: list[LLMMessage],
+    multiplier: float = 1.0,
+    model: str | None = None,
+    *,
+    cached_system_tokens: int | None = None,
+) -> int:
+    return _count_messages_tokens(
+        messages,
+        model=model,
+        multiplier=multiplier,
+        cached_system_tokens=cached_system_tokens,
+    )
 
 
 # ─── Tool Argument Truncation in Old Messages (learned from deepagents) ───
@@ -2326,6 +2337,141 @@ async def run_agent_graph(
     llm: LLMProvider,
     tools: Optional[ToolRegistry] = None,
     system_prompt: Optional[str] = None,
+    max_iterations: int = 200,
+    streaming: bool = True,
+    context_window: int = 1_000_000,
+    on_event: Optional[OnEvent] = None,
+    before_llm: Optional[BeforeLLMHook] = None,
+    before_tool: Optional[BeforeToolHook] = None,
+    after_tool: Optional[AfterToolHook] = None,
+    use_native_tools: bool = True,
+    trajectory: bool = False,
+    rethink: bool = False,
+    learn: bool = False,
+    atlas: bool = False,  # deprecated no-op (ATLAS removed)
+    atlas_config: Optional[Any] = None,  # deprecated no-op
+    preview_chars: int = 120,
+    response_chars: int = 500,
+    timeout_s: float = 0,
+    features: Optional[dict[str, bool]] = None,
+    advisor_llm: Optional[LLMProvider] = None,
+    advisor_max_calls: int = 3,
+    # ── New, fully backward-compatible keyword-only parameters ──
+    run_context: Optional[RunContext] = None,
+    user_context: Any = None,
+    hooks: Optional[RunHooks] = None,
+    agent_hooks: Optional[AgentHooks] = None,
+    input_guardrails: Optional[list[InputGuardrail]] = None,
+    output_guardrails: Optional[list[OutputGuardrail]] = None,
+    output_type: Optional[type] = None,
+    on_stream_event: Optional[Callable[[StreamEvent], None]] = None,
+    session: Optional[Any] = None,  # clawagents.session.Session protocol
+    session_preload_limit: int | None = 200,
+    handoffs: Optional[list[Handoff]] = None,
+    agent_name: Optional[str] = None,
+    action_mode: str = "tools",
+    approval_handler: Any = None,
+    require_approval_tools: Optional[list[str]] = None,
+    image_blocks: Optional[list[dict]] = None,
+    file_blocks: Optional[list[dict]] = None,
+    session_end_tail: bool = True,
+) -> AgentState:
+    """Single ReAct loop: LLM → tools → LLM → tools → ... → final answer."""
+    if features is not None:
+        from clawagents.config.features import temporary_overrides
+
+        with temporary_overrides(features):
+            return await _run_agent_graph_core(
+                task=task,
+                llm=llm,
+                tools=tools,
+                system_prompt=system_prompt,
+                max_iterations=max_iterations,
+                streaming=streaming,
+                context_window=context_window,
+                on_event=on_event,
+                before_llm=before_llm,
+                before_tool=before_tool,
+                after_tool=after_tool,
+                use_native_tools=use_native_tools,
+                trajectory=trajectory,
+                rethink=rethink,
+                learn=learn,
+                atlas=atlas,
+                atlas_config=atlas_config,
+                preview_chars=preview_chars,
+                response_chars=response_chars,
+                timeout_s=timeout_s,
+                advisor_llm=advisor_llm,
+                advisor_max_calls=advisor_max_calls,
+                run_context=run_context,
+                user_context=user_context,
+                hooks=hooks,
+                agent_hooks=agent_hooks,
+                input_guardrails=input_guardrails,
+                output_guardrails=output_guardrails,
+                output_type=output_type,
+                on_stream_event=on_stream_event,
+                session=session,
+                session_preload_limit=session_preload_limit,
+                handoffs=handoffs,
+                agent_name=agent_name,
+                action_mode=action_mode,
+                approval_handler=approval_handler,
+                require_approval_tools=require_approval_tools,
+                image_blocks=image_blocks,
+                file_blocks=file_blocks,
+                session_end_tail=session_end_tail,
+            )
+    return await _run_agent_graph_core(
+        task=task,
+        llm=llm,
+        tools=tools,
+        system_prompt=system_prompt,
+        max_iterations=max_iterations,
+        streaming=streaming,
+        context_window=context_window,
+        on_event=on_event,
+        before_llm=before_llm,
+        before_tool=before_tool,
+        after_tool=after_tool,
+        use_native_tools=use_native_tools,
+        trajectory=trajectory,
+        rethink=rethink,
+        learn=learn,
+        atlas=atlas,
+        atlas_config=atlas_config,
+        preview_chars=preview_chars,
+        response_chars=response_chars,
+        timeout_s=timeout_s,
+        advisor_llm=advisor_llm,
+        advisor_max_calls=advisor_max_calls,
+        run_context=run_context,
+        user_context=user_context,
+        hooks=hooks,
+        agent_hooks=agent_hooks,
+        input_guardrails=input_guardrails,
+        output_guardrails=output_guardrails,
+        output_type=output_type,
+        on_stream_event=on_stream_event,
+        session=session,
+        session_preload_limit=session_preload_limit,
+        handoffs=handoffs,
+        agent_name=agent_name,
+        action_mode=action_mode,
+        approval_handler=approval_handler,
+        require_approval_tools=require_approval_tools,
+        image_blocks=image_blocks,
+        file_blocks=file_blocks,
+        session_end_tail=session_end_tail,
+    )
+
+
+async def _run_agent_graph_core(
+    task: str,
+    llm: LLMProvider,
+    tools: Optional[ToolRegistry] = None,
+    system_prompt: Optional[str] = None,
     max_iterations: int = MAX_TOOL_ROUNDS,
     streaming: bool = True,
     context_window: int = 1_000_000,
@@ -2363,12 +2509,9 @@ async def run_agent_graph(
     require_approval_tools: Optional[list[str]] = None,
     image_blocks: Optional[list[dict]] = None,
     file_blocks: Optional[list[dict]] = None,
+    session_end_tail: bool = True,
 ) -> AgentState:
-    """Single ReAct loop: LLM → tools → LLM → tools → ... → final answer."""
-    if features is not None:
-        from clawagents.config.features import set_overrides
-        set_overrides(features)
-
+    """Internal ReAct loop body (feature overrides applied by :func:`run_agent_graph`)."""
     registry = tools or ToolRegistry()
     action_mode_norm = action_mode if action_mode in ("tools", "code") else "tools"
     require_approval_set = {
@@ -2426,6 +2569,15 @@ async def run_agent_graph(
         run_context = RunContext(context=user_context)
     elif user_context is not None and run_context.context is None:
         run_context.context = user_context
+    # Tools (execute streaming, skills) read callbacks/metadata from run_context.
+    run_context.on_event = emit
+    # Ephemeral id for ${SESSION_ID} skill substitutions when persistence is off.
+    if not getattr(run_context, "session_id", None):
+        import uuid as _uuid
+
+        _ephemeral_sid = f"run-{_uuid.uuid4().hex[:12]}"
+        run_context.session_id = _ephemeral_sid
+        run_context._metadata["session_id"] = _ephemeral_sid
     usage = run_context.usage
 
     # Per-agent iteration budget (Hermes parity). If the caller has not
@@ -2558,6 +2710,8 @@ async def run_agent_graph(
     if _feat_enabled("session_persistence"):
         from clawagents.session.persistence import SessionWriter
         session_writer = SessionWriter()
+        run_context.session_id = session_writer.session_id
+        run_context._metadata["session_id"] = session_writer.session_id
         emit("context", {"message": f"session: {session_writer.session_id} → {session_writer.path}"})
 
     # Feature: External Hooks — load shell hooks from .clawagents/hooks.json or env
@@ -2777,6 +2931,14 @@ async def run_agent_graph(
     if messages:
         _cached_sys_tokens = _estimate_tokens(messages[0].content)
         emit("context", {"message": f"system prompt: ~{_cached_sys_tokens} tokens (cached for budget calc)"})
+
+    def _budget_tokens(msgs: list[LLMMessage], mult: float | None = None) -> int:
+        return _estimate_messages_tokens(
+            msgs,
+            mult if mult is not None else token_multiplier,
+            resolved_model_name,
+            cached_system_tokens=_cached_sys_tokens or None,
+        )
 
     state = AgentState(
         messages=messages,
@@ -3067,7 +3229,7 @@ async def run_agent_graph(
                 else _MICRO_COMPACT_MIN_USAGE_RATIO
             )
             if (
-                _estimate_messages_tokens(messages, token_multiplier)
+                _budget_tokens(messages)
                 > context_window * _mc_ratio
             ):
                 messages = _micro_compact_tool_results(messages, keep_recent=_mc_keep)
@@ -3230,7 +3392,7 @@ async def run_agent_graph(
                         state.result = str(err)
                         break
                     observed_ratio = context_window / max(
-                        _estimate_messages_tokens(messages, 1.0), 1,
+                        _budget_tokens(messages, 1.0), 1,
                     )
                     token_multiplier = min(observed_ratio * 1.1, 3.0)
                     # Also shrink the effective window: the multiplier is
@@ -3672,6 +3834,7 @@ async def run_agent_graph(
                                 run_context=run_context,
                                 session=_TransientSession(preload) if preload else None,
                                 on_stream_event=on_stream_event,
+                                session_end_tail=False,
                             )
                         except Exception as run_err:
                             emit("warn", {"message": f"handoff target raised: {run_err}"})
@@ -4917,7 +5080,11 @@ async def run_agent_graph(
 
             _ws = _os.getcwd()
 
-        if _feat_dream("memory_dream") or _feat_dream("smart_memory"):
+        # Nested runs (handoff children, subagents, forks) are not session
+        # ends: they must not append session logs or trigger dream — a dream
+        # here burns an extra LLM call per child and rewrites MEMORY.md from
+        # subagent context mid-parent-run.
+        if session_end_tail and (_feat_dream("memory_dream") or _feat_dream("smart_memory")):
             from clawagents.memory.dream import (
                 append_session_log,
                 check_dream_gates,
@@ -4930,7 +5097,7 @@ async def run_agent_graph(
             _log_body = f"## Task\n{(task or '')[:4000]}\n\n## Outcome\n{state.status}\n\n## Result\n{(state.result or '')[:8000]}"
             append_session_log(_log_body, workspace=_ws, stem=_stem)
 
-        if _feat_dream("memory_dream"):
+        if session_end_tail and _feat_dream("memory_dream"):
             _gate = check_dream_gates(_ws)
             if not isinstance(_gate, str):
 

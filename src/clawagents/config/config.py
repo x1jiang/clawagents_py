@@ -135,6 +135,8 @@ class EngineConfig(BaseSettings):
     gemini_model: str = "gemini-3-flash-preview"
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-sonnet-4-5"
+    # Optional Anthropic SDK base (e.g. Mantle ``…/anthropic``). Empty = api.anthropic.com.
+    anthropic_base_url: str = ""
     # Native Amazon Bedrock (IAM / instance role — no Anthropic API key).
     # Used when model IDs look like Bedrock (anthropic.claude-…:0, us.anthropic.…,
     # amazon.nova-…) or when PROVIDER=bedrock / profile=bedrock.

@@ -2355,6 +2355,55 @@ def _anthropic_message_content(content: Any) -> Any:
     return converted
 
 
+def _apply_conversation_cache_breakpoints(api_messages: list[dict[str, Any]]) -> None:
+    """Mark the stable conversation prefix for Anthropic ephemeral prompt caching.
+
+    Places a ``cache_control`` breakpoint on the last content block immediately
+    before the final substantive user turn (typically the volatile tail).
+    """
+    if len(api_messages) < 2:
+        return
+
+    last_user_idx: int | None = None
+    for i in range(len(api_messages) - 1, -1, -1):
+        msg = api_messages[i]
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        if isinstance(content, str) and content.strip():
+            last_user_idx = i
+            break
+        if isinstance(content, list):
+            has_text = any(
+                isinstance(block, dict)
+                and block.get("type") == "text"
+                and str(block.get("text", "")).strip()
+                for block in content
+            )
+            if has_text:
+                last_user_idx = i
+                break
+
+    if last_user_idx is None or last_user_idx <= 0:
+        return
+
+    boundary_idx = last_user_idx - 1
+    msg = api_messages[boundary_idx]
+    content = msg.get("content")
+    marker = {"cache_control": {"type": "ephemeral"}}
+
+    if isinstance(content, str):
+        msg["content"] = [{"type": "text", "text": content, **marker}]
+    elif isinstance(content, list) and content:
+        blocks = [dict(block) if isinstance(block, dict) else block for block in content]
+        last = blocks[-1]
+        if isinstance(last, dict):
+            last = dict(last)
+            last["cache_control"] = {"type": "ephemeral"}
+            blocks[-1] = last
+        msg["content"] = blocks
+
+
 class AnthropicProvider(LLMProvider):
     name = "anthropic"
 
@@ -2363,7 +2412,12 @@ class AnthropicProvider(LLMProvider):
             raise ImportError(
                 "anthropic package not installed. Install with: pip install clawagents[anthropic]"
             )
-        self.client = _anthropic_mod.AsyncAnthropic(api_key=config.anthropic_api_key)
+        client_kwargs: dict[str, Any] = {"api_key": config.anthropic_api_key}
+        base = (getattr(config, "anthropic_base_url", None) or "").strip()
+        if base:
+            # SDK appends /v1/messages — Mantle expects …/anthropic/v1/messages.
+            client_kwargs["base_url"] = base.rstrip("/")
+        self.client = _anthropic_mod.AsyncAnthropic(**client_kwargs)
         self.model = config.anthropic_model
         self._max_tokens = config.max_tokens
         self._temperature = config.temperature
@@ -2416,6 +2470,14 @@ class AnthropicProvider(LLMProvider):
                 api_messages.append(
                     {"role": role, "content": _anthropic_message_content(m.content)}
                 )
+
+        try:
+            from clawagents.config.features import is_enabled as _feat_cache
+
+            if _feat_cache("cache_boundary"):
+                _apply_conversation_cache_breakpoints(api_messages)
+        except Exception:
+            pass
 
         kwargs: dict[str, Any] = {
             "model": self.model,
@@ -2964,6 +3026,64 @@ def _looks_like_ollama(model_name: str) -> bool:
     return any(lower.startswith(p) for p in _OLLAMA_PREFIXES)
 
 
+def _is_mantle_url(url: str | None) -> bool:
+    """True for Amazon Bedrock Mantle (OneHUB) OpenAI-compatible hosts."""
+    return bool(url) and "bedrock-mantle." in (url or "").lower()
+
+
+def _mantle_origin(url: str) -> str:
+    """``https://bedrock-mantle.{region}.api.aws`` from any Mantle path."""
+    from urllib.parse import urlparse
+
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    if "://" not in raw:
+        raw = f"https://{raw}"
+    parsed = urlparse(raw)
+    if not parsed.netloc:
+        return ""
+    scheme = parsed.scheme or "https"
+    return f"{scheme}://{parsed.netloc}"
+
+
+def mantle_anthropic_base_url(url: str) -> str:
+    """Mantle Anthropic Messages root (SDK appends ``/v1/messages``)."""
+    origin = _mantle_origin(url)
+    return f"{origin}/anthropic" if origin else ""
+
+
+def mantle_openai_base_url(url: str) -> str:
+    """Mantle OpenAI Responses root (client appends ``/v1/responses``)."""
+    origin = _mantle_origin(url)
+    return f"{origin}/openai" if origin else ""
+
+
+def is_mantle_anthropic_model(model: str) -> bool:
+    """Claude IDs that must use Mantle ``/anthropic/v1/messages`` (not chat)."""
+    m = (model or "").strip().lower()
+    if m.startswith("bedrock/"):
+        m = m[len("bedrock/") :]
+    for prefix in ("us.", "eu.", "ap.", "global."):
+        if m.startswith(prefix):
+            m = m[len(prefix) :]
+            break
+    return m.startswith("anthropic.") or m.startswith("claude")
+
+
+def is_mantle_openai_responses_model(model: str) -> bool:
+    """Frontier OpenAI IDs on Mantle that need ``/openai/v1/responses``.
+
+    ``openai.gpt-oss-*`` stays on chat completions; GPT-5.4/5.5/5.6 do not.
+    """
+    m = (model or "").strip().lower()
+    if not m.startswith("openai."):
+        return False
+    if "gpt-oss" in m:
+        return False
+    return any(token in m for token in ("gpt-5.3", "gpt-5.4", "gpt-5.5", "gpt-5.6"))
+
+
 def create_provider(model_name: str, config: EngineConfig) -> LLMProvider:
     """Create a single LLM provider inferred from model name.
 
@@ -2996,6 +3116,34 @@ def create_provider(model_name: str, config: EngineConfig) -> LLMProvider:
             config.anthropic_model = model_id
             return BedrockProvider(config)
         return BedrockConverseProvider(config)
+
+    # ── Mantle (OneHUB): multi-path host, not one OpenAI /v1 for all ───
+    # anthropic.* → /anthropic/v1/messages; openai.gpt-5.* → /openai/v1/responses;
+    # chat-ok catalog (gpt-oss, deepseek, qwen, …) → /v1/chat/completions.
+    if config.openai_base_url and _is_mantle_url(config.openai_base_url):
+        mantle_key = config.openai_api_key or config.anthropic_api_key
+        if is_mantle_anthropic_model(model_name):
+            if mantle_key:
+                config.anthropic_api_key = mantle_key
+            config.anthropic_model = model_name
+            config.anthropic_base_url = mantle_anthropic_base_url(config.openai_base_url)
+            return AnthropicProvider(config)
+        if is_mantle_openai_responses_model(model_name):
+            rewritten = mantle_openai_base_url(config.openai_base_url)
+            if rewritten:
+                config.openai_base_url = rewritten
+            if not config.openai_api_key and mantle_key:
+                config.openai_api_key = mantle_key
+            if not config.openai_api_key:
+                config.openai_api_key = "bedrock"
+            # These models reject /v1/chat/completions even when wire_api was
+            # saved as chat_completions from an older Mantle default.
+            config.openai_wire_api = "responses"
+            config.openai_model = model_name
+            return OpenAIProvider(config)
+        # Chat-completions catalog: keep …/v1 (or normalize to it).
+        if _normalize_wire_api(config.openai_wire_api) == "auto":
+            config.openai_wire_api = "chat_completions"
 
     if lower.startswith("claude") or lower.startswith("anthropic"):
         # Bedrock Access Gateway / LiteLLM / other OpenAI-compatible proxies set

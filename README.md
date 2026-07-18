@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.20.4-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.20.6-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -23,7 +23,7 @@ This repo is the **Python framework** (`pip install clawagents`). Ready-made cli
 |---------|--------|------------|------|
 | **ClawAgents Desktop** | **v0.2.4** | Native macOS app — project chats, file editor, SSH remotes, Settings (incl. AWS Bedrock), Developer ID signed + notarized | [Repo](https://github.com/x1jiang/clawagents-desktop) · [Download DMG](https://github.com/x1jiang/clawagents-desktop/releases/tag/v0.2.4) |
 | **ClawAgents for VS Code / Cursor** | **v1.0.55** | Editor extension — companion lockstep (context-mode / rtk), full caveman skill, chat, Bedrock | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Release + VSIX](https://github.com/x1jiang/clawagents-vscode/releases/tag/v1.0.55) |
-| **Python package** | **v6.20.4** | This library — Grok harness ports + hardening · `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/) · [Release](https://github.com/x1jiang/clawagents_py/releases) |
+| **Python package** | **v6.20.6** | This library — Mantle routing + DX/handoff fixes · `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/) · [Release](https://github.com/x1jiang/clawagents_py/releases) |
 | **TypeScript package** | **v6.12.13** | Node/TS sibling — `npm install git+https://github.com/x1jiang/clawagents.git` | [Repo](https://github.com/x1jiang/clawagents) |
 
 ## Installation
@@ -36,7 +36,7 @@ pip install -U 'clawagents[bedrock]'   # + Amazon Bedrock (Claude via IAM + Nova
 pip install -U 'clawagents[all]'       # All providers + tiktoken
 ```
 
-> **Version 6.20.4** — Execute cancel + shell-session sync (July 2026).
+> **Version 6.20.6** — Dead handoffs + DX/efficiency (July 2026).
 
 > **Version 6.20.0** — Grok harness ports (July 2026).
 
@@ -1586,6 +1586,11 @@ parity sweep.
 
 ## Changelog
 
+### v6.20.5 — Mantle multi-path routing (July 2026)
+
+- **Mantle (OneHUB):** `anthropic.*` → `/anthropic/v1/messages` (Anthropic SDK); frontier `openai.gpt-5.3/4/5/6*` → `/openai/v1/responses`; chat-ok models stay on `/v1/chat/completions`. Fixes Claude Haiku 400 on chat completions.
+- Optional `EngineConfig.anthropic_base_url` for custom Anthropic-compatible hosts.
+
 ### v6.20.4 — Execute cancel + shell-session sync (July 2026)
 
 - Cancelled foreground `execute` now SIGKILLs the process group (CancelledError was skipping cleanup and leaving orphans)
@@ -1672,7 +1677,7 @@ parity sweep.
 
 - Half-open probe lease reclaim so cancelled probes cannot strand the breaker
 - Interject: each redirect is a standalone synthetic user turn; stranded undrained redirects become queued prompts
-- Feature flag `provider_circuit_breaker` (default on); companion VS Code **1.0.46** (voice dictation + stranded queue)
+- Feature flag `provider_circuit_breaker` (default off); companion VS Code **1.0.46** (voice dictation + stranded queue)
 
 ### v6.17.0 — Grok Build Tier 1+2 parity (July 2026)
 

@@ -91,8 +91,12 @@ async def _run_case(case: dict[str, Any], *, judge: bool) -> dict[str, Any]:
     if case.get("model"):
         kwargs["model"] = case["model"]
 
-    agent = create_claw_agent(**kwargs)
-    state = await agent.invoke(task, trajectory=True)
+    # Trajectory recording is a construction-time setting, not an invoke() kwarg.
+    # Passing it to invoke() raised TypeError on every case (silently swallowed
+    # into an opaque per-case error), so the whole eval harness reported 100%
+    # failure.
+    agent = create_claw_agent(trajectory=True, **kwargs)
+    state = await agent.invoke(task)
     result_text = str(getattr(state, "result", "") or "")
     scored = _score_case(
         task,

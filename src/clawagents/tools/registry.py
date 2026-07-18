@@ -8,7 +8,9 @@ Optimizations learned from deepagents/openclaw:
 
 import asyncio
 import json
+import os
 import re
+import traceback
 from typing import Any, Dict, List, Optional, Protocol
 
 
@@ -19,6 +21,34 @@ class ToolResult:
         self.success = success
         self.output = output
         self.error = error
+
+
+def _tool_error_debug_enabled() -> bool:
+    for key in ("CLAW_DEBUG", "CLAWAGENTS_DEV", "CLAW_DEV"):
+        if os.environ.get(key, "").lower() in ("1", "true", "yes", "on"):
+            return True
+    try:
+        from clawagents.config.features import is_enabled
+
+        return is_enabled("tool_error_traceback")
+    except Exception:
+        return False
+
+
+def format_tool_error(err: BaseException, *, include_traceback: bool | None = None) -> str:
+    """Format a tool exception for ToolResult.error (type + optional traceback)."""
+    type_name = type(err).__name__
+    msg = str(err)
+    text = f"{type_name}: {msg}" if msg else type_name
+    if include_traceback is None:
+        include_traceback = _tool_error_debug_enabled()
+    if include_traceback:
+        tb = traceback.format_exc()
+        if tb and tb.strip() != "NoneType: None\n":
+            lines = tb.strip().splitlines()
+            short = "\n".join(lines[-10:]) if len(lines) > 10 else tb.strip()
+            return f"{text}\n{short}"
+    return text
 
 
 class Tool(Protocol):
@@ -620,7 +650,7 @@ class ToolRegistry:
                 ),
             )
         except Exception as err:
-            return ToolResult(success=False, output="", error=f"Tool error: {str(err)}")
+            return ToolResult(success=False, output="", error=format_tool_error(err))
 
     async def execute_tools_parallel(
         self,
@@ -646,7 +676,7 @@ class ToolRegistry:
             try:
                 return await self.execute_tool(call.tool_name, call.args, run_context=run_context)
             except Exception as err:
-                return ToolResult(success=False, output="", error=f"Tool error: {str(err)}")
+                return ToolResult(success=False, output="", error=format_tool_error(err))
 
         # Build batches. Each batch is a list of (original_index, call).
         batches: List[List[tuple[int, ParsedToolCall]]] = []

@@ -97,6 +97,8 @@ class RunContext(Generic[TContext]):
     pending_skill_total_chars: int | None = None
     pending_skill_allowed_tools: frozenset[str] | None = None
     pending_skill_boundary_declared: bool = False
+    session_id: str | None = None
+    on_event: Any | None = None
     _approvals: dict[str, ApprovalRecord] = field(default_factory=dict)
     _always_approvals: dict[str, ApprovalRecord] = field(default_factory=dict)
     _metadata: dict[str, Any] = field(default_factory=dict)

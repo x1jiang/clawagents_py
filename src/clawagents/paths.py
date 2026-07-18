@@ -40,12 +40,21 @@ paths and creates dirs when asked. Mirrors
 
 from __future__ import annotations
 
+import contextvars
 import os
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 DEFAULT_PROFILE = "default"
 WORKSPACE_DIRNAME = ".clawagents"
 HOME_DIRNAME = ".clawagents"
+
+# Per-task workspace root (e.g. ClawAgent(workspace=...)) without process chdir.
+_workspace_root_override: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "clawagents_workspace_root",
+    default=None,
+)
 
 
 def _profile_name(profile: str | None) -> str:
@@ -92,6 +101,36 @@ def get_clawagents_home(
     return home
 
 
+def resolve_workspace_root(
+    explicit: str | os.PathLike[str] | None = None,
+) -> Path:
+    """Resolve the project workspace root for cwd-scoped side effects.
+
+    Priority: explicit argument → context override (``workspace_context`` /
+    ``ClawAgent(workspace=...)``) → ``CLAWAGENTS_WORKSPACE`` env → ``cwd``.
+    """
+    if explicit is not None:
+        return Path(explicit).expanduser().resolve()
+    ctx = _workspace_root_override.get()
+    if ctx:
+        return Path(ctx).expanduser().resolve()
+    env = os.environ.get("CLAWAGENTS_WORKSPACE")
+    if env:
+        return Path(env).expanduser().resolve()
+    return Path.cwd()
+
+
+@contextmanager
+def workspace_context(root: str | os.PathLike[str]) -> Iterator[Path]:
+    """Temporarily redirect workspace-scoped paths without ``chdir``."""
+    resolved = str(Path(root).expanduser().resolve())
+    token = _workspace_root_override.set(resolved)
+    try:
+        yield Path(resolved)
+    finally:
+        _workspace_root_override.reset(token)
+
+
 def get_clawagents_workspace_dir(
     *,
     create: bool = False,
@@ -99,14 +138,13 @@ def get_clawagents_workspace_dir(
     """Return the per-project workspace directory.
 
     By default this is ``<cwd>/.clawagents/``. Override the working
-    directory via the ``CLAWAGENTS_WORKSPACE`` env var.
+    directory via ``CLAWAGENTS_WORKSPACE``, :func:`resolve_workspace_root`,
+    or :func:`workspace_context`.
 
     Args:
         create: If True, create the directory (and parents) if missing.
     """
-    override = os.environ.get("CLAWAGENTS_WORKSPACE")
-    base = Path(override).expanduser() if override else Path.cwd()
-    ws = base / WORKSPACE_DIRNAME
+    ws = resolve_workspace_root() / WORKSPACE_DIRNAME
     if create:
         ws.mkdir(parents=True, exist_ok=True)
     return ws
@@ -241,6 +279,8 @@ __all__ = [
     "WORKSPACE_DIRNAME",
     "HOME_DIRNAME",
     "get_clawagents_home",
+    "resolve_workspace_root",
+    "workspace_context",
     "get_clawagents_workspace_dir",
     "get_trajectories_dir",
     "get_sessions_dir",

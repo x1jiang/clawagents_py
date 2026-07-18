@@ -71,6 +71,7 @@ class ClawAgent:
         llm: LLMProvider,
         tools: ToolRegistry,
         system_prompt: Optional[str] = None,
+        instruction: Optional[str] = None,
         streaming: bool = True,
         use_native_tools: bool = True,
         context_window: int = 1_000_000,
@@ -87,6 +88,7 @@ class ClawAgent:
         preview_chars: int = 120,
         response_chars: int = 500,
         features: Optional[dict[str, bool]] = None,
+        workspace: Optional[Union[str, os.PathLike]] = None,
         advisor_llm: Optional[LLMProvider] = None,
         advisor_max_calls: int = 3,
         # ── New, backward-compatible surfaces (OpenAI-Agents-inspired) ──
@@ -111,7 +113,8 @@ class ClawAgent:
         Args:
             llm: The initialized LLM provider
             tools: The registry containing all available tools
-            system_prompt: Optional base system instruction
+            system_prompt: Optional base system instruction (alias: ``instruction``)
+            instruction: Alias for ``system_prompt`` (factory-style naming)
             streaming: Whether to stream responses from the LLM
             use_native_tools: Instruct the LLM to use native structured tool calls (if supported)
             context_window: Maximum allowed tokens before oldest messages are compacted
@@ -124,6 +127,8 @@ class ClawAgent:
             preview_chars: Number of characters to log in console output for tool results
             response_chars: Number of characters to log from LLM free-text response
             features: Dictionary to override global architectural variables (e.g. {"micro_compact": False, "wal": True})
+            workspace: Project root for workspace-scoped side effects (``.clawagents/``,
+                filesystem watcher, cwd-scoped tools). Does not ``chdir`` the process.
             advisor_llm: Optional stronger model for strategic guidance (consulted 2-3 times per task)
             advisor_max_calls: Maximum advisor consultations per task (default: 3)
             action_mode: ``tools`` (default) or ``code`` (CodeAct Python actions)
@@ -132,7 +137,7 @@ class ClawAgent:
         """
         self.llm = llm
         self.tools = tools
-        self.system_prompt = system_prompt
+        self.system_prompt = _resolve_system_prompt(system_prompt, instruction)
         self.streaming = streaming
         self.use_native_tools = use_native_tools
         self.context_window = context_window
@@ -149,6 +154,9 @@ class ClawAgent:
         self.preview_chars = preview_chars
         self.response_chars = response_chars
         self.features = features
+        self.workspace = (
+            str(Path(workspace).expanduser().resolve()) if workspace is not None else None
+        )
         self.advisor_llm = advisor_llm
         self.advisor_max_calls = advisor_max_calls
         self.hooks = hooks
@@ -187,6 +195,7 @@ class ClawAgent:
         handoffs: Optional[list[Handoff]] = None,
         images: Optional[list[dict]] = None,
         files: Optional[list[dict]] = None,
+        session_end_tail: bool = True,
     ) -> AgentState:
         """Start the ReAct agent loop for ``task``.
 
@@ -242,6 +251,11 @@ class ClawAgent:
             run_context = RunContext(context=user_context)
         elif user_context is not None and run_context.context is None:
             run_context.context = user_context
+        ws = getattr(self, "workspace", None)
+        if ws:
+            if not isinstance(run_context._metadata, dict):
+                run_context._metadata = {}
+            run_context._metadata.setdefault("workspace", ws)
         default_pm = getattr(self, "_default_permission_mode", None)
         if default_pm is not None:
             run_context.permission_mode = default_pm
@@ -302,25 +316,65 @@ class ClawAgent:
             require_approval_tools=self.require_approval_tools,
             image_blocks=image_blocks,
             file_blocks=file_blocks,
+            session_end_tail=session_end_tail,
         )
 
     # ── Convenience hook methods ──────────────────────────────────────
 
+    def _convenience_gate_base(self):
+        """The before_tool gate to preserve underneath convenience filters.
+
+        Captured once, on the first convenience-method call — by then
+        ``create_claw_agent`` has already installed its permission + plan-mode
+        gate as ``self.before_tool``. Subsequent convenience calls (e.g.
+        ``block_tools`` then ``allow_only_tools``) replace each other's filter
+        but always recompose against this same base, so the security gate is
+        never dropped while the documented "last filter wins" behavior among
+        the convenience methods is preserved. A bare ``ClawAgent`` with no gate
+        captures ``None``; ``compose_before_tool`` then returns the lone filter
+        unchanged (so it keeps returning plain booleans).
+        """
+        if not hasattr(self, "_before_tool_base"):
+            self._before_tool_base = self.before_tool
+        return self._before_tool_base
+
     def block_tools(self, *tool_names: str):
         """Block specific tools from being executed.
 
+        Composes with (does not replace) the permission/plan-mode gate that
+        ``create_claw_agent`` installs — blocking a tool must never widen what
+        the other gates allow.
+
         Example: agent.block_tools("execute", "write_file")
         """
+        from clawagents.modes import compose_before_tool
+
+        base = self._convenience_gate_base()
         blocked = set(tool_names)
-        self.before_tool = lambda name, args: name not in blocked
+
+        def _block(name, args):
+            return name not in blocked
+
+        self.before_tool = compose_before_tool(_block, base)
 
     def allow_only_tools(self, *tool_names: str):
         """Only allow specific tools to be executed. All others blocked.
 
+        Composes with the existing gate (see :meth:`block_tools`): an allowed
+        tool still passes through the permission/plan-mode gate rather than
+        bypassing it.
+
         Example: agent.allow_only_tools("read_file", "ls", "grep")
         """
+        from clawagents.modes import compose_before_tool
+
+        base = self._convenience_gate_base()
         allowed = set(tool_names)
-        self.before_tool = lambda name, args: name in allowed
+
+        def _allow(name, args):
+            return name in allowed
+
+        self.before_tool = compose_before_tool(_allow, base)
 
     def inject_context(self, text: str):
         """Inject additional context into every LLM call.
@@ -413,7 +467,12 @@ class ClawAgent:
 
         Example: agent.truncate_output(3000)
         """
+        existing = self.after_tool
+
         def hook(name, args, result):
+            # Chain any existing after_tool hook first, then truncate.
+            if existing is not None:
+                result = existing(name, args, result)
             if len(result.output) > max_chars:
                 from clawagents.tools.registry import ToolResult
                 return ToolResult(
@@ -545,6 +604,7 @@ def create_claw_agent(
     base_url: Optional[str] = None,
     api_version: Optional[str] = None,
     instruction: Optional[str] = None,
+    system_prompt: Optional[str] = None,
     tools: Optional[List] = None,
     skills: Union[str, List[Union[str, os.PathLike]], None] = None,
     skills_exclude: Optional[List[str]] = None,
@@ -585,6 +645,8 @@ def create_claw_agent(
     on_exit_plan_mode: Any = None,
     permission_rules: list | None = None,
     goal_mode: bool = False,
+    features: Optional[dict[str, bool]] = None,
+    workspace: Optional[Union[str, os.PathLike]] = None,
 ) -> ClawAgent:
     """
     Create a ClawAgent with full-stack capabilities.
@@ -601,7 +663,8 @@ def create_claw_agent(
                         Default: from OPENAI_BASE_URL env / None (uses api.openai.com).
         api_version:    API version string. Required for Azure OpenAI (e.g. "2024-12-01-preview").
                         Default: from OPENAI_API_VERSION env / None.
-        instruction:    What the agent should do / how it should behave.
+        instruction:    What the agent should do / how it should behave (alias: ``system_prompt``).
+        system_prompt:  Alias for ``instruction`` (class-style naming).
         tools:          Additional tools. Built-in tools always included.
         skills:         Skill directories (default: auto-discovers ./skills). Bundled skills (e.g. OpenViking) are included when present.
         memory:         AGENTS.md paths (default: auto-discovers ./AGENTS.md, ./CLAWAGENTS.md).
@@ -704,6 +767,11 @@ def create_claw_agent(
         agent.before_tool = lambda name, args: name != "execute"
     """
     # ── Resolve opt-in flags ────────────────────────────────────────────
+    resolved_instruction = _resolve_system_prompt(system_prompt, instruction)
+    from clawagents.paths import resolve_workspace_root
+
+    workspace_root = str(resolve_workspace_root(workspace))
+
     if trajectory is None:
         trajectory = os.environ.get("CLAW_TRAJECTORY", "").lower() in ("1", "true", "yes")
     if rethink is None:
@@ -780,7 +848,6 @@ def create_claw_agent(
         resolved_advisor_llm = _resolve_model(advisor_spec, streaming, adv_key, context_window)
 
     # ── Resolve sandbox backend ────────────────────────────────────────
-    workspace_root = os.getcwd()
     if sandbox is not None:
         sb = sandbox
     else:
@@ -896,7 +963,7 @@ def create_claw_agent(
     # ── Auto-discover skills from default locations ─────────────────────
     skill_summaries: Optional[str] = None
     skill_store = None
-    base_skill_dirs = _to_list(skills) if skills is not None else _auto_discover_skills()
+    base_skill_dirs = _to_list(skills) if skills is not None else _auto_discover_skills(workspace_root)
     _bundled = _get_bundled_skills_dir()
     # Bundled skills go FIRST: SkillStore gives later directories precedence on
     # name collisions, so user/workspace skills must override bundled ones
@@ -960,27 +1027,27 @@ def create_claw_agent(
 
     registry.register(
         create_skill_workshop_tool(
-            workspace=os.getcwd(),
+            workspace=workspace_root,
             on_reload=(skill_store.reload if skill_store is not None else None),
         )
     )
 
     from clawagents.tools.search_history import create_search_history_tool
 
-    registry.register(create_search_history_tool(workspace=os.getcwd()))
+    registry.register(create_search_history_tool(workspace=workspace_root))
 
     from clawagents.tools.retrieve_tool_result import create_retrieve_tool_result_tool
 
-    registry.register(create_retrieve_tool_result_tool(workspace=os.getcwd()))
+    registry.register(create_retrieve_tool_result_tool(workspace=workspace_root))
 
     from clawagents.tools.context_tools import create_context_tools
 
-    for t in create_context_tools(workspace=os.getcwd()):
+    for t in create_context_tools(workspace=workspace_root):
         registry.register(t)
 
     from clawagents.tools.git_tools import create_git_tools
 
-    for t in create_git_tools(workspace=os.getcwd()):
+    for t in create_git_tools(workspace=workspace_root):
         registry.register(t)
 
     from clawagents.tools.plan_mode import create_plan_mode_tools
@@ -991,18 +1058,18 @@ def create_claw_agent(
 
     from clawagents.tools.worktree_tools import create_worktree_tools
 
-    for t in create_worktree_tools(workspace=os.getcwd()):
+    for t in create_worktree_tools(workspace=workspace_root):
         registry.register(t)
 
     from clawagents.tools.hunk_review import create_hunk_review_tools
 
-    for t in create_hunk_review_tools(workspace=os.getcwd()):
+    for t in create_hunk_review_tools(workspace=workspace_root):
         if registry.get(t.name) is None:
             registry.register(t)
 
     from clawagents.tools.marketplace_tools import create_marketplace_tools
 
-    for t in create_marketplace_tools(workspace=os.getcwd()):
+    for t in create_marketplace_tools(workspace=workspace_root):
         if registry.get(t.name) is None:
             registry.register(t)
 
@@ -1029,7 +1096,6 @@ def create_claw_agent(
 
     # ── Custom mode (instruction + tool gate + permission) ────────────
     mode_before: Optional[BeforeToolHook] = None
-    resolved_instruction = instruction
     permission_mode_override = None
     if mode:
         from clawagents.modes import (
@@ -1097,6 +1163,8 @@ def create_claw_agent(
         rethink=rethink, learn=learn, atlas=False,
         atlas_config=None, max_iterations=max_iterations,
         preview_chars=preview_chars, response_chars=response_chars,
+        features=features,
+        workspace=workspace_root,
         advisor_llm=resolved_advisor_llm, advisor_max_calls=resolved_advisor_max_calls,
         handoffs=handoffs, name=name,
         action_mode=action_mode_norm,
@@ -1130,7 +1198,7 @@ def create_claw_agent(
 
     # ── Sub-agent tool (always available) ──────────────────────────────
     from clawagents.tools.subagent import create_task_tool
-    registry.register(create_task_tool(llm, registry, workspace=os.getcwd()))
+    registry.register(create_task_tool(llm, registry, workspace=workspace_root))
 
     # v6.17: PTY sessions + rewind tools
     try:
@@ -1146,7 +1214,7 @@ def create_claw_agent(
                 if registry.get(t.name) is None:
                     registry.register(t)
             try:
-                get_watcher(os.getcwd()).start()
+                get_watcher(workspace_root).start()
             except Exception:
                 pass
         if _feat617("hashline_tools"):
@@ -1163,7 +1231,7 @@ def create_claw_agent(
         if _feat_mem("smart_memory") or _feat_mem("hybrid_memory_search"):
             from clawagents.tools.memory_search import create_memory_search_tool
             if registry.get("memory_search") is None:
-                registry.register(create_memory_search_tool(workspace=os.getcwd()))
+                registry.register(create_memory_search_tool(workspace=workspace_root))
     except Exception:
         pass
 
@@ -1294,6 +1362,20 @@ def _resolve_model(
 
     provider = create_provider(active_model, config)
     return provider
+
+
+def _resolve_system_prompt(
+    system_prompt: Optional[str],
+    instruction: Optional[str],
+) -> Optional[str]:
+    """Resolve ``system_prompt`` / ``instruction`` aliases (mutually compatible)."""
+    if system_prompt is not None and instruction is not None and system_prompt != instruction:
+        raise ValueError(
+            "Cannot specify both system_prompt and instruction with different values"
+        )
+    if system_prompt is not None:
+        return system_prompt
+    return instruction
 
 
 def _to_list(value) -> list:
@@ -1846,7 +1928,7 @@ def _auto_discover_memory() -> list:
     return [str(p) for p in discover_rule_paths()]
 
 
-def _auto_discover_skills() -> list:
+def _auto_discover_skills(workspace: str | os.PathLike | None = None) -> list:
     """Auto-discover skill directories in common locations.
 
     Returned lowest-precedence first (SkillStore gives later dirs precedence):
@@ -1855,6 +1937,9 @@ def _auto_discover_skills() -> list:
     ``CLAW_USER_SKILL_HOMES=1`` so library consumers and tests stay hermetic;
     the VS Code extension resolves homes itself and passes them explicitly.
     """
+    from clawagents.paths import resolve_workspace_root
+
+    ws = str(resolve_workspace_root(workspace))
     found = []
     if (os.environ.get("CLAW_USER_SKILL_HOMES") or "").strip() == "1":
         from clawagents.paths import get_clawagents_home
@@ -1867,7 +1952,7 @@ def _auto_discover_skills() -> list:
             if os.path.isdir(path):
                 found.append(path)
     for name in _DEFAULT_SKILL_DIRS:
-        path = os.path.join(os.getcwd(), name)
+        path = os.path.join(ws, name)
         if os.path.isdir(path):
             found.append(path)
     return found
