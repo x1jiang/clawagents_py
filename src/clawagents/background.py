@@ -135,6 +135,9 @@ class BackgroundJobManager:
             env=env,
             stdout=stdout,
             stderr=stderr,
+            # New session so cancel can killpg the whole tree (shell + children).
+            # Not supported the same way on Windows.
+            start_new_session=(os.name != "nt"),
         )
 
         job = BackgroundJob(
@@ -158,8 +161,18 @@ class BackgroundJobManager:
                 job.exit_code = proc.returncode
             except asyncio.CancelledError:
                 job.cancelled = True
+                if job.exit_code is None:
+                    job.exit_code = -1
                 raise
+            except Exception as exc:  # noqa: BLE001 — record and finish job
+                job.stderr = (
+                    (job.stderr or "") + f"\n[background watcher error: {exc}]"
+                ).lstrip()
+                if job.exit_code is None:
+                    job.exit_code = proc.returncode if proc.returncode is not None else -1
             finally:
+                if job.exit_code is None:
+                    job.exit_code = proc.returncode if proc.returncode is not None else -1
                 job.ended_at = time.time()
                 job._done_event.set()
                 if notify_on_complete is not None:
@@ -218,8 +231,18 @@ class BackgroundJobManager:
                 job.exit_code = proc.returncode
             except asyncio.CancelledError:
                 job.cancelled = True
+                if job.exit_code is None:
+                    job.exit_code = -1
                 raise
+            except Exception as exc:  # noqa: BLE001
+                job.stderr = (
+                    (job.stderr or "") + f"\n[adopt watcher error: {exc}]"
+                ).lstrip()
+                if job.exit_code is None:
+                    job.exit_code = proc.returncode if proc.returncode is not None else -1
             finally:
+                if job.exit_code is None:
+                    job.exit_code = proc.returncode if proc.returncode is not None else -1
                 job.ended_at = time.time()
                 job._done_event.set()
                 if notify_on_complete is not None:
@@ -258,24 +281,40 @@ class BackgroundJobManager:
         return job
 
     async def cancel(self, job_id: str) -> BackgroundJob:
-        """Request cancellation. Sends SIGTERM, then SIGKILL after a grace."""
+        """Request cancellation. SIGTERM then SIGKILL; prefer process-group kill."""
         job = self.status(job_id)
         proc = job._process
         if proc is None or proc.returncode is not None:
             return job
         job.cancelled = True
-        try:
-            proc.send_signal(signal.SIGTERM)
-        except ProcessLookupError:
-            return job
+
+        def _signal_tree(sig: signal.Signals) -> None:
+            if proc.pid is None:
+                return
+            if os.name != "nt":
+                try:
+                    os.killpg(proc.pid, sig)
+                    return
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
+            try:
+                proc.send_signal(sig)
+            except (ProcessLookupError, PermissionError, OSError):
+                if sig == signal.SIGKILL:
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
+
+        _signal_tree(signal.SIGTERM)
         try:
             await asyncio.wait_for(proc.wait(), timeout=self._kill_grace)
         except asyncio.TimeoutError:
+            _signal_tree(signal.SIGKILL)
             try:
-                proc.kill()
+                await proc.wait()
             except ProcessLookupError:
                 pass
-            await proc.wait()
         return job
 
     async def shutdown(self) -> None:

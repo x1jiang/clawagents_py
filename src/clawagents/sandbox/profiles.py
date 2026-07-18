@@ -408,92 +408,101 @@ class ProfileBackend:
         env: dict[str, str] | None = None,
     ):
         merged_env = self._merge_env(env)
-        wrapped = command
-        backend = self._profile.backend
+        # Never interpolate the user command with !r — a single quote in
+        # ``command`` flips Python's repr to double quotes and lets
+        # $()/backticks expand in the outer shell BEFORE sandbox-exec.
+        wrapped = self.wrap_command(command, cwd=cwd)
+        return await self._inner.exec(
+            wrapped, timeout=timeout, cwd=cwd, env=merged_env
+        )
 
+    def wrap_command(self, command: str, *, cwd: str | None = None) -> str:
+        """Wrap ``command`` for seatbelt/bwrap without executing it.
+
+        Used by background ``execute`` so isolation matches foreground
+        ``ProfileBackend.exec``. Appends to ``profile_warnings`` on soft fallback.
+        """
+        backend = self._profile.backend
         if backend == "seatbelt":
             binary = shutil.which("sandbox-exec")
-            if binary:
-                profile_text = _seatbelt_profile_text(
-                    cwd=self.cwd,
-                    network=self._profile.network,
-                    read_only=self._profile.read_only,
-                    secret_deny_paths=getattr(
-                        self._profile, "secret_deny_paths", ()
-                    ),
-                )
-                profile_path = Path(self.cwd) / ".clawagents" / "seatbelt.sb"
-                try:
-                    profile_path.parent.mkdir(parents=True, exist_ok=True)
-                    profile_path.write_text(profile_text, encoding="utf-8")
-                    # Never interpolate the user command with !r — a single quote
-                    # in ``command`` flips Python's repr to double quotes and lets
-                    # $()/backticks expand in the outer shell BEFORE sandbox-exec.
-                    wrapped = " ".join(
-                        shlex.quote(p)
-                        for p in [
-                            binary,
-                            "-f",
-                            str(profile_path),
-                            "/bin/sh",
-                            "-c",
-                            command,
-                        ]
-                    )
-                except OSError as exc:
-                    self.profile_warnings.append(f"seatbelt profile write failed: {exc}")
-                    if self._profile.require_binary:
-                        raise
-            else:
+            if not binary:
                 msg = "sandbox-exec unavailable; falling back to local exec"
                 self.profile_warnings.append(msg)
                 if self._profile.require_binary:
                     raise RuntimeError(msg)
-
-        elif backend == "bwrap":
-            binary = shutil.which("bwrap")
-            if binary:
-                net = [] if self._profile.network else ["--unshare-net"]
-                ro = ["--ro-bind", "/", "/"]
-                # Remount workspace writable unless read_only
-                bind = ["--bind", self.cwd, self.cwd]
-                if self._profile.read_only:
-                    bind = ["--ro-bind", self.cwd, self.cwd]
-                secret_overlays: list[str] = []
-                secret_globs = getattr(self._profile, "secret_deny_paths", ())
-                if secret_globs:
-                    for secret_path in _resolve_secret_overlay_paths(
-                        self.cwd, secret_globs
-                    ):
-                        secret_overlays.extend(
-                            ["--ro-bind", "/dev/null", secret_path]
-                        )
-                parts = [
+                return command
+            profile_text = _seatbelt_profile_text(
+                cwd=self.cwd,
+                network=self._profile.network,
+                read_only=self._profile.read_only,
+                secret_deny_paths=getattr(self._profile, "secret_deny_paths", ()),
+            )
+            profile_path = Path(self.cwd) / ".clawagents" / "seatbelt.sb"
+            try:
+                profile_path.parent.mkdir(parents=True, exist_ok=True)
+                profile_path.write_text(profile_text, encoding="utf-8")
+            except OSError as exc:
+                self.profile_warnings.append(f"seatbelt profile write failed: {exc}")
+                if self._profile.require_binary:
+                    raise
+                return command
+            # Use module-level ``shlex`` only — never ``import shlex`` in this
+            # method (local import makes shlex unbound on other branches).
+            return " ".join(
+                shlex.quote(p)
+                for p in [
                     binary,
-                    "--die-with-parent",
-                    *ro,
-                    *net,
-                    *bind,
-                    *secret_overlays,
-                    "--chdir",
-                    cwd or self.cwd,
+                    "-f",
+                    str(profile_path),
                     "/bin/sh",
                     "-c",
                     command,
                 ]
-                # Pass as a shell-escaped single command for LocalBackend.exec
-                # (use module-level ``shlex`` — a local import here makes
-                # ``shlex`` unbound on the seatbelt branch of this method.)
-                wrapped = " ".join(shlex.quote(p) for p in parts)
-            else:
+            )
+        if backend == "bwrap":
+            binary = shutil.which("bwrap")
+            if not binary:
                 msg = "bwrap unavailable; falling back to local exec"
                 self.profile_warnings.append(msg)
                 if self._profile.require_binary:
                     raise RuntimeError(msg)
-
-        return await self._inner.exec(
-            wrapped, timeout=timeout, cwd=cwd, env=merged_env
-        )
+                return command
+            net = [] if self._profile.network else ["--unshare-net"]
+            ro = ["--ro-bind", "/", "/"]
+            bind = ["--bind", self.cwd, self.cwd]
+            if self._profile.read_only:
+                bind = ["--ro-bind", self.cwd, self.cwd]
+            secret_overlays: list[str] = []
+            secret_globs = getattr(self._profile, "secret_deny_paths", ())
+            if secret_globs:
+                for secret_path in _resolve_secret_overlay_paths(
+                    self.cwd, secret_globs
+                ):
+                    try:
+                        sp = Path(secret_path)
+                        if not sp.exists():
+                            sp.parent.mkdir(parents=True, exist_ok=True)
+                            sp.touch(exist_ok=True)
+                        secret_overlays.extend(["--ro-bind", "/dev/null", str(sp)])
+                    except OSError as exc:
+                        self.profile_warnings.append(
+                            f"bwrap secret overlay skipped {secret_path}: {exc}"
+                        )
+            parts = [
+                binary,
+                "--die-with-parent",
+                *ro,
+                *net,
+                *bind,
+                *secret_overlays,
+                "--chdir",
+                cwd or self.cwd,
+                "/bin/sh",
+                "-c",
+                command,
+            ]
+            return " ".join(shlex.quote(p) for p in parts)
+        return command
 
 
 def resolve_sandbox(

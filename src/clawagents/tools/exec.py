@@ -171,14 +171,40 @@ def _shell_argv(command: str) -> list[str]:
 
 
 def _child_env() -> dict[str, str]:
-    env = {**os.environ, "PAGER": "cat"}
+    """Sanitized subprocess env — same floor as ``LocalBackend._sanitized_env``."""
     try:
         from clawagents.redact import is_secret_name
+        from clawagents.sandbox.local import LocalBackend
 
-        env = {k: v for k, v in env.items() if not is_secret_name(k)}
+        deny = LocalBackend._SENSITIVE_ENV_KEYS
+        return {
+            k: v
+            for k, v in os.environ.items()
+            if k not in deny and not is_secret_name(k)
+        } | {"PAGER": "cat"}
+    except Exception:
+        return {**os.environ, "PAGER": "cat"}
+
+
+def _drain_profile_warnings(sb: Any) -> str:
+    """Return new profile warnings and clear them so they aren't re-emitted."""
+    warns = getattr(sb, "profile_warnings", None)
+    if not warns:
+        return ""
+    batch = list(warns)[-8:]
+    try:
+        warns.clear()
     except Exception:
         pass
-    return env
+    return "".join(f"[sandbox_profile: {w}]\n" for w in batch)
+
+
+def _maybe_wrap_for_profile(sb: Any, command: str, *, cwd: str | None) -> str:
+    """Apply seatbelt/bwrap wrap when ``sb`` is a ProfileBackend."""
+    wrap = getattr(sb, "wrap_command", None)
+    if callable(wrap):
+        return str(wrap(command, cwd=cwd))
+    return command
 
 
 def _resolve_block_until_ms(args: Dict[str, Any]) -> tuple[int, bool]:
@@ -426,10 +452,22 @@ class ExecTool:
                     error="is_background requires CLAW_FEATURE_EXECUTE_BACKGROUND=1",
                 )
 
+            # Match foreground isolation: wrap for seatbelt/bwrap + scrub env.
+            try:
+                bg_command = _maybe_wrap_for_profile(sb, command, cwd=run_cwd)
+            except Exception as e:
+                return ToolResult(
+                    success=False, output="", error=f"Background sandbox wrap failed: {e}"
+                )
+            warning_prefix += _drain_profile_warnings(sb)
             mgr = _bg_manager(run_context)
-            with tool_span("exec.background", command=command):
+            with tool_span("exec.background", command=bg_command):
                 try:
-                    job = await mgr.start(_shell_argv(command), cwd=run_cwd)
+                    job = await mgr.start(
+                        _shell_argv(bg_command),
+                        cwd=run_cwd,
+                        env=_child_env(),
+                    )
                 except Exception as e:
                     return ToolResult(
                         success=False, output="", error=f"Background start failed: {e}"
@@ -540,22 +578,31 @@ class ExecTool:
                 success=True, output=warning_prefix + (output or "(no output)")
             )
 
-        # Legacy sandbox path (kill-on-timeout).
+        # Legacy sandbox path (kill-on-timeout). Profile backends land here
+        # because kind is ``profile:*:local`` — keep that so seatbelt/bwrap run.
         with tool_span("exec.run", command=command, timeout_ms=timeout_ms):
             try:
                 result = await sb.exec(command, timeout=timeout_ms, cwd=run_cwd)
-            except TypeError:
-                # Backends that don't accept cwd=
+            except TypeError as e:
+                # Only retry without cwd when the backend rejects the kwarg.
+                msg = str(e).lower()
+                if "cwd" not in msg and "unexpected keyword" not in msg:
+                    return ToolResult(
+                        success=False, output="", error=f"Command failed: {e}"
+                    )
                 try:
                     result = await sb.exec(command, timeout=timeout_ms)
-                except Exception as e:
+                except Exception as e2:
                     return ToolResult(
-                        success=False, output="", error=f"Command failed: {str(e)}"
+                        success=False, output="", error=f"Command failed: {e2}"
                     )
             except Exception as e:
                 return ToolResult(
-                    success=False, output="", error=f"Command failed: {str(e)}"
+                    success=False, output="", error=f"Command failed: {e}"
                 )
+
+            # Soft sandbox fallback is otherwise invisible to the agent.
+            warning_prefix += _drain_profile_warnings(sb)
 
             if result.killed:
                 return ToolResult(

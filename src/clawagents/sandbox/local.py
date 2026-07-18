@@ -149,11 +149,17 @@ class LocalBackend:
         except asyncio.TimeoutError:
             try:
                 os.killpg(proc.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
+            except (ProcessLookupError, PermissionError, OSError):
                 # Either the process group is already gone, or we don't
                 # own it — fall back to killing just the parent.
-                proc.kill()
-            await proc.wait()
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+            try:
+                await proc.wait()
+            except ProcessLookupError:
+                pass
             return ExecResult(stdout="", stderr="", exit_code=1, killed=True)
 
         return ExecResult(

@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.20.2-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.20.3-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -23,7 +23,7 @@ This repo is the **Python framework** (`pip install clawagents`). Ready-made cli
 |---------|--------|------------|------|
 | **ClawAgents Desktop** | **v0.2.4** | Native macOS app — project chats, file editor, SSH remotes, Settings (incl. AWS Bedrock), Developer ID signed + notarized | [Repo](https://github.com/x1jiang/clawagents-desktop) · [Download DMG](https://github.com/x1jiang/clawagents-desktop/releases/tag/v0.2.4) |
 | **ClawAgents for VS Code / Cursor** | **v1.0.55** | Editor extension — companion lockstep (context-mode / rtk), full caveman skill, chat, Bedrock | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Release + VSIX](https://github.com/x1jiang/clawagents-vscode/releases/tag/v1.0.55) |
-| **Python package** | **v6.20.2** | This library — Grok harness ports + hardening · `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/) · [Release](https://github.com/x1jiang/clawagents_py/releases) |
+| **Python package** | **v6.20.3** | This library — Grok harness ports + hardening · `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/) · [Release](https://github.com/x1jiang/clawagents_py/releases) |
 | **TypeScript package** | **v6.12.13** | Node/TS sibling — `npm install git+https://github.com/x1jiang/clawagents.git` | [Repo](https://github.com/x1jiang/clawagents) |
 
 ## Installation
@@ -36,13 +36,16 @@ pip install -U 'clawagents[bedrock]'   # + Amazon Bedrock (Claude via IAM + Nova
 pip install -U 'clawagents[all]'       # All providers + tiktoken
 ```
 
-> **Version 6.20.2** — Grok harness hardening (July 2026).
+> **Version 6.20.3** — Grok harness hardening (July 2026).
 
 > **Version 6.20.0** — Grok harness ports (July 2026).
 
 > **Version 6.19.0** — Companion lockstep (July 2026).
 
 > **Version 6.18.0** — Grok-inspired edit/execute harness (July 2026).
+
+### New In v6.20.3
+- Execute harden: background seatbelt wrap + scrubbed env; bwrap missing-`.env` touch; killpg cancel; profile warnings visible; AST guard against unbound local imports
 
 ### New In v6.20.2
 - **Seatbelt execute:** fix unbound `shlex` crash on macOS sandbox profiles
@@ -1582,6 +1585,12 @@ parity sweep.
 ---
 
 ## Changelog
+
+### v6.20.3 — Execute path hardening (July 2026)
+
+- Background jobs: ProfileBackend wrap + LocalBackend-aligned env scrub; `start_new_session` + killpg cancel
+- bwrap: touch missing secret overlay targets (`.env`); surface sandbox soft-fallback warnings
+- Permanent AST test against use-before-local-import (seatbelt `shlex` class)
 
 ### v6.20.2 — Seatbelt execute fix (July 2026)
 
