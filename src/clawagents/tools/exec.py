@@ -273,7 +273,8 @@ async def _exec_foreground_with_autobg(
             argv = _shell_argv(command)
             job = await mgr.adopt(proc, argv, cwd=cwd, communicate_task=comm)
             return ("", "", 0, True, job.id)
-        except Exception:
+        except (asyncio.CancelledError, Exception):
+            # CancelledError is BaseException — must kill the shielded child too.
             if not comm.done():
                 try:
                     os.killpg(proc.pid, signal.SIGKILL)
@@ -340,7 +341,7 @@ async def _exec_foreground_with_autobg(
         comm = asyncio.create_task(_finish_comm())
         job = await mgr.adopt(proc, argv, cwd=cwd, communicate_task=comm)
         return ("", "", 0, True, job.id)
-    except Exception:
+    except (asyncio.CancelledError, Exception):
         try:
             os.killpg(proc.pid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError, OSError):
@@ -437,7 +438,11 @@ class ExecTool:
         if is_enabled("execute_shell_session") and is_local_sb:
             session = session_for(run_context, sb)
             run_cwd = session.cwd
-            command = session.wrap(command, sticky_env=sticky_env)
+            # Explicit background: use session cwd/env start point but do not
+            # inject PWD/ENV trailers — those would never be consumed here and
+            # would leave later foreground calls with a stale session.
+            if not is_background:
+                command = session.wrap(command, sticky_env=sticky_env)
             env_n = len(session.env) if sticky_env else 0
             warning_prefix += f"[shell_session: cwd={run_cwd}"
             if sticky_env:
@@ -529,6 +534,35 @@ class ExecTool:
                     )
 
             if bgd and job_id:
+                # Trailers were already injected via session.wrap — sync cwd/env
+                # when the adopted job finishes so later FG execute is not stale.
+                if session is not None:
+                    sess = session
+                    sticky = sticky_env
+
+                    def _sync_session_from_job(job: Any) -> None:
+                        try:
+                            sess.consume_stdout(job.stdout or "", sticky_env=sticky)
+                        except Exception:
+                            pass
+
+                    try:
+                        job_rec = mgr.status(job_id)
+                        # Re-adopt path already started watcher; attach via
+                        # a one-shot waiter so we don't require adopt() API change.
+                        async def _wait_and_sync() -> None:
+                            try:
+                                done = await mgr.await_complete(job_id)
+                                _sync_session_from_job(done)
+                            except Exception:
+                                pass
+
+                        asyncio.create_task(
+                            _wait_and_sync(), name=f"shell-session-sync-{job_id}"
+                        )
+                        _ = job_rec
+                    except Exception:
+                        pass
                 payload = {
                     "backgrounded": True,
                     "auto_background_on_timeout": True,
