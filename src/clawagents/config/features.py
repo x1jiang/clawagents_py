@@ -81,6 +81,12 @@ _FEATURE_DEFAULTS: dict[str, str] = {
     "memory_flush":         "1",   # Pre-compaction memory flush
     "hybrid_memory_search": "1",   # FTS5 BM25-style + MMR hybrid recall
     "pty_sessions":         "1",   # Interactive PTY shell sessions
+    "hashline_tools":       "1",   # Grok hashline_read / hashline_edit (additive)
+    "execute_background":   "1",   # Optional is_background on execute tool
+    "rtk_wrap":             "1",   # Auto-wrap noisy execute cmds with rtk (if installed)
+    "aggressive_tool_crush": "1",  # Lower crush thresholds in agent_loop (not hooks)
+    "execute_shell_session": "1",  # Persist cwd across execute (Grok shell-state slice)
+    "execute_auto_background": "1",  # On FG timeout, adopt process as background job
     "structured_output":    "1",   # Native provider json_schema / response_format
     "doom_loop":            "1",   # Generation tail-repetition resample
     "history_then_steps":   "1",   # Graduated compaction mode

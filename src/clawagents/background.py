@@ -173,6 +173,66 @@ class BackgroundJobManager:
         job._watcher = asyncio.create_task(_watch(), name=f"bgjob-watch-{jid}")
         return job
 
+    async def adopt(
+        self,
+        proc: asyncio.subprocess.Process,
+        command: Sequence[str],
+        *,
+        cwd: Optional[str] = None,
+        communicate_task: Optional[asyncio.Task] = None,
+        job_id: Optional[str] = None,
+        notify_on_complete: Optional[JobNotifier] = None,
+    ) -> BackgroundJob:
+        """Adopt a still-running process (Grok auto-background-on-timeout).
+
+        ``communicate_task`` should be an in-flight ``proc.communicate()`` task
+        that was shielded from the foreground wait timeout — we await it here
+        so stdout/stderr stay intact.
+        """
+        jid = job_id or uuid.uuid4().hex
+        if jid in self._jobs:
+            raise ValueError(f"BackgroundJobManager.adopt: duplicate job_id {jid!r}")
+
+        job = BackgroundJob(
+            id=jid,
+            command=list(command),
+            cwd=cwd,
+            pid=proc.pid,
+            started_at=time.time(),
+            _process=proc,
+        )
+        self._jobs[jid] = job
+
+        async def _watch() -> None:
+            try:
+                if communicate_task is not None:
+                    out_bytes, err_bytes = await communicate_task
+                    job.stdout = (out_bytes or b"").decode("utf-8", errors="replace")
+                    job.stderr = (err_bytes or b"").decode("utf-8", errors="replace")
+                elif proc.stdout is not None or proc.stderr is not None:
+                    out_bytes, err_bytes = await proc.communicate()
+                    job.stdout = (out_bytes or b"").decode("utf-8", errors="replace")
+                    job.stderr = (err_bytes or b"").decode("utf-8", errors="replace")
+                else:
+                    await proc.wait()
+                job.exit_code = proc.returncode
+            except asyncio.CancelledError:
+                job.cancelled = True
+                raise
+            finally:
+                job.ended_at = time.time()
+                job._done_event.set()
+                if notify_on_complete is not None:
+                    try:
+                        result = notify_on_complete(job)
+                        if asyncio.iscoroutine(result):
+                            await result
+                    except Exception:  # noqa: BLE001
+                        pass
+
+        job._watcher = asyncio.create_task(_watch(), name=f"bgjob-adopt-{jid}")
+        return job
+
     def status(self, job_id: str) -> BackgroundJob:
         """Return the :class:`BackgroundJob` record (mutates in place)."""
         try:

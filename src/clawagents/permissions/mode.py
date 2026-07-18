@@ -70,6 +70,7 @@ WRITE_CLASS_TOOLS: frozenset[str] = frozenset({
     "write_file",
     "edit_file",
     "apply_patch",
+    "hashline_edit",
     "create_file",
     "replace_in_file",
     "insert_in_file",

@@ -79,7 +79,7 @@ _NEVER_PARALLEL_TOOLS: frozenset[str] = frozenset({
 # their target paths are independent. Write-side tools are intentionally
 # excluded — they run sequentially via the snapshot path.
 _DEFAULT_PARALLEL_SAFE: frozenset[str] = frozenset({
-    "read_file", "list_dir", "glob", "search_files", "grep",
+    "read_file", "hashline_read", "list_dir", "glob", "search_files", "grep",
     "web_fetch", "web_search", "shell",  # stateless reads
 })
 
@@ -87,6 +87,8 @@ _DEFAULT_PARALLEL_SAFE: frozenset[str] = frozenset({
 # their own ``path_scoped_arg`` attribute.
 _DEFAULT_PATH_SCOPED_ARGS: Dict[str, str] = {
     "read_file": "path",
+    "hashline_read": "path",
+    "hashline_edit": "path",
     "list_dir": "path",
     "glob": "path",
     "search_files": "path",
@@ -122,8 +124,8 @@ def _path_scope_of(tool: "Tool", args: Dict[str, Any]) -> Optional[str]:
 # Before write tools modify a file, snapshot it for undo/rollback capability.
 
 _WRITE_TOOLS: frozenset[str] = frozenset({
-    "write_file", "edit_file", "apply_patch", "create_file", "replace_in_file",
-    "insert_in_file", "insert_lines", "patch_file",
+    "write_file", "edit_file", "apply_patch", "hashline_edit", "create_file",
+    "replace_in_file", "insert_in_file", "insert_lines", "patch_file",
 })
 
 

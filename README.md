@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.17.8-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.18.0-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -22,8 +22,8 @@ This repo is the **Python framework** (`pip install clawagents`). Ready-made cli
 | Product | Latest | What it is | Link |
 |---------|--------|------------|------|
 | **ClawAgents Desktop** | **v0.2.4** | Native macOS app — project chats, file editor, SSH remotes, Settings (incl. AWS Bedrock), Developer ID signed + notarized | [Repo](https://github.com/x1jiang/clawagents-desktop) · [Download DMG](https://github.com/x1jiang/clawagents-desktop/releases/tag/v0.2.4) |
-| **ClawAgents for VS Code / Cursor** | **v1.0.52** | Editor extension — chat, tools, Goal redirect, hunk review, session rewind, voice dictation, Bedrock | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Release + VSIX](https://github.com/x1jiang/clawagents-vscode/releases/tag/v1.0.51) |
-| **Python package** | **v6.17.8** | This library — P2/P3 correctness (breaker, FTS5, doom-loop, dream lock, …) · `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/) · [Release](https://github.com/x1jiang/clawagents_py/releases) |
+| **ClawAgents for VS Code / Cursor** | **v1.0.54** | Editor extension — chat, tools, Goal redirect, hunk review, session rewind, voice dictation, Bedrock | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Release + VSIX](https://github.com/x1jiang/clawagents-vscode/releases/tag/v1.0.54) |
+| **Python package** | **v6.18.0** | This library — Grok-inspired edit/execute harness (hashline, RTK wrap, shell session, auto-bg) · `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/) · [Release](https://github.com/x1jiang/clawagents_py/releases) |
 | **TypeScript package** | **v6.12.13** | Node/TS sibling — `npm install git+https://github.com/x1jiang/clawagents.git` | [Repo](https://github.com/x1jiang/clawagents) |
 
 ## Installation
@@ -36,6 +36,8 @@ pip install -U 'clawagents[bedrock]'   # + Amazon Bedrock (Claude via IAM + Nova
 pip install -U 'clawagents[all]'       # All providers + tiktoken
 ```
 
+> **Version 6.18.0** — Grok-inspired edit/execute harness (July 2026).
+
 > **Version 6.17.8** — Close residual P1/P2 gaps (July 2026).
 
 > **Version 6.17.7** — P2/P3 correctness hardening (July 2026).
@@ -44,7 +46,12 @@ pip install -U 'clawagents[all]'       # All providers + tiktoken
 
 > **Version 6.17.5** — Skill allowed-tools / grep / apply_patch tool-error fixes (July 2026).
 
-> **Version 6.17.4** — Act mode no longer inherits Goal verifier from a prior Goal run (July 2026).
+### New In v6.18.0
+- **Hashline tools:** feature-gated `hashline_read` / `hashline_edit` (chunk_v1 anchors, atomic batches, stale recovery)
+- **Execute:** optional `is_background` + `description`; shell-session cwd persistence; auto-background on FG timeout (adopt live process)
+- **RTK wrap:** auto-wrap noisy shell cmds (`pytest`, `git status/log/diff`, `ls`, `rg`, …) when `rtk` is installed
+- **Aggressive tool crush:** tighter in-loop crush thresholds (artifact + `retrieve_tool_result`)
+- **Edit diagnostics:** NFKC / whitespace / nearest-line hints on `edit_file` misses
 
 ### New In v6.17.8
 - **Hunk/rewind secrets:** agent-write + snapshot + hunk baselines skip `.env`/pem/credentials (also fixed `.env`→`env` `lstrip` bug)
@@ -1558,6 +1565,13 @@ parity sweep.
 ---
 
 ## Changelog
+
+### v6.18.0 — Grok-inspired edit/execute harness (July 2026)
+
+- `hashline_read` / `hashline_edit` (feature `hashline_tools`)
+- `execute` shell session cwd + auto-background on timeout + optional `is_background`
+- RTK wrap + aggressive in-loop tool-output crush
+- Richer `edit_file` miss diagnostics
 
 ### v6.17.8 — Residual P1/P2 closures (July 2026)
 

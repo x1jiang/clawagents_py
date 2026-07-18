@@ -8,11 +8,62 @@ Default export uses LocalBackend (real filesystem). Call
 
 from __future__ import annotations
 
+import difflib
 import re
 import time
+import unicodedata
 from typing import Any, Dict, List
 
 from clawagents.tools.registry import Tool, ToolResult
+
+
+def _ws_norm(s: str) -> str:
+    """Collapse whitespace per line (Grok-style soft match)."""
+    return "\n".join(" ".join(ln.split()) for ln in s.splitlines())
+
+
+def _nearest_edit_hint(content: str, target: str, *, max_lines: int = 3) -> str:
+    """Grok-style nearest-line / normalize hints when exact search/replace misses."""
+    hints: list[str] = []
+
+    # Unicode normalization: curly quotes / NFKC confusables
+    nfkc_target = unicodedata.normalize("NFKC", target)
+    nfkc_content = unicodedata.normalize("NFKC", content)
+    if nfkc_target != target and nfkc_target in nfkc_content:
+        hints.append(
+            " Target matches after Unicode NFKC normalization — re-copy the "
+            "exact bytes from read_file (curly quotes / lookalike characters)."
+        )
+
+    # Whitespace-normalized unique match
+    wn_target = _ws_norm(target)
+    if wn_target and wn_target in _ws_norm(content):
+        hints.append(
+            " Target matches after whitespace normalization — check indentation "
+            "or trailing spaces, or use hashline_edit with anchors."
+        )
+
+    needle = target.strip()
+    if needle:
+        needle_lines = needle.splitlines()
+        first = needle_lines[0].strip() if needle_lines else ""
+        if first:
+            best: tuple[float, int, str] | None = None
+            for i, line in enumerate(content.splitlines()):
+                ratio = difflib.SequenceMatcher(
+                    None, first, line.strip()
+                ).ratio()
+                if best is None or ratio > best[0]:
+                    best = (ratio, i + 1, line)
+            if best is not None and best[0] >= 0.55:
+                score, lineno, line = best
+                preview = line if len(line) <= 120 else line[:117] + "..."
+                hints.append(
+                    f" Nearest similar line ~{lineno} (similarity {score:.0%}): "
+                    f"{preview!r}."
+                )
+
+    return "".join(hints)
 
 IGNORE_DIRS = {
     "node_modules", ".git", ".venv", "venv", "env",
@@ -248,11 +299,28 @@ class EditFileTool:
             content = await sb.read_file(file_path)
 
             if target not in content:
-                return ToolResult(success=False, output="", error=f"edit_file failed: Could not find exact target text in {file_path}. Check whitespace and line endings.")
+                hint = _nearest_edit_hint(content, target)
+                return ToolResult(
+                    success=False,
+                    output="",
+                    error=(
+                        f"edit_file failed: Could not find exact target text in {file_path}. "
+                        "Check whitespace and line endings. Use read_file (or hashline_read) "
+                        f"to see the current content.{hint}"
+                    ),
+                )
 
             count = content.count(target)
             if count > 1 and not replace_all:
-                return ToolResult(success=False, output="", error=f"edit_file failed: Target text appears {count} times. Use replace_all=true or provide a more specific target.")
+                return ToolResult(
+                    success=False,
+                    output="",
+                    error=(
+                        f"edit_file failed: Target text appears {count} times. "
+                        "Use replace_all=true or provide a more specific target "
+                        "(include surrounding unique context)."
+                    ),
+                )
 
             if replace_all:
                 new_content = content.replace(target, replacement)

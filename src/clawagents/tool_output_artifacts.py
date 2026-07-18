@@ -207,28 +207,66 @@ def search_tool_artifacts(
     return hits
 
 
+# Aggressive in-loop crush (feature ``aggressive_tool_crush``) — tighter than
+# the default Headroom-inspired thresholds so large tool dumps never linger
+# in the prompt waiting for a hook or model-chosen ctx_* call.
+_AGGRESSIVE_CRUSH_THRESHOLD = 1_200
+_AGGRESSIVE_TARGET_CHARS = 2_000
+_AGGRESSIVE_INLINE_LIMIT = 6_000
+
+
 def prepare_tool_output_for_context(
     *,
     tool_name: str,
     tool_use_id: str,
     output: str,
     workspace: str | Path | None = None,
-    crush_threshold: int = 2_000,
-    inline_limit: int = DEFAULT_INLINE_CHARS,
+    crush_threshold: int | None = None,
+    inline_limit: int | None = None,
+    target_chars: int | None = None,
 ) -> tuple[str, Optional[str]]:
     """Crush oversized outputs and store full text when crushed or huge.
 
     Returns ``(prompt_text, artifact_id_or_None)``.
+
+    When ``CLAW_FEATURE_AGGRESSIVE_TOOL_CRUSH=1`` (default), uses tighter
+    thresholds unless the caller overrides ``crush_threshold`` /
+    ``inline_limit`` / ``target_chars``.
     """
     if not isinstance(output, str):
         output = str(output)
 
+    thresh = crush_threshold
+    inline = inline_limit
+    target = target_chars
+    try:
+        from clawagents.config.features import is_enabled
+
+        if is_enabled("aggressive_tool_crush"):
+            if thresh is None:
+                thresh = _AGGRESSIVE_CRUSH_THRESHOLD
+            if inline is None:
+                inline = _AGGRESSIVE_INLINE_LIMIT
+            if target is None:
+                target = _AGGRESSIVE_TARGET_CHARS
+    except Exception:
+        pass
+    if thresh is None:
+        thresh = 2_000
+    if inline is None:
+        inline = DEFAULT_INLINE_CHARS
+    if target is None:
+        target = 3_500
+
     crush: CrushResult = crush_tool_output(
-        output, tool_name=tool_name, threshold=crush_threshold
+        output,
+        tool_name=tool_name,
+        threshold=thresh,
+        target_chars=target,
     )
 
     # Always store when we crushed or when still over inline limit.
-    need_store = crush.did_crush or len(output) > inline_limit
+    need_store = crush.did_crush or len(output) > inline
     artifact_id: str | None = None
     if need_store:
         artifact_id, _path = store_tool_artifact(
@@ -243,7 +281,7 @@ def prepare_tool_output_for_context(
             },
         )
 
-    if not crush.did_crush and len(output) <= inline_limit:
+    if not crush.did_crush and len(output) <= inline:
         return output, artifact_id
 
     if crush.did_crush and artifact_id:
@@ -259,7 +297,7 @@ def prepare_tool_output_for_context(
     preview = output[:preview_chars]
     omitted = max(0, len(output) - len(preview))
     aid = artifact_id or tool_use_id
-    inline = (
+    stub = (
         "[Tool output truncated]\n"
         f"Tool: {tool_name}\n"
         f"Artifact id: {aid}\n"
@@ -268,7 +306,7 @@ def prepare_tool_output_for_context(
         f"Inline preview: first {len(preview)} chars"
     )
     if omitted:
-        inline += f" ({omitted} chars omitted)"
+        stub += f" ({omitted} chars omitted)"
     if preview:
-        inline += f"\n\nPreview:\n{preview}"
-    return inline, artifact_id
+        stub += f"\n\nPreview:\n{preview}"
+    return stub, artifact_id

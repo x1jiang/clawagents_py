@@ -1149,6 +1149,11 @@ def create_claw_agent(
                 get_watcher(os.getcwd()).start()
             except Exception:
                 pass
+        if _feat617("hashline_tools"):
+            from clawagents.tools.hashline import create_hashline_tools
+            for t in create_hashline_tools(sb):
+                if registry.get(t.name) is None:
+                    registry.register(t)
     except Exception:
         pass
 

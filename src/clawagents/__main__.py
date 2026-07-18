@@ -383,6 +383,8 @@ def _build_builtin_tool_catalog() -> list[dict[str, Any]]:
     from clawagents.tools.interactive import interactive_tools
     from clawagents.tools.tool_program import create_tool_program_tool
     from clawagents.tools.background_task import create_background_task_tools
+    from clawagents.config.features import is_enabled
+    from clawagents.tools.hashline import create_hashline_tools
 
     sb = LocalBackend()
     registry = ToolRegistry()
@@ -395,6 +397,7 @@ def _build_builtin_tool_catalog() -> list[dict[str, Any]]:
         *create_advanced_fs_tools(sb),
         *web_tools,
         *create_background_task_tools(),
+        *(create_hashline_tools(sb) if is_enabled("hashline_tools") else ()),
     ]:
         registry.register(tool)
     registry.register(create_tool_program_tool(registry))
