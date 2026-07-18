@@ -24,9 +24,14 @@ def _git(args: list[str], cwd: str, *, timeout: int = 60) -> tuple[int, str, str
         return 1, "", str(exc)
 
 
-def _is_git_work_tree(cwd: str) -> bool:
+def is_git_work_tree(cwd: str) -> bool:
+    """True when ``cwd`` is inside a git work tree."""
     code, out, _err = _git(["rev-parse", "--is-inside-work-tree"], cwd)
     return code == 0 and out.strip().lower() == "true"
+
+
+# Back-compat alias used by tests / older imports.
+_is_git_work_tree = is_git_work_tree
 
 
 def _not_a_repo_message(cwd: str) -> str:

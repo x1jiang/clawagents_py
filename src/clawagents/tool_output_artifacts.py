@@ -249,6 +249,10 @@ def search_tool_artifacts(
 _AGGRESSIVE_CRUSH_THRESHOLD = 1_200
 _AGGRESSIVE_TARGET_CHARS = 2_000
 _AGGRESSIVE_INLINE_LIMIT = 6_000
+# Exact-match edits (apply_patch / hashline) need verbatim code/log views.
+# Crushing 2.5K→2.0K is all risk; keep a higher floor for those kinds.
+_CODEISH_CRUSH_FLOOR = 4_000
+_CODEISH_KINDS = frozenset({"code", "log", "diff"})
 
 
 def prepare_tool_output_for_context(
@@ -267,7 +271,8 @@ def prepare_tool_output_for_context(
 
     When ``CLAW_FEATURE_AGGRESSIVE_TOOL_CRUSH=1`` (default), uses tighter
     thresholds unless the caller overrides ``crush_threshold`` /
-    ``inline_limit`` / ``target_chars``.
+    ``inline_limit`` / ``target_chars``. Code/log/diff outputs use a higher
+    floor (~4K) so edit tools are not fed compressed views.
     """
     if not isinstance(output, str):
         output = str(output)
@@ -277,7 +282,9 @@ def prepare_tool_output_for_context(
     target = target_chars
     try:
         from clawagents.config.features import is_enabled
+        from clawagents.memory.content_crush import detect_content_kind
 
+        kind = detect_content_kind(output, tool_name=tool_name)
         if is_enabled("aggressive_tool_crush"):
             if thresh is None:
                 thresh = _AGGRESSIVE_CRUSH_THRESHOLD
@@ -285,6 +292,10 @@ def prepare_tool_output_for_context(
                 inline = _AGGRESSIVE_INLINE_LIMIT
             if target is None:
                 target = _AGGRESSIVE_TARGET_CHARS
+        if kind in _CODEISH_KINDS and thresh is not None:
+            thresh = max(thresh, _CODEISH_CRUSH_FLOOR)
+        if kind in _CODEISH_KINDS and target is not None:
+            target = max(target, _CODEISH_CRUSH_FLOOR)
     except Exception:
         pass
     if thresh is None:

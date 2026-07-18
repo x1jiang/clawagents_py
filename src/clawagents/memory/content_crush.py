@@ -46,10 +46,18 @@ class CrushResult:
         return max(0, self.original_chars - self.crushed_chars)
 
 
+_CODE_READ_TOOLS = frozenset({
+    "read_file", "hashline_read", "hashline_grep", "edit_file", "apply_patch",
+})
+
+
 def detect_content_kind(text: str, tool_name: str = "") -> ContentKind:
     name = (tool_name or "").lower().strip()
     if name in _SEARCH_TOOLS or name.endswith("_search") or name.endswith(".grep"):
         return "search"
+    # File reads / edit tools: prefer code floor so exact-match edits see verbatim text.
+    if name in _CODE_READ_TOOLS:
+        return "code"
     if name in {"execute", "execute_command", "bash", "run_command"} and _TEST_HINT.search(text[:4000]):
         # Prefer test crush for pytest/junit dumps from shell tools.
         if text.count("PASSED") + text.count("FAILED") + text.count("<testcase") >= 2:

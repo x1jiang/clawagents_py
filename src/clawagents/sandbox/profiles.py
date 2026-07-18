@@ -288,6 +288,15 @@ def _seatbelt_profile_text(
 
     cwd_roots = _roots(cwd)
     tmp_roots = _roots(tempfile.gettempdir())
+    # Models habitually write to /tmp; on macOS that is distinct from
+    # tempfile.gettempdir() (/var/folders/…). Allow both spellings.
+    for extra in ("/tmp", "/private/tmp"):
+        try:
+            for form in _roots(extra):
+                if form not in tmp_roots:
+                    tmp_roots.append(form)
+        except OSError:
+            pass
     lines = [
         "(version 1)",
         "(allow default)",

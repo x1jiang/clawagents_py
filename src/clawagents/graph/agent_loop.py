@@ -2796,6 +2796,30 @@ async def _run_agent_graph_core(
                 if rm:
                     dynamic_parts.append(rm)
                     emit("context", {"message": "injected ranked repo map"})
+            # Workspace facts models need before inventing git /tmp paths.
+            try:
+                import tempfile
+                from pathlib import Path as _P
+
+                from clawagents.tools.git_tools import is_git_work_tree
+
+                ws = str(getattr(run_context, "workspace", None) or _P.cwd())
+                git_ok = is_git_work_tree(ws)
+                scratch = tempfile.gettempdir()
+                dynamic_parts.append(
+                    "## Workspace env\n"
+                    f"- workspace: `{ws}`\n"
+                    f"- is_git_repo: {'true' if git_ok else 'false'}\n"
+                    f"- scratch_dir: `{scratch}` (also /tmp when sandbox allows)\n"
+                    + (
+                        "- Prefer `snapshot_diff` to review edits (no git).\n"
+                        if not git_ok
+                        else "- Prefer `git_status` / `git_diff` to review edits.\n"
+                    )
+                    + "- Do not chain `&& git …` after syntax checks when is_git_repo is false.\n"
+                )
+            except Exception:
+                logger.debug("workspace env preamble failed", exc_info=True)
         except Exception:
             logger.debug("dynamic context pack failed", exc_info=True)
 

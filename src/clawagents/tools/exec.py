@@ -82,6 +82,27 @@ def _git_not_a_repo_signal(command: str, exit_code: int, stdout: str, stderr: st
     return "git " in f" {cmd} " or cmd.strip().startswith("git")
 
 
+def _sandbox_write_hint(stdout: str, stderr: str) -> str | None:
+    blob = f"{stdout}\n{stderr}"
+    if "Operation not permitted" not in blob and "EPERM" not in blob:
+        return None
+    if "/tmp" not in blob and "private/tmp" not in blob.lower():
+        # Still useful when any path outside the sandbox is denied.
+        if "not permitted" not in blob.lower():
+            return None
+    try:
+        import tempfile
+
+        scratch = tempfile.gettempdir()
+    except Exception:
+        scratch = "<system temp>"
+    return (
+        f"Sandbox write denied. Prefer the workspace or session scratch "
+        f"({scratch}); /tmp and /private/tmp are also allowed when the OS "
+        f"sandbox profile is active. Avoid writing outside those roots."
+    )
+
+
 def _format_nonzero_command_output(
     command: str,
     exit_code: int,
@@ -98,8 +119,12 @@ def _format_nonzero_command_output(
             "Git exited 128 because this working directory is not a git "
             "repository. Do not retry git here. Run syntax/tests in a "
             "separate execute call without chaining `&& git …` "
-            "(e.g. `node --check file.js` alone)."
+            "(e.g. `node --check file.js` alone). Prefer snapshot_diff to "
+            "review edits when git is unavailable."
         )
+    hint = _sandbox_write_hint(stdout, stderr)
+    if hint:
+        interpretation = f"{interpretation} {hint}"
     payload: dict[str, Any] = {
         "command_executed": True,
         "success": False,

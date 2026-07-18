@@ -1,6 +1,14 @@
 # ClawAgents Changelog
 
 
+### v6.20.14 — apply_patch corruption guard + snapshot_diff + crush floor (July 2026)
+
+- ``apply_patch``: line-based SEARCH/REPLACE parser (empty REPLACE = deletion); refuse writes that introduce fence markers; return unified diff of applied change; stricter unified-diff hunks.
+- ``snapshot_diff`` tool: git-free review vs ``.clawagents/snapshots/``.
+- Workspace env preamble: ``is_git_repo``, ``scratch_dir``; prefer ``snapshot_diff`` when no git.
+- Aggressive crush: code/log/diff and ``read_file``/hashline kinds use ≥4K floor (stop crushing 2.5K reads).
+- Seatbelt: allow ``/tmp`` + ``/private/tmp``; exec hints on Operation not permitted.
+
 ### v6.20.13 — Clearer git / hashline / execute DX (July 2026)
 
 - ``git_status`` / ``git_diff``: soft success with a clear notice when cwd is not a git repo (skip further git); commit/undo still hard-fail.

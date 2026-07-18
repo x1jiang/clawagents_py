@@ -261,6 +261,127 @@ class CheckpointDiffTool:
             return ToolResult(success=False, output="", error=str(info.get("error")))
         return ToolResult(success=True, output=json.dumps(info.get("files") or [], indent=2))
 
+class SnapshotDiffTool:
+    name = "snapshot_diff"
+    description = (
+        "Diff the working tree against a pre-edit file snapshot under "
+        ".clawagents/snapshots/ (git-free review). Use when is_git_repo is false "
+        "or before claiming edits are correct. Optional path limits to one file; "
+        "optional snapshot id (directory name); default is the oldest snapshot "
+        "still on disk (session-start baseline when available)."
+    )
+    parameters = {
+        "path": {
+            "type": "string",
+            "description": "Optional workspace-relative file to diff",
+        },
+        "snapshot": {
+            "type": "string",
+            "description": "Snapshot directory name under .clawagents/snapshots/",
+        },
+        "max_chars": {
+            "type": "integer",
+            "description": "Cap returned diff chars (default 24000)",
+        },
+    }
+
+    def __init__(self, workspace: str | None = None) -> None:
+        self._workspace = workspace or os.getcwd()
+
+    async def execute(self, args: dict[str, Any]) -> ToolResult:
+        import difflib
+
+        root = Path(self._workspace).resolve()
+        snap_root = root / ".clawagents" / "snapshots"
+        if not snap_root.is_dir():
+            return ToolResult(
+                success=True,
+                output=(
+                    "No .clawagents/snapshots/ yet — edit a file with apply_patch / "
+                    "write_file / hashline_edit first (snapshots are taken pre-write)."
+                ),
+            )
+        dirs = sorted(
+            [p for p in snap_root.iterdir() if p.is_dir()],
+            key=lambda p: p.name,
+        )
+        if not dirs:
+            return ToolResult(success=True, output="No snapshot directories present.")
+        wanted = str(args.get("snapshot") or "").strip()
+        if wanted:
+            snap_dir = snap_root / wanted
+            if not snap_dir.is_dir():
+                return ToolResult(
+                    success=False,
+                    output="",
+                    error=f"snapshot not found: {wanted}. Available: {[d.name for d in dirs[-8:]]}",
+                )
+        else:
+            snap_dir = dirs[0]  # oldest ≈ session-start baseline
+
+        rel = str(args.get("path") or "").strip()
+        try:
+            max_chars = int(args.get("max_chars") or 24_000)
+        except (TypeError, ValueError):
+            max_chars = 24_000
+
+        files: list[Path]
+        if rel:
+            cand = (snap_dir / rel).resolve()
+            try:
+                cand.relative_to(snap_dir.resolve())
+            except ValueError:
+                return ToolResult(success=False, output="", error="path escapes snapshot")
+            files = [cand] if cand.is_file() else []
+            if not files:
+                return ToolResult(
+                    success=True,
+                    output=f"No snapshot of {rel!r} in {snap_dir.name}",
+                )
+        else:
+            files = [p for p in snap_dir.rglob("*") if p.is_file()]
+
+        parts: list[str] = [f"Snapshot baseline: {snap_dir.name} ({len(files)} file(s))"]
+        for snap_file in files[:40]:
+            try:
+                rel_path = snap_file.relative_to(snap_dir)
+            except ValueError:
+                continue
+            cur = root / rel_path
+            try:
+                before = snap_file.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                parts.append(f"\n## {rel_path}\n(read snapshot failed: {exc})")
+                continue
+            if not cur.is_file():
+                parts.append(f"\n## {rel_path}\n(deleted in working tree)")
+                continue
+            try:
+                after = cur.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                parts.append(f"\n## {rel_path}\n(read working tree failed: {exc})")
+                continue
+            if before == after:
+                continue
+            diff = "".join(
+                difflib.unified_diff(
+                    before.splitlines(keepends=True),
+                    after.splitlines(keepends=True),
+                    fromfile=f"snapshot/{rel_path}",
+                    tofile=f"worktree/{rel_path}",
+                    n=2,
+                )
+            )
+            parts.append(f"\n## {rel_path}\n{diff or '(changed but empty diff)'}")
+
+        if len(parts) == 1:
+            parts.append("\n(no textual differences vs snapshot)")
+        text = parts[0] + "".join(parts[1:])
+        if len(text) > max_chars:
+            text = text[: max_chars - 40] + "\n… [snapshot_diff truncated] …\n"
+        return ToolResult(success=True, output=text)
+
+
 class WritePlanTool:
     name = "write_plan"
     description = (
@@ -316,5 +437,6 @@ def create_context_tools(workspace: str | None = None) -> list[Tool]:
         CheckpointRestoreTool(ws),
         CheckpointListTool(ws),
         CheckpointDiffTool(ws),
+        SnapshotDiffTool(ws),
         WritePlanTool(ws),
     ]
