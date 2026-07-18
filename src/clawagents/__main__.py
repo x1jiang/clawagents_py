@@ -363,6 +363,20 @@ def cmd_doctor():
     catalog = _build_builtin_tool_catalog()
     _check("Tool catalog", bool(catalog), f"{len(catalog)} built-in tools inspectable")
 
+    # 12. Companion CLIs (context-mode, rtk) — version floors
+    sys.stderr.write("\n  Companions:\n")
+    try:
+        from clawagents.companions import probe_companions
+
+        for status in probe_companions():
+            _check(status.name, status.ok_vs_floor, status.summary())
+            if not status.ok_vs_floor:
+                issues += 1
+                sys.stderr.write(f"      Fix: {status.hint}\n")
+    except Exception as exc:  # noqa: BLE001
+        _check("companions", False, str(exc))
+        issues += 1
+
     # Summary
     sys.stderr.write("\n" + "=" * 40 + "\n")
     if issues == 0:

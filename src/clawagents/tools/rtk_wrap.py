@@ -86,9 +86,14 @@ def rtk_binary() -> Optional[str]:
     return shutil.which("rtk")
 
 
+_rtk_floor_warned = False
+
+
 def reset_rtk_cache() -> None:
     """Test helper — clear cached ``which(rtk)`` result."""
+    global _rtk_floor_warned
     rtk_binary.cache_clear()
+    _rtk_floor_warned = False
 
 
 def _split_head(command: str) -> tuple[str, list[str]]:
@@ -109,6 +114,27 @@ def _split_head(command: str) -> tuple[str, list[str]]:
     return parts[0], parts[1:]
 
 
+def _warn_rtk_below_floor(binary: str) -> None:
+    """Emit a one-shot stderr note when rtk is present but below the floor."""
+    global _rtk_floor_warned
+    if _rtk_floor_warned:
+        return
+    _rtk_floor_warned = True
+    try:
+        from clawagents.companions import probe_rtk
+
+        status = probe_rtk()
+        if status.found and not status.ok_vs_floor:
+            import sys
+
+            sys.stderr.write(
+                f"[clawagents] rtk below floor: {status.summary()} — {status.hint}\n"
+            )
+    except Exception:  # noqa: BLE001
+        pass
+    _ = binary
+
+
 def maybe_wrap_with_rtk(command: str) -> tuple[str, Optional[str]]:
     """Return ``(command, reason|None)``. Unchanged when wrap does not apply."""
     from clawagents.config.features import is_enabled
@@ -121,6 +147,8 @@ def maybe_wrap_with_rtk(command: str) -> tuple[str, Optional[str]]:
     binary = rtk_binary()
     if not binary:
         return command, None
+
+    _warn_rtk_below_floor(binary)
 
     stripped = command.strip()
     if _SKIP_HEAD_RE.match(stripped):
