@@ -72,6 +72,15 @@ def detect_content_kind(text: str, tool_name: str = "") -> ContentKind:
             pass
 
     sample = text[:8000]
+    lines = text.splitlines()
+    # Numbered source (nl -ba / read_file) before HTML sniff — JS often embeds
+    # HTML templates; mistaking them for kind=html bypassed the 4K code floor.
+    if lines and (
+        _LINE_NUMBERED.search("\n".join(lines[:40]))
+        or _CODE_FENCE.search(text[:500])
+    ):
+        return "code"
+
     if _DIFF_HDR.search(sample) and (sample.count("\n+") + sample.count("\n-")) >= 8:
         return "diff"
     if _HTML_TAG.search(sample) and sample.count("<") >= 8:
@@ -81,7 +90,6 @@ def detect_content_kind(text: str, tool_name: str = "") -> ContentKind:
     ):
         return "test"
 
-    lines = text.splitlines()
     if lines:
         hot_count = sum(1 for ln in lines if _LOG_HINT.search(ln))
         # A few ERROR/WARN lines in a long dump → treat as log.
@@ -89,8 +97,6 @@ def detect_content_kind(text: str, tool_name: str = "") -> ContentKind:
             return "log"
         if hot_count >= max(3, len(lines[:80]) // 10):
             return "log"
-        if _LINE_NUMBERED.search("\n".join(lines[:30])) or _CODE_FENCE.search(text[:500]):
-            return "code"
         # High density of punctuation typical of code dumps
         code_chars = sum(1 for c in text[:2000] if c in "{}[];=<>")
         if code_chars > 80 and "\n" in text[:500]:

@@ -1,6 +1,12 @@
 # ClawAgents Changelog
 
 
+### v6.20.20 — Skill continue=true + crush/code sniff + retrieve under skill gate (July 2026)
+
+- ``use_skill(continue=true)`` resumes from server-side offset/hash (no 64-char sha256 echo); continuation prompts and errors mention hash mismatches honestly.
+- Numbered source (``nl -ba`` / line dumps) classified as ``code`` before HTML sniff so embedded templates keep the 4K floor.
+- ``retrieve_tool_result`` is skill-gate control-plane (matches crush recovery headers).
+
 ### v6.20.19 — Control-plane crush exemption + post-edit syntax gate (July 2026)
 
 - ``use_skill`` / ``list_skills`` / ``retrieve_tool_result`` outputs are never crushed (skill instructions stay verbatim; auto-drain pages too).

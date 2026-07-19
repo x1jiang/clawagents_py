@@ -534,8 +534,7 @@ class ToolRegistry:
                         break
                     page_args = {
                         "name": pending,
-                        "offset": int(offset),
-                        "expected_hash": expected_hash,
+                        "continue": True,
                     }
                     result = await asyncio.wait_for(
                         _call_tool_execute(use_tool, page_args, run_context),
@@ -606,11 +605,22 @@ class ToolRegistry:
                 supplied_offset = int(args.get("offset", 0) or 0)
             except (TypeError, ValueError):
                 supplied_offset = -1
+            # Prefer continue=true — models routinely mangle 64-char sha256
+            # echoes; pending offset/hash already live on the server.
+            want_continue = bool(args.get("continue"))
+            same_skill = _skill_key(args.get("name") or pending_name) == _skill_key(
+                pending_name
+            )
             continuing = (
                 tool_name == "use_skill"
-                and _skill_key(args.get("name")) == _skill_key(pending_name)
-                and supplied_offset == expected_offset
-                and args.get("expected_hash") == expected_hash
+                and same_skill
+                and (
+                    want_continue
+                    or (
+                        supplied_offset == expected_offset
+                        and args.get("expected_hash") == expected_hash
+                    )
+                )
             )
             aborting = tool_name == "use_skill" and bool(args.get("abort"))
             if not continuing and not aborting:
@@ -628,7 +638,9 @@ class ToolRegistry:
         # Completed skills compose by intersection. Skill discovery/loading is
         # control-plane behavior; it may add restrictions but never widen them.
         allowed_tools = getattr(run_context, "active_skill_allowed_tools", None)
-        control_plane = {"use_skill", "list_skills"}
+        # retrieve_tool_result is control-plane recovery for crushed outputs;
+        # crush headers advertise it — the gate must not refuse it.
+        control_plane = {"use_skill", "list_skills", "retrieve_tool_result"}
         if (
             allowed_tools is not None
             and tool_name not in allowed_tools

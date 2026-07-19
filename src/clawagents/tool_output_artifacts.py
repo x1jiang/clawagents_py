@@ -252,7 +252,9 @@ _AGGRESSIVE_INLINE_LIMIT = 6_000
 # Exact-match edits (apply_patch / hashline) need verbatim code/log views.
 # Crushing 2.5K→2.0K is all risk; keep a higher floor for those kinds.
 _CODEISH_CRUSH_FLOOR = 4_000
-_CODEISH_KINDS = frozenset({"code", "log", "diff"})
+# html included: large markup dumps still need a floor; prefer code sniff first
+# for numbered sources that embed templates.
+_CODEISH_KINDS = frozenset({"code", "log", "diff", "html"})
 # Skill pages / catalogs / archived restores are control-plane: the model must
 # never operate on a crushed fraction of its instructions (auto-drain pages
 # also flow through this path since v6.20.15).

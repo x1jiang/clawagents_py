@@ -1145,8 +1145,9 @@ def create_skill_tools(
             "Read instructions for one skill by name in contiguous pages. Call this early when "
             "a listed skill matches the user's task (project setup, cohort/SQL "
             "workflows, document formats, etc.) — do not reinvent that workflow. "
-            "After page 1, the harness auto-finishes remaining pages when you call any "
-            "other tool; you may also continue with next_offset or abort=true to stop. "
+            "After page 1, prefer continue=true (server holds offset/hash — do not "
+            "re-type sha256). The harness also auto-finishes remaining pages when you "
+            "call any other tool; abort=true stops early. "
             "Names are matched case-insensitively; hyphens/underscores are equivalent."
         )
         parameters = {
@@ -1161,9 +1162,20 @@ def create_skill_tools(
                 "description": "Page size, 1000-10000 characters (default 10000)",
                 "required": False,
             },
+            "continue": {
+                "type": "boolean",
+                "description": (
+                    "Load the next pending page using server-side offset/hash. "
+                    "Preferred over re-echoing expected_hash (LLMs often corrupt "
+                    "64-char digests)."
+                ),
+                "required": False,
+            },
             "expected_hash": {
                 "type": "string",
-                "description": "Required content hash for continuation pages",
+                "description": (
+                    "Legacy: content hash for continuation pages. Prefer continue=true."
+                ),
                 "required": False,
             },
             "abort": {
@@ -1376,42 +1388,102 @@ def create_skill_tools(
                     output="",
                     error="offset and max_chars must be integers",
                 )
-            if offset > len(rendered):
-                return ToolResult(
-                    success=False,
-                    output="",
-                    error=f"offset {offset} exceeds instruction length {len(rendered)}",
-                )
 
             expected_hash = str(args.get("expected_hash", "") or "")
+            want_continue = bool(args.get("continue"))
             pending_name = getattr(run_context, "pending_skill_name", None)
-            if pending_name:
-                if (
-                    _norm_skill_key(pending_name) != _norm_skill_key(skill.name)
-                    or offset != getattr(run_context, "pending_skill_next_offset", None)
-                    or expected_hash != getattr(run_context, "pending_skill_content_hash", None)
-                    or content_hash != getattr(run_context, "pending_skill_content_hash", None)
+            pending_offset = getattr(run_context, "pending_skill_next_offset", None)
+            pending_hash = getattr(run_context, "pending_skill_content_hash", None)
+
+            def _clear_pending() -> None:
+                if run_context is not None and hasattr(
+                    run_context, "clear_pending_skill"
                 ):
-                    # Clear pending before returning — otherwise "restart at
-                    # offset 0" is itself refused by the registry gate / contiguity
-                    # check and the session wedges permanently.
-                    if run_context is not None and hasattr(
-                        run_context, "clear_pending_skill"
-                    ):
-                        run_context.clear_pending_skill()
+                    run_context.clear_pending_skill()
+
+            if want_continue:
+                if not pending_name or pending_offset is None or not pending_hash:
                     return ToolResult(
                         success=False,
                         output="",
                         error=(
-                            "Skill continuation is not contiguous or its content hash "
-                            "changed; pending load cleared — restart at offset 0."
+                            "continue=true requires a pending multi-page skill load. "
+                            "Call use_skill at offset 0 to start, or omit continue."
+                        ),
+                    )
+                if _norm_skill_key(pending_name) != _norm_skill_key(skill.name):
+                    _clear_pending()
+                    return ToolResult(
+                        success=False,
+                        output="",
+                        error=(
+                            f"continue=true pending skill is '{pending_name}', not "
+                            f"'{skill.name}'; pending cleared — restart at offset 0."
+                        ),
+                    )
+                # Server-side cursor — ignore model-supplied offset/hash.
+                offset = int(pending_offset)
+                if content_hash != pending_hash:
+                    _clear_pending()
+                    return ToolResult(
+                        success=False,
+                        output="",
+                        error=(
+                            f"Skill '{skill.name}' content changed on disk during "
+                            f"paging (hash {pending_hash[:12]}… → {content_hash[:12]}…). "
+                            "Pending cleared — restart at offset 0."
+                        ),
+                    )
+            elif pending_name:
+                reasons: list[str] = []
+                if _norm_skill_key(pending_name) != _norm_skill_key(skill.name):
+                    reasons.append(
+                        f"name mismatch (pending '{pending_name}', got '{skill.name}')"
+                    )
+                if offset != pending_offset:
+                    reasons.append(
+                        f"offset mismatch (pending {pending_offset}, got {offset})"
+                    )
+                if expected_hash and expected_hash != pending_hash:
+                    reasons.append(
+                        "expected_hash does not match pending "
+                        f"(got {expected_hash[:16]}…, want {str(pending_hash)[:16]}…); "
+                        "prefer continue=true instead of re-typing the digest"
+                    )
+                if content_hash != pending_hash:
+                    reasons.append(
+                        f"skill file changed on disk ({pending_hash[:12]}… → "
+                        f"{content_hash[:12]}…)"
+                    )
+                if reasons:
+                    # Clear pending before returning — otherwise "restart at
+                    # offset 0" is itself refused by the registry gate.
+                    _clear_pending()
+                    return ToolResult(
+                        success=False,
+                        output="",
+                        error=(
+                            "Skill continuation rejected: "
+                            + "; ".join(reasons)
+                            + ". Pending load cleared — restart at offset 0, "
+                            "or use continue=true for the next page."
                         ),
                     )
             elif offset != 0:
                 return ToolResult(
                     success=False,
                     output="",
-                    error="Skill loading must start at offset 0.",
+                    error=(
+                        "No pending skill page to resume. Start with use_skill "
+                        "at offset 0 (or continue=true only while a page is pending)."
+                    ),
+                )
+
+            if offset > len(rendered):
+                return ToolResult(
+                    success=False,
+                    output="",
+                    error=f"offset {offset} exceeds instruction length {len(rendered)}",
                 )
 
             end = min(len(rendered), offset + max_chars)
@@ -1427,8 +1499,8 @@ def create_skill_tools(
             if end < len(rendered):
                 continuation = (
                     f"\n\n[More instructions remain. Call use_skill with "
-                    f'name="{skill.name}", offset={end}, and '
-                    f'expected_hash="{content_hash}".]'
+                    f'name="{skill.name}", continue=true '
+                    f"(server holds offset={end}; do not re-type the hash).]"
                 )
                 next_offset: int | None = end
             else:

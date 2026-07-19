@@ -656,6 +656,127 @@ def test_use_skill_rejects_skipped_offset_and_stale_hash(tmp_path):
     assert restart.success
 
 
+def test_use_skill_continue_true_ignores_mangled_hash(tmp_path):
+    """LLMs drop chars mid-sha256; continue=true uses server cursor only."""
+    root = tmp_path / "skills"
+    _write_skill(root, "long-cont", body="A" * 15_000)
+    store = SkillStore()
+    store.add_directory(root)
+    _load(store)
+    use_tool = [tool for tool in create_skill_tools(store) if tool.name == "use_skill"][0]
+    registry = ToolRegistry()
+    registry.register(use_tool)
+    context = RunContext()
+    first = asyncio.run(
+        registry.execute_tool(
+            "use_skill",
+            {"name": "long-cont", "max_chars": 4_000},
+            run_context=context,
+        )
+    )
+    assert first.success
+    assert "continue=true" in first.output
+    assert context.pending_skill_next_offset is not None
+    real = context.pending_skill_content_hash
+    mangled = real[:40] + "XXXXXXX" + real[47:]  # mid-string corruption
+    cont = asyncio.run(
+        registry.execute_tool(
+            "use_skill",
+            {
+                "name": "long-cont",
+                "continue": True,
+                "offset": 999_999,  # ignored
+                "expected_hash": mangled,  # ignored
+                "max_chars": 4_000,
+            },
+            run_context=context,
+        )
+    )
+    assert cont.success, cont.error
+    assert "expected_hash does not match" not in (cont.error or "")
+
+
+def test_use_skill_hash_mismatch_error_mentions_hash(tmp_path):
+    root = tmp_path / "skills"
+    _write_skill(root, "long-hash", body="A" * 15_000)
+    store = SkillStore()
+    store.add_directory(root)
+    _load(store)
+    use_tool = [tool for tool in create_skill_tools(store) if tool.name == "use_skill"][0]
+    registry = ToolRegistry()
+    registry.register(use_tool)
+    context = RunContext()
+    first = asyncio.run(
+        registry.execute_tool(
+            "use_skill",
+            {"name": "long-hash", "max_chars": 4_000},
+            run_context=context,
+        )
+    )
+    assert first.success
+    # Call use_skill tool directly (bypass registry auto-drain) with mangled hash.
+    bad = asyncio.run(
+        use_tool.execute(
+            {
+                "name": "long-hash",
+                "offset": context.pending_skill_next_offset,
+                "expected_hash": "deadbeef" * 8,
+            },
+            run_context=context,
+        )
+    )
+    assert not bad.success
+    assert "expected_hash" in (bad.error or "")
+    assert "continue=true" in (bad.error or "")
+    assert "must start at offset 0" not in (bad.error or "")
+
+
+def test_retrieve_tool_result_allowed_under_skill_gate(tmp_path):
+    root = tmp_path / "skills"
+    _write_skill(
+        root,
+        "narrow",
+        frontmatter="name: narrow\ndescription: d\nallowed-tools: read_file",
+    )
+    store = SkillStore()
+    store.add_directory(root)
+    _load(store)
+    use_tool = [tool for tool in create_skill_tools(store) if tool.name == "use_skill"][0]
+
+    class RetrieveTool:
+        name = "retrieve_tool_result"
+        description = "retrieve"
+        parameters = {}
+
+        async def execute(self, args):
+            return ToolResult(success=True, output="restored")
+
+    class WriteTool:
+        name = "write_file"
+        description = "write"
+        parameters = {}
+
+        async def execute(self, args):
+            return ToolResult(success=True, output="wrote")
+
+    registry = ToolRegistry()
+    registry.register(use_tool)
+    registry.register(RetrieveTool())
+    registry.register(WriteTool())
+    context = RunContext()
+    assert asyncio.run(
+        registry.execute_tool("use_skill", {"name": "narrow"}, run_context=context)
+    ).success
+    ok = asyncio.run(
+        registry.execute_tool("retrieve_tool_result", {}, run_context=context)
+    )
+    assert ok.success and ok.output == "restored"
+    denied = asyncio.run(
+        registry.execute_tool("write_file", {}, run_context=context)
+    )
+    assert not denied.success
+
+
 def test_explicit_empty_allowed_tools_blocks_every_data_plane_tool(tmp_path):
     root = tmp_path / "skills"
     _write_skill(

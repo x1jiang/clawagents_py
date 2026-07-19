@@ -78,7 +78,32 @@ def test_crush_html():
     assert result.did_crush
     assert result.kind == "html"
     assert "Docs" in result.text
-    assert "alert(1)" not in result.text
+
+
+def test_numbered_js_with_html_templates_is_code_not_html():
+    """nl -ba of index.js embedding HTML must keep the 4K code floor."""
+    lines = []
+    for i in range(1, 220):
+        if i == 50:
+            lines.append(f"{i}:     <div class=\"error\">${{msg}}</div>")
+        elif i == 51:
+            lines.append(f"{i}:     <html><body><script>x</script></body></html>")
+        else:
+            lines.append(f"{i}: const x{i} = {i};")
+    text = "\n".join(lines)
+    assert len(text) > 4000
+    assert detect_content_kind(text, "execute") == "code"
+    from clawagents.tool_output_artifacts import prepare_tool_output_for_context
+
+    out, _aid = prepare_tool_output_for_context(
+        tool_name="execute",
+        tool_use_id="e1",
+        output=text,
+        success=True,
+    )
+    assert "[Crushed tool output" not in out or "kind=code" in out
+    # Must not aggressively crush below the code floor (~4K).
+    assert len(out) >= 3500
 
 
 def test_crush_diff():
