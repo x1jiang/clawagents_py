@@ -82,6 +82,11 @@ class UsageEvent(StreamEvent):
     input_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
+    # Prompt-cache accounting (OpenAI Responses / Anthropic). Hosts need these
+    # for cache-aware cost estimates — previously dropped because they were
+    # only present in ``data`` and never promoted to typed fields.
+    cached_input_tokens: int = 0
+    cache_creation_tokens: int = 0
     model: str = ""
     kind: str = "usage"
 

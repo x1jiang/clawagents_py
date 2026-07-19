@@ -1,6 +1,10 @@
 # ClawAgents Changelog
 
 
+### v6.20.27 — UsageEvent cache fields (July 2026)
+
+- `UsageEvent` now carries `cached_input_tokens` / `cache_creation_tokens` (promoted from stream data) so hosts can show cache hit rate and cache-aware cost.
+
 ### v6.20.26 — Plan mode Grok Build parity (July 2026)
 
 - UI `chat_mode=read_only|plan` sets engine `PermissionMode.PLAN` by default.

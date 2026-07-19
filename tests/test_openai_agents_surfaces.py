@@ -257,12 +257,21 @@ class TestStreamEvents:
     def test_usage_event_mapping(self):
         ev = stream_event_from_kind(
             "usage",
-            {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15, "model": "gpt"},
+            {
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "total_tokens": 15,
+                "cached_input_tokens": 8,
+                "cache_creation_tokens": 2,
+                "model": "gpt",
+            },
         )
         assert isinstance(ev, UsageEvent)
         assert ev.input_tokens == 10
         assert ev.output_tokens == 5
         assert ev.total_tokens == 15
+        assert ev.cached_input_tokens == 8
+        assert ev.cache_creation_tokens == 2
         assert ev.model == "gpt"
 
     def test_tool_started_mapping_with_extras_in_data(self):
