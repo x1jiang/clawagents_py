@@ -1,6 +1,11 @@
 # ClawAgents Changelog
 
 
+### v6.20.25 — YAML skill frontmatter + nested shlex guard (July 2026)
+
+- Skill ``SKILL.md`` frontmatter parsed with ``yaml.safe_load`` (flow-style / quoted ``allowed-tools``, CRLF, flush-left dashes).
+- Unbound-local import guard collects free loads from nested ``def``/``async def`` (meta-tested).
+
 ### v6.20.24 — Bedrock id + skill drain gate (July 2026)
 
 - ``is_bedrock_model_id`` requires a foundation-model vendor prefix after geo (``us.``/``eu.``/…).

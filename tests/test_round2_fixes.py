@@ -88,3 +88,35 @@ def test_skill_allowed_tools_flush_left_and_crlf(tmp_path):
     lowered = [t.lower() for t in skill.allowed_tools]
     assert "read" in lowered
     assert "bash" in lowered
+
+
+def test_skill_allowed_tools_flow_style_and_quoted():
+    from clawagents.tools.skills import parse_skill_file
+
+    skill = parse_skill_file(
+        "---\n"
+        "name: flow\n"
+        "description: d\n"
+        'allowed-tools: ["Bash", "Read"]\n'
+        "---\n"
+        "body\n",
+        "/tmp/flow/SKILL.md",
+    )
+    assert skill.allowed_tools is not None
+    lowered = [t.lower() for t in skill.allowed_tools]
+    assert "bash" in lowered and "read" in lowered
+
+    skill2 = parse_skill_file(
+        "---\n"
+        "name: quoted\n"
+        "description: d\n"
+        "allowed-tools:\n"
+        '  - "Bash"\n'
+        "  - 'Read'\n"
+        "---\n"
+        "body\n",
+        "/tmp/quoted/SKILL.md",
+    )
+    assert skill2.allowed_tools is not None
+    lowered2 = [t.lower() for t in skill2.allowed_tools]
+    assert "bash" in lowered2 and "read" in lowered2

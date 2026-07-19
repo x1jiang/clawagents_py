@@ -186,6 +186,50 @@ def _parse_inline_list(raw: str) -> List[str]:
     ]
 
 
+def _safe_load_frontmatter(yaml_content: str) -> Optional[Dict[str, Any]]:
+    """Parse SKILL.md frontmatter with PyYAML; ``None`` on failure / missing lib."""
+    text = (yaml_content or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not text.strip():
+        return {}
+    try:
+        import yaml  # type: ignore[import-untyped]
+    except ImportError:
+        return None
+    try:
+        data = yaml.safe_load(text)
+    except Exception:
+        return None
+    if data is None:
+        return {}
+    return data if isinstance(data, dict) else None
+
+
+def _yaml_str_list(value: Any) -> List[str]:
+    """Normalize a YAML list or comma/space string to ``list[str]``."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        out: List[str] = []
+        for item in value:
+            if item is None:
+                continue
+            if isinstance(item, (str, int, float, bool)):
+                s = str(item).strip()
+                if s and s != "-":
+                    out.append(s)
+        return out
+    if isinstance(value, str):
+        return _parse_inline_list(value)
+    return []
+
+
+def _fm_get(data: Dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in data:
+            return data[key]
+    return None
+
+
 # Claude Code / Codex skill frontmatter → clawagents tool names.
 _ALLOWED_TOOL_ALIASES: dict[str, str] = {
     "bash": "execute",
@@ -333,163 +377,233 @@ def parse_skill_file(content: str, file_path: str) -> Skill:
         yaml_content = frontmatter_match.group(1) or ""
         body = frontmatter_match.group(2) or ""
 
-        name_match = re.search(r"^name:\s*(.+)$", yaml_content, re.MULTILINE)
-        if name_match:
-            explicit = name_match.group(1).strip().strip("\"'")
-            if explicit:
-                name = explicit
+        # Prefer real YAML — regex near-misses (flush-left dashes, CRLF, quoted
+        # tools, flow-style lists) silently mis-parsed allowed-tools for years.
+        fm = _safe_load_frontmatter(yaml_content)
+        if fm is not None:
+            explicit = _fm_get(fm, "name")
+            if isinstance(explicit, str) and explicit.strip():
+                name = explicit.strip()
 
-        description = _parse_frontmatter_description(yaml_content)
+            desc_val = _fm_get(fm, "description")
+            if isinstance(desc_val, str):
+                description = desc_val.strip()
+            elif desc_val is not None:
+                description = str(desc_val).strip()
+            else:
+                description = _parse_frontmatter_description(yaml_content)
 
-        # Normalize CRLF so Windows skill files don't parse as "zero tools".
-        yaml_for_tools = yaml_content.replace("\r\n", "\n").replace("\r", "\n")
-
-        # Parse allowed-tools: YAML block list (`- Bash`) or inline list.
-        # IMPORTANT: do not use `\s*` after the colon — it eats the newline and
-        # turns the first bullet into the bogus tokens "-", "Bash".
-        # Also accept flush-left dashes (valid YAML) — previously those silently
-        # fell through to "unrestricted".
-        allowed_tools = None
-        block_tools = re.search(
-            r"^allowed-tools:[ \t]*\n((?:[ \t]*-[^\n]*\n?)+)",
-            yaml_for_tools,
-            re.MULTILINE,
-        )
-        if block_tools:
-            allowed_tools = [
-                item.strip().strip("\"'")
-                for item in re.findall(
-                    r"^[ \t]*-\s+(.+)$", block_tools.group(1), re.MULTILINE
+            # Key present → declared boundary (possibly empty); missing → unrestricted.
+            if "allowed-tools" in fm or "allowed_tools" in fm:
+                allowed_tools = _yaml_str_list(
+                    _fm_get(fm, "allowed-tools", "allowed_tools")
                 )
-                if item.strip().strip("\"'")
-            ]
-            # Block present but no parseable items → declared empty (not unrestricted).
+
+            dmi = _fm_get(fm, "disable-model-invocation", "disable_model_invocation")
+            if dmi is True or (
+                isinstance(dmi, str) and dmi.strip().lower() == "true"
+            ):
+                disable_model_invocation = True
+            user_inv = _fm_get(fm, "user-invocable", "user_invocable")
+            if user_inv is False or (
+                isinstance(user_inv, str) and user_inv.strip().lower() == "false"
+            ):
+                disable_model_invocation = True
+
+            req = _fm_get(fm, "requires")
+            if isinstance(req, dict):
+                os_val = req.get("os")
+                bins_val = req.get("bins")
+                env_val = req.get("env")
+                req_os = str(os_val).strip() if os_val not in (None, "") else None
+                req_bins = _yaml_str_list(bins_val) or None
+                req_env = _yaml_str_list(env_val) or None
+                if req_os or req_bins or req_env:
+                    requires = SkillRequires(os=req_os, bins=req_bins, env=req_env)
+            else:
+                req_os, req_bins, req_env = _parse_requires_block(yaml_content)
+                if req_os or req_bins or req_env:
+                    requires = SkillRequires(os=req_os, bins=req_bins, env=req_env)
+
+            aliases = _yaml_str_list(_fm_get(fm, "aliases"))
+            triggers = _yaml_str_list(_fm_get(fm, "triggers"))
+            anti_triggers = _yaml_str_list(
+                _fm_get(fm, "anti-triggers", "anti_triggers")
+            )
+            forbidden_actions = _yaml_str_list(
+                _fm_get(fm, "forbidden-actions", "forbidden_actions")
+            )
+            layout_val = _fm_get(fm, "workspace-layout", "workspace_layout")
+            if isinstance(layout_val, str):
+                workspace_layout = layout_val
+            elif layout_val is not None:
+                workspace_layout = str(layout_val)
+            criteria_val = _fm_get(fm, "success-criteria", "success_criteria")
+            if isinstance(criteria_val, str):
+                success_criteria = criteria_val.strip()
+            workflow_steps = _yaml_str_list(
+                _fm_get(fm, "workflow-steps", "workflow_steps")
+            )
+            when_val = _fm_get(fm, "when-to-use", "when_to_use")
+            if isinstance(when_val, list):
+                when_to_use = "; ".join(_yaml_str_list(when_val))
+            elif isinstance(when_val, str) and when_val.strip():
+                when_to_use = when_val.strip()
+            path_val = _fm_get(fm, "paths")
+            if path_val is not None:
+                paths = _yaml_str_list(path_val)
         else:
-            tools_match = re.search(
-                r"^allowed-tools:[ \t]*(.+)$", yaml_for_tools, re.MULTILINE
-            )
-            if tools_match:
-                allowed_tools = _parse_inline_list(tools_match.group(1))
+            # Regex fallback when PyYAML is missing or frontmatter is not a mapping.
+            name_match = re.search(r"^name:\s*(.+)$", yaml_content, re.MULTILINE)
+            if name_match:
+                explicit = name_match.group(1).strip().strip("\"'")
+                if explicit:
+                    name = explicit
 
-        # Only the literal true counts (Claude Code boolean parsing rule).
-        dmi_match = re.search(
-            r"^disable-model-invocation:\s*[\"']?true[\"']?\s*$",
-            yaml_content,
-            re.MULTILINE,
-        )
-        disable_model_invocation = bool(dmi_match)
-        # Grok / Claude: user-invocable: false ≡ model must not invoke.
-        if re.search(
-            r"^user-invocable:\s*[\"']?false[\"']?\s*$",
-            yaml_content,
-            re.MULTILINE | re.IGNORECASE,
-        ):
-            disable_model_invocation = True
+            description = _parse_frontmatter_description(yaml_content)
 
-        req_os, req_bins, req_env = _parse_requires_block(yaml_content)
-        if req_os or req_bins or req_env:
-            requires = SkillRequires(os=req_os, bins=req_bins, env=req_env)
-
-        def _parse_block_list(key: str, yaml_src: str) -> Optional[List[str]]:
-            """Parse a YAML key that may have an inline value or a block list of '- item' entries."""
-            # First try: key followed immediately by block list items on next lines
-            block_pattern = re.compile(
-                r"^" + re.escape(key) + r":\s*\n((?:[ \t]+-[^\n]*\n?)+)",
+            yaml_for_tools = yaml_content.replace("\r\n", "\n").replace("\r", "\n")
+            allowed_tools = None
+            block_tools = re.search(
+                r"^allowed-tools:[ \t]*\n((?:[ \t]*-[^\n]*\n?)+)",
+                yaml_for_tools,
                 re.MULTILINE,
             )
-            bm = block_pattern.search(yaml_src)
-            if bm:
-                block_raw = bm.group(1)
-                items = re.findall(r"^[ \t]+-\s+(.+)$", block_raw, re.MULTILINE)
-                return [item.strip() for item in items if item.strip()]
+            if block_tools:
+                allowed_tools = [
+                    item.strip().strip("\"'")
+                    for item in re.findall(
+                        r"^[ \t]*-\s+(.+)$", block_tools.group(1), re.MULTILINE
+                    )
+                    if item.strip().strip("\"'")
+                ]
+            else:
+                tools_match = re.search(
+                    r"^allowed-tools:[ \t]*(.+)$", yaml_for_tools, re.MULTILINE
+                )
+                if tools_match:
+                    allowed_tools = _parse_inline_list(tools_match.group(1))
 
-            # Second try: inline value on same line
-            inline_pattern = re.compile(
-                r"^" + re.escape(key) + r":\s+(.+)$",
-                re.MULTILINE,
-            )
-            im = inline_pattern.search(yaml_src)
-            if im:
-                return _parse_inline_list(im.group(1).strip())
-
-            return None
-
-        def _parse_phrase_list(key: str) -> List[str]:
-            block = re.search(
-                r"^" + re.escape(key) + r":\s*\n((?:[ \t]+-[^\n]*\n?)+)",
+            dmi_match = re.search(
+                r"^disable-model-invocation:\s*[\"']?true[\"']?\s*$",
                 yaml_content,
                 re.MULTILINE,
             )
-            if block:
+            disable_model_invocation = bool(dmi_match)
+            if re.search(
+                r"^user-invocable:\s*[\"']?false[\"']?\s*$",
+                yaml_content,
+                re.MULTILINE | re.IGNORECASE,
+            ):
+                disable_model_invocation = True
+
+            req_os, req_bins, req_env = _parse_requires_block(yaml_content)
+            if req_os or req_bins or req_env:
+                requires = SkillRequires(os=req_os, bins=req_bins, env=req_env)
+
+            def _parse_block_list(key: str, yaml_src: str) -> Optional[List[str]]:
+                block_pattern = re.compile(
+                    r"^" + re.escape(key) + r":\s*\n((?:[ \t]+-[^\n]*\n?)+)",
+                    re.MULTILINE,
+                )
+                bm = block_pattern.search(yaml_src)
+                if bm:
+                    items = re.findall(r"^[ \t]+-\s+(.+)$", bm.group(1), re.MULTILINE)
+                    return [item.strip() for item in items if item.strip()]
+                inline_pattern = re.compile(
+                    r"^" + re.escape(key) + r":\s+(.+)$",
+                    re.MULTILINE,
+                )
+                im = inline_pattern.search(yaml_src)
+                if im:
+                    return _parse_inline_list(im.group(1).strip())
+                return None
+
+            def _parse_phrase_list(key: str) -> List[str]:
+                block = re.search(
+                    r"^" + re.escape(key) + r":\s*\n((?:[ \t]+-[^\n]*\n?)+)",
+                    yaml_content,
+                    re.MULTILINE,
+                )
+                if block:
+                    return [
+                        item.strip().strip("\"'")
+                        for item in re.findall(
+                            r"^[ \t]+-\s+(.+)$", block.group(1), re.MULTILINE
+                        )
+                        if item.strip()
+                    ]
+                inline = re.search(
+                    r"^" + re.escape(key) + r":\s+(.+)$",
+                    yaml_content,
+                    re.MULTILINE,
+                )
+                if not inline:
+                    return []
+                raw = inline.group(1).strip().strip("[]")
                 return [
                     item.strip().strip("\"'")
-                    for item in re.findall(r"^[ \t]+-\s+(.+)$", block.group(1), re.MULTILINE)
+                    for item in raw.split(",")
                     if item.strip()
                 ]
-            inline = re.search(
-                r"^" + re.escape(key) + r":\s+(.+)$",
+
+            aliases = _parse_phrase_list("aliases")
+            triggers = _parse_phrase_list("triggers")
+            anti_triggers = (
+                _parse_phrase_list("anti-triggers")
+                or _parse_phrase_list("anti_triggers")
+                or []
+            )
+            fa_items = _parse_block_list("forbidden-actions", yaml_content)
+            if fa_items is not None:
+                forbidden_actions = fa_items
+            layout_match = re.search(
+                r'^workspace-layout:\s*\|?\s*"?([^"|\n][^"]*)"?$',
                 yaml_content,
                 re.MULTILINE,
             )
-            if not inline:
-                return []
-            raw = inline.group(1).strip().strip("[]")
-            return [item.strip().strip("\"'") for item in raw.split(",") if item.strip()]
-
-        aliases = _parse_phrase_list("aliases")
-        triggers = _parse_phrase_list("triggers")
-        anti_triggers = (
-            _parse_phrase_list("anti-triggers")
-            or _parse_phrase_list("anti_triggers")
-            or []
-        )
-
-        # Parse forbidden-actions: inline or block list
-        fa_items = _parse_block_list("forbidden-actions", yaml_content)
-        if fa_items is not None:
-            forbidden_actions = fa_items
-
-        # Parse workspace-layout: single-line string or literal block scalar
-        layout_match = re.search(r'^workspace-layout:\s*\|?\s*"?([^"|\n][^"]*)"?$', yaml_content, re.MULTILINE)
-        if layout_match:
-            workspace_layout = layout_match.group(1).strip()
-        else:
-            # Literal block scalar (|) — grab indented content
-            layout_block = re.search(r"^workspace-layout:\s*\|\s*\n((?:[ \t]+[^\n]*\n?)+)", yaml_content, re.MULTILINE)
-            if layout_block:
-                workspace_layout = layout_block.group(1)
-
-        # Parse success-criteria: single-line string
-        criteria_match = re.search(r'^success-criteria:\s*"?([^"\n]+)"?$', yaml_content, re.MULTILINE)
-        if criteria_match:
-            success_criteria = criteria_match.group(1).strip()
-
-        # Parse workflow-steps: inline or block list
-        ws_items = _parse_block_list("workflow-steps", yaml_content)
-        if ws_items is not None:
-            workflow_steps = ws_items
-
-        when_items = _parse_phrase_list("when-to-use") or _parse_phrase_list("when_to_use")
-        if when_items:
-            when_to_use = "; ".join(when_items)
-        else:
-            when_inline = re.search(
-                r"^when-to-use:\s*[\"']?(.+?)[\"']?\s*$",
+            if layout_match:
+                workspace_layout = layout_match.group(1).strip()
+            else:
+                layout_block = re.search(
+                    r"^workspace-layout:\s*\|\s*\n((?:[ \t]+[^\n]*\n?)+)",
+                    yaml_content,
+                    re.MULTILINE,
+                )
+                if layout_block:
+                    workspace_layout = layout_block.group(1)
+            criteria_match = re.search(
+                r'^success-criteria:\s*"?([^"\n]+)"?$',
                 yaml_content,
-                re.MULTILINE | re.IGNORECASE,
-            ) or re.search(
-                r"^when_to_use:\s*[\"']?(.+?)[\"']?\s*$",
-                yaml_content,
-                re.MULTILINE | re.IGNORECASE,
+                re.MULTILINE,
             )
-            if when_inline:
-                when_to_use = when_inline.group(1).strip()
-
-        path_items = _parse_block_list("paths", yaml_content)
-        if path_items is not None:
-            paths = path_items
-        else:
-            paths = _parse_phrase_list("paths")
+            if criteria_match:
+                success_criteria = criteria_match.group(1).strip()
+            ws_items = _parse_block_list("workflow-steps", yaml_content)
+            if ws_items is not None:
+                workflow_steps = ws_items
+            when_items = _parse_phrase_list("when-to-use") or _parse_phrase_list(
+                "when_to_use"
+            )
+            if when_items:
+                when_to_use = "; ".join(when_items)
+            else:
+                when_inline = re.search(
+                    r"^when-to-use:\s*[\"']?(.+?)[\"']?\s*$",
+                    yaml_content,
+                    re.MULTILINE | re.IGNORECASE,
+                ) or re.search(
+                    r"^when_to_use:\s*[\"']?(.+?)[\"']?\s*$",
+                    yaml_content,
+                    re.MULTILINE | re.IGNORECASE,
+                )
+                if when_inline:
+                    when_to_use = when_inline.group(1).strip()
+            path_items = _parse_block_list("paths", yaml_content)
+            if path_items is not None:
+                paths = path_items
+            else:
+                paths = _parse_phrase_list("paths")
 
     if not description:
         description = _fallback_description(body)

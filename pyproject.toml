@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "clawagents"
-version = "6.20.24"
+version = "6.20.25"
 description = "Lean, full-stack agentic AI framework with PTRL (Prompt-Time Reinforcement Learning)"
 readme = "README.md"
 license = "MIT"
@@ -28,6 +28,8 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
+    # Skill SKILL.md frontmatter (allowed-tools lists, block scalars, …).
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
