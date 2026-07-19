@@ -1,6 +1,11 @@
 # ClawAgents Changelog
 
 
+### v6.20.19 — Control-plane crush exemption + post-edit syntax gate (July 2026)
+
+- ``use_skill`` / ``list_skills`` / ``retrieve_tool_result`` outputs are never crushed (skill instructions stay verbatim; auto-drain pages too).
+- After successful write tools on ``.js`` / ``.mjs`` / ``.cjs`` / ``.py`` / ``.sh``, append a ``[syntax_gate]`` result from ``node --check`` / ``py_compile`` / ``bash -n``.
+
 ### v6.20.18 — Chat mode ↔ OS sandbox contract (July 2026)
 
 - ``sandbox_profile_for_chat_mode``: ``full_access``+gate → ``off``, ``read_only`` → ``read-only`` (wired in ``create_claw_agent(chat_mode=…)``).

@@ -730,6 +730,27 @@ class ToolRegistry:
             # / retrieve_tool_result can archive the real dump. ``output`` is a
             # bounded preview for UI/cache hot paths.
             full_output = result.output
+            if (
+                result.success
+                and tool_name in _WRITE_TOOLS
+                and isinstance(full_output, str)
+            ):
+                try:
+                    from clawagents.tools.syntax_gate import append_syntax_gate
+
+                    ws = None
+                    if run_context is not None:
+                        ws = getattr(run_context, "workspace", None) or getattr(
+                            run_context, "cwd", None
+                        )
+                    full_output = append_syntax_gate(
+                        tool_name,
+                        effective_args if isinstance(effective_args, dict) else {},
+                        full_output,
+                        workspace=ws,
+                    )
+                except Exception:
+                    pass
             if auto_skill_prefix and isinstance(full_output, str):
                 full_output = (
                     f"{auto_skill_prefix}\n\n"

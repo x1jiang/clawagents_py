@@ -253,6 +253,14 @@ _AGGRESSIVE_INLINE_LIMIT = 6_000
 # Crushing 2.5K→2.0K is all risk; keep a higher floor for those kinds.
 _CODEISH_CRUSH_FLOOR = 4_000
 _CODEISH_KINDS = frozenset({"code", "log", "diff"})
+# Skill pages / catalogs / archived restores are control-plane: the model must
+# never operate on a crushed fraction of its instructions (auto-drain pages
+# also flow through this path since v6.20.15).
+_CONTROL_PLANE_NO_CRUSH = frozenset({
+    "use_skill",
+    "list_skills",
+    "retrieve_tool_result",
+})
 
 
 def prepare_tool_output_for_context(
@@ -275,11 +283,17 @@ def prepare_tool_output_for_context(
     ``inline_limit`` / ``target_chars``. Code/log/diff outputs use a higher
     floor (~4K) so edit tools are not fed compressed views.
 
+    Control-plane tools (``use_skill``, ``list_skills``, ``retrieve_tool_result``)
+    are never crushed — skill instructions must stay verbatim.
+
     Failed tool results (``success=False``) are never aggressively crushed —
     denial paths (e.g. credentials.db EPERM) must stay verbatim for diagnosis.
     """
     if not isinstance(output, str):
         output = str(output)
+
+    if tool_name in _CONTROL_PLANE_NO_CRUSH:
+        return output, None
 
     # Failures: keep full text in context (still archive if enormous).
     if success is False:
