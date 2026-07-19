@@ -60,7 +60,10 @@ def names_for_tool_profile(
     registry: ToolRegistry,
     profile: str = "full",
 ) -> list[str]:
-    names = [tool.name for tool in registry.list()]
+    # Discover against the full registry so inactive (grouped) tools remain findable.
+    list_all = getattr(registry, "list_registered", None)
+    tools = list_all() if callable(list_all) else registry.list()
+    names = [tool.name for tool in tools]
     if profile == "minimal":
         return [name for name in names if name in _DISCOVERY_TOOLS]
     if profile == "read-only":
@@ -91,7 +94,9 @@ class _ToolDiscover:
         limit = max(1, int(args.get("limit") or self._max_results))
         allowed = self._allowed_names(profile)
         rows = []
-        for tool in self._registry.list():
+        list_all = getattr(self._registry, "list_registered", None)
+        tools = list_all() if callable(list_all) else self._registry.list()
+        for tool in tools:
             if tool.name not in allowed:
                 continue
             if profile != "minimal" and tool.name in _DISCOVERY_TOOLS:
@@ -102,6 +107,10 @@ class _ToolDiscover:
             row = {"name": tool.name, "description": tool.description}
             if keywords:
                 row["keywords"] = keywords
+            active = getattr(self._registry, "is_tool_active", None)
+            if callable(active) and not active(tool.name):
+                row["active"] = False
+                row["hint"] = "Call activate_tool_group to unlock"
             rows.append(row)
             if len(rows) >= limit:
                 break

@@ -40,18 +40,27 @@ BUILTIN_HARNESS_PROFILES: dict[str, HarnessProfile] = {
             "Efficiency rules (follow strictly):\n"
             "- When the user names exact file paths, call `read_file` on those "
             "paths first — do not grep/search the repo to rediscover them.\n"
+            "- When the user names symbols/identifiers inside a file, prefer "
+            "`grep`/`hashline_grep` then one bounded `read_file` (offset/limit). "
+            "Do not page a large file sequentially just to find a symbol.\n"
             "- After you have enough facts to answer, stop and answer. Do not "
             "run extra exploratory tools.\n"
-            "- Prefer one targeted read over multiple overlapping greps.\n"
-            "- Do not load skills unless the task clearly needs a specialized workflow.\n"
-            "- Avoid re-reading the same file unless it changed."
+            "- Prefer one targeted read over multiple overlapping greps or reads.\n"
+            "- Do not re-read the same file/range; reuse the prior tool result.\n"
+            "- Optional tools (web, git, pty, …) stay hidden until you call "
+            "`activate_tool_group`.\n"
+            "- Do not load skills unless the task clearly needs a specialized workflow."
         ),
         # ~0.22 × 1.05M ≈ 231K — start clearing old tool dumps before Luna's
         # 272K long-context pricing cliff (see model_profiles).
         clear_tool_keep=2,
         clear_tool_trigger_ratio=0.22,
         compaction_headroom_ratio=0.7,
-        loop_detection_overrides={"critical_threshold": 4},
+        # Soft warn on 2nd identical call; hard-stop on 3rd.
+        loop_detection_overrides={
+            "warning_threshold": 2,
+            "critical_threshold": 3,
+        },
     ),
     "anthropic-sonnet": HarnessProfile(
         name="anthropic-sonnet",

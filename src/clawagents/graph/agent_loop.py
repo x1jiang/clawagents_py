@@ -593,6 +593,8 @@ class _ToolCallTracker:
         self._circuit_breaker_limit = circuit_breaker_limit
         self._loop_config = resolve_loop_detection_config(loop_config)
         self._result_hashes: dict[str, str] = {}
+        self._result_outputs: dict[str, str] = {}
+        self._read_history: list[tuple[str, dict, str]] = []
         self._no_progress_count = 0
         self._soft_warnings = 0
         self._poll_warnings: set[str] = set()
@@ -616,6 +618,34 @@ class _ToolCallTracker:
         if len(self._history) > self._window_size:
             self._history.pop(0)
 
+    def cache_result_output(self, tool_name: str, args: dict, output: str) -> None:
+        """Store truncated output for identical/overlapping reuse stubs."""
+        key = self._key(tool_name, args)
+        text = output if isinstance(output, str) else str(output or "")
+        self._result_outputs[key] = text[:2_000]
+        if tool_name in {"read_file", "hashline_read"}:
+            self._read_history.append((tool_name, dict(args or {}), text[:2_000]))
+            if len(self._read_history) > self._window_size:
+                self._read_history.pop(0)
+
+    def reuse_tool_output(self, tool_name: str, args: dict) -> str | None:
+        """Return a short stub if this call (or an overlapping read) already ran."""
+        from clawagents.loop_detection import detect_overlapping_read
+
+        key = self._key(tool_name, args)
+        prior = self._result_outputs.get(key)
+        if prior is not None:
+            return (
+                f"[Reused identical {tool_name} result] Same arguments already ran "
+                f"this turn — do not re-call. Prior excerpt "
+                f"({min(500, len(prior))} chars):\n{prior[:500]}"
+            )
+        return detect_overlapping_read(
+            tool_name=tool_name,
+            params=args or {},
+            prior_reads=self._read_history,
+        )
+
     def record_result(self, tool_name: str, args: dict, output: str) -> None:
         """Record the result of a tool call for no-progress detection."""
         from clawagents.loop_detection import hash_tool_call
@@ -628,6 +658,7 @@ class _ToolCallTracker:
         else:
             self._no_progress_count = max(0, self._no_progress_count - 1)
         self._result_hashes[key] = result_hash
+        self.cache_result_output(tool_name, args, output)
         call_hash = hash_tool_call(tool_name, args)
         self._poll_history.append((tool_name, call_hash, result_hash))
         if len(self._poll_history) > self._window_size:
@@ -2463,7 +2494,31 @@ async def _run_agent_graph_core(
         registry.to_native_schemas() if use_native_tools and tools else None
     )
     tool_desc = registry.describe_for_llm() if not use_native_tools else ""
-    loop_tracker = _ToolCallTracker()
+    # Harness may tighten soft/hard loop thresholds (e.g. Luna → warn@2 / stop@3).
+    _loop_soft, _loop_hard = 3, 6
+    _loop_cfg = None
+    try:
+        from clawagents.harness_profiles import resolve_harness_profile as _rhp_loop
+        from clawagents.loop_detection import LoopDetectionConfig
+
+        _hp_loop = _rhp_loop(getattr(llm, "model", None))
+        if _hp_loop and _hp_loop.loop_detection_overrides:
+            ov = _hp_loop.loop_detection_overrides
+            if ov.get("warning_threshold") is not None:
+                _loop_soft = int(ov["warning_threshold"])
+            if ov.get("critical_threshold") is not None:
+                _loop_hard = int(ov["critical_threshold"])
+            _loop_cfg = LoopDetectionConfig(
+                warning_threshold=_loop_soft,
+                critical_threshold=_loop_hard,
+            )
+    except Exception:
+        pass
+    loop_tracker = _ToolCallTracker(
+        soft_limit=_loop_soft,
+        hard_limit=_loop_hard,
+        loop_config=_loop_cfg,
+    )
     emit = on_event or _default_on_event
 
     # ── Synthesise handoff tools (v6.4) ──
@@ -3304,6 +3359,30 @@ async def _run_agent_graph_core(
                             ),
                         )
                     ]
+                # Rebuild schemas each turn so activate_tool_group / skill
+                # allow-lists take effect without restarting the loop.
+                if use_native_tools and tools:
+                    native_schemas = registry.to_native_schemas()
+                    # Keep synthetic handoff tools visible.
+                    if handoff_list:
+                        handoff_params = {
+                            "reason": {
+                                "type": "string",
+                                "description": (
+                                    "Free-text rationale for why the handoff is appropriate."
+                                ),
+                                "required": False,
+                            }
+                        }
+                        native_schemas = list(native_schemas or [])
+                        for h in handoff_list:
+                            native_schemas.append(
+                                NativeToolSchema(
+                                    name=h.name,
+                                    description=h.description,
+                                    parameters=handoff_params,
+                                )
+                            )
                 # When a skill has activated an allowed-tools boundary, only
                 # advertise those tools (+ control plane) so the model stops
                 # reaching for tools the registry will refuse.
@@ -3315,6 +3394,7 @@ async def _run_agent_graph_core(
                             "use_skill",
                             "list_skills",
                             "retrieve_tool_result",
+                            "activate_tool_group",
                         }
                         turn_tools = [
                             s
@@ -4175,18 +4255,39 @@ async def _run_agent_graph_core(
                 # Emit a periodic ``tool_heartbeat`` while the call is
                 # in flight so listeners can keep the channel alive and
                 # surface progress.
-                tool_result = await run_with_heartbeat(
-                    registry.execute_tool(
-                        call.tool_name, call.args, run_context=run_context,
-                    ),
-                    on_event=on_event,
-                    kind="tool_heartbeat",
-                    payload={
-                        "tool_name": call.tool_name,
-                        "call_id": native_tc_id,
-                    },
-                    interval=DEFAULT_ACTIVITY_HEARTBEAT_INTERVAL_S,
-                )
+                _reuse = loop_tracker.reuse_tool_output(call.tool_name, call.args)
+                if _reuse is not None:
+                    from clawagents.tools.registry import ToolResult as _TR
+
+                    tool_result = _TR(success=True, output=_reuse)
+                    emit(
+                        "warn",
+                        {
+                            "message": (
+                                f"suppressed duplicate/overlapping {call.tool_name} "
+                                "(reused prior result)"
+                            )
+                        },
+                    )
+                else:
+                    tool_result = await run_with_heartbeat(
+                        registry.execute_tool(
+                            call.tool_name, call.args, run_context=run_context,
+                        ),
+                        on_event=on_event,
+                        kind="tool_heartbeat",
+                        payload={
+                            "tool_name": call.tool_name,
+                            "call_id": native_tc_id,
+                        },
+                        interval=DEFAULT_ACTIVITY_HEARTBEAT_INTERVAL_S,
+                    )
+                    if tool_result.success:
+                        loop_tracker.cache_result_output(
+                            call.tool_name,
+                            call.args,
+                            str(tool_result.output or ""),
+                        )
                 state.tool_calls += 1
                 if active_hooks:
                     await _fire_hook(

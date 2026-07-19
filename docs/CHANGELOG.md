@@ -1,6 +1,12 @@
 # ClawAgents Changelog
 
 
+### v6.20.29 — Luna active tools + loop guard + economic fixes (July 2026)
+
+- Active tool surface for GPT-5.6: core profile + `activate_tool_group` (web/git/pty/…)
+- Deterministic identical/overlapping `read_file` reuse stubs; harness soft/hard loop thresholds 2/3
+- Soft-trim/micro-compact before 272K long-context cliff; harness prompt applied in create_claw_agent
+
 ### v6.20.28 — Luna economic context + efficiency harness (July 2026)
 
 - GPT-5.6 family: `long_context_threshold` 272K; soft-trim / micro-compact fire before the long-context pricing cliff.

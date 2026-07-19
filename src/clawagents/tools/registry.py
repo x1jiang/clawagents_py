@@ -351,6 +351,9 @@ class ToolRegistry:
         self._description_cache: Optional[str] = None
         self._tool_timeout_s = tool_timeout_s
         self._validate_args = validate_args
+        # None = all registered tools are active (legacy / full surface).
+        # When set, list()/to_native_schemas()/execute only expose that set.
+        self._active_tools: Optional[set[str]] = None
 
         if result_cache is not None:
             self._result_cache = result_cache
@@ -365,6 +368,8 @@ class ToolRegistry:
     def register(self, tool: Tool) -> None:
         self.tools[tool.name] = tool
         self._description_cache = None
+        # Newly registered tools join the active set when a profile is in effect
+        # only if they are control-plane activators (handled by callers).
 
     def register_lazy(
         self,
@@ -388,10 +393,42 @@ class ToolRegistry:
     def get(self, name: str) -> Optional[Tool]:
         return self.tools.get(name)
 
+    def set_active_tools(self, names: set[str] | frozenset[str] | None) -> None:
+        """Restrict schemas/execution to ``names``. ``None`` restores full surface."""
+        if names is None:
+            self._active_tools = None
+        else:
+            self._active_tools = {str(n) for n in names if n}
+        self._description_cache = None
+
+    def activate_tools(self, names: list[str] | set[str] | frozenset[str]) -> None:
+        """Add tools to the active set (no-op when already fully open)."""
+        if self._active_tools is None:
+            return
+        self._active_tools |= {str(n) for n in names if n}
+        self._description_cache = None
+
+    def active_tool_names(self) -> Optional[set[str]]:
+        if self._active_tools is None:
+            return None
+        return set(self._active_tools)
+
+    def is_tool_active(self, name: str) -> bool:
+        if self._active_tools is None:
+            return True
+        return name in self._active_tools
+
+    def list_registered(self) -> List[Tool]:
+        """All registered tools, ignoring the active profile."""
+        return sorted(self.tools.values(), key=lambda t: (t.name or "").lower())
+
     def list(self) -> List[Tool]:
         # Alphabetical order keeps native schemas / text descriptions stable
         # for provider prompt-prefix caching across registration churn.
-        return sorted(self.tools.values(), key=lambda t: (t.name or "").lower())
+        tools = self.list_registered()
+        if self._active_tools is None:
+            return tools
+        return [t for t in tools if t.name in self._active_tools]
 
     def inspect_tools(self) -> List[Dict[str, Any]]:
         return [
@@ -588,6 +625,22 @@ class ToolRegistry:
         tool = self.get(tool_name)
         if not tool:
             return ToolResult(success=False, output="", error=f"Unknown tool: {tool_name}")
+
+        # Active-profile gate (activate_tool_group is always allowed).
+        if (
+            self._active_tools is not None
+            and tool_name not in self._active_tools
+            and tool_name != "activate_tool_group"
+        ):
+            return ToolResult(
+                success=False,
+                output="",
+                error=(
+                    f"Tool '{tool_name}' is registered but not active. "
+                    "Call activate_tool_group(group=…) to unlock its group, "
+                    "or activate_tool_group(group='list') to see options."
+                ),
+            )
 
         def _skill_key(value: object) -> str:
             return re.sub(r"[\s\-]+", "_", str(value or "").strip().lower())
