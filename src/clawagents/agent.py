@@ -1236,6 +1236,11 @@ def create_claw_agent(
     agent.before_tool = compose_before_tool(_perm_before, mode_before)
     if permission_mode_override is not None:
         agent._default_permission_mode = permission_mode_override  # type: ignore[attr-defined]
+    elif agent._chat_mode in ("read_only", "readonly", "plan"):
+        # UI Plan tab → engine PLAN (Grok Build: explore + plan.md only).
+        from clawagents.permissions.mode import PermissionMode as _PM
+
+        agent._default_permission_mode = _PM.PLAN  # type: ignore[attr-defined]
 
     from clawagents.tools.background_task import create_background_task_tools
     for task_tool in create_background_task_tools():

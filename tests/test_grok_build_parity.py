@@ -79,6 +79,41 @@ def test_plan_approval_auto_approves_without_callback():
     asyncio.run(run())
 
 
+def test_plan_mode_allows_write_plan_and_blocks_other_writes():
+    from clawagents.permissions.mode import (
+        evaluate_tool_permission,
+        is_plan_file_path,
+    )
+
+    assert is_plan_file_path(".clawagents/plan.md")
+    assert is_plan_file_path(".grok/plan.md")
+    assert not is_plan_file_path("src/plan.md")
+
+    ok = evaluate_tool_permission("write_plan", mode=PermissionMode.PLAN)
+    assert ok.allowed is True
+
+    blocked = evaluate_tool_permission(
+        "write_file",
+        mode=PermissionMode.PLAN,
+        file_path="src/foo.py",
+    )
+    assert blocked.allowed is False
+
+    plan_edit = evaluate_tool_permission(
+        "write_file",
+        mode=PermissionMode.PLAN,
+        file_path=".clawagents/plan.md",
+    )
+    assert plan_edit.allowed is True
+
+    read_ok = evaluate_tool_permission(
+        "read_file",
+        mode=PermissionMode.PLAN,
+        is_read_only=True,
+    )
+    assert read_ok.allowed is True
+
+
 def test_subagent_resolution_layers():
     from clawagents.tools.subagent import SubAgentSpec
     from clawagents.tools.subagent_resolve import resolve_subagent

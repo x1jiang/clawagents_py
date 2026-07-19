@@ -97,10 +97,42 @@ WRITE_CLASS_TOOLS: frozenset[str] = frozenset({
     "task",
 })
 
+# Grok Build parity: during PLAN the agent may explore, ask, load skills, and
+# write the session plan artifact — but not mutate the rest of the workspace.
+PLAN_EXEMPT_TOOLS: frozenset[str] = frozenset({
+    "write_plan",
+    "enter_plan_mode",
+    "exit_plan_mode",
+    "list_skills",
+    "use_skill",
+    "retrieve_tool_result",
+    "ask_user",
+    "ask_user_question",
+    "clarify",
+    "confirm",
+    "approve_action",
+})
+
 
 def is_write_class_tool(tool_name: str) -> bool:
     """Return True if the named tool counts as write-class for plan mode."""
     return tool_name in WRITE_CLASS_TOOLS
+
+
+def is_plan_file_path(file_path: str | None) -> bool:
+    """True for session plan artifacts (``.clawagents/plan.md`` / ``.grok/plan.md``)."""
+    if not file_path or not str(file_path).strip():
+        return False
+    try:
+        from pathlib import Path
+
+        p = Path(str(file_path).strip())
+        if p.name.lower() != "plan.md":
+            return False
+        parts = {part.lower() for part in p.parts}
+        return ".clawagents" in parts or ".grok" in parts
+    except Exception:
+        return False
 
 
 def evaluate_tool_permission(
@@ -128,8 +160,18 @@ def evaluate_tool_permission(
         return PermissionDecision(True, reason="bypassPermissions allows this tool")
     if is_read_only:
         return PermissionDecision(True, reason="read-only tools are allowed")
-    if mode == PermissionMode.PLAN and is_write_class_tool(tool_name):
-        return PermissionDecision(False, reason="Plan mode blocks mutating tools until exit_plan_mode")
+    if mode == PermissionMode.PLAN:
+        if tool_name in PLAN_EXEMPT_TOOLS:
+            return PermissionDecision(True, reason="plan-mode control / plan artifact")
+        # Grok: edits to the plan file itself are allowed while PLAN is active.
+        if is_write_class_tool(tool_name) and is_plan_file_path(file_path):
+            return PermissionDecision(True, reason="plan file write allowed in PLAN")
+        if is_write_class_tool(tool_name):
+            return PermissionDecision(
+                False,
+                reason="Plan mode blocks mutating tools until exit_plan_mode",
+            )
+        return PermissionDecision(True, reason="non-mutating tool allowed in PLAN")
     if mode == PermissionMode.ACCEPT_EDITS and is_write_class_tool(tool_name):
         return PermissionDecision(True, reason="acceptEdits allows write-class tools")
 

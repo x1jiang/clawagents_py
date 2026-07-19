@@ -1,6 +1,11 @@
 # ClawAgents Changelog
 
 
+### v6.20.26 — Plan mode Grok Build parity (July 2026)
+
+- UI `chat_mode=read_only|plan` sets engine `PermissionMode.PLAN` by default.
+- PLAN allows `write_plan` / enter+exit plan tools / skills / ask_user; edits only to `.clawagents/plan.md` or `.grok/plan.md`; other write-class tools stay blocked until `exit_plan_mode` is approved.
+
 ### v6.20.25 — YAML skill frontmatter + nested shlex guard (July 2026)
 
 - Skill ``SKILL.md`` frontmatter parsed with ``yaml.safe_load`` (flow-style / quoted ``allowed-tools``, CRLF, flush-left dashes).
