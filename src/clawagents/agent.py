@@ -1200,6 +1200,30 @@ def create_claw_agent(
 
         _perm_engine.ask_handler = _perm_ask
 
+    # Model harness: efficiency suffix / base prompt (e.g. GPT-5.6 Luna).
+    # clear_tool_* knobs are consumed in the agent loop; this wires the prompt.
+    # (excluded_tools is reserved — ToolRegistry has no unregister API yet.)
+    try:
+        from clawagents.harness_profiles import (
+            apply_harness_profile_to_prompt,
+            resolve_harness_profile,
+        )
+
+        _model_id = (
+            model
+            if isinstance(model, str)
+            else getattr(llm, "model", None) or getattr(model, "model", None)
+        )
+        _harness = resolve_harness_profile(
+            str(_model_id) if _model_id else None
+        )
+        if _harness is not None:
+            resolved_instruction = apply_harness_profile_to_prompt(
+                resolved_instruction or "", _harness
+            )
+    except Exception:
+        pass
+
     agent = ClawAgent(
         llm=llm, tools=registry, system_prompt=resolved_instruction,
         streaming=streaming, use_native_tools=use_native_tools,

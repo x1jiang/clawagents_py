@@ -1,6 +1,11 @@
 # ClawAgents Changelog
 
 
+### v6.20.28 — Luna economic context + efficiency harness (July 2026)
+
+- GPT-5.6 family: `long_context_threshold` 272K; soft-trim / micro-compact fire before the long-context pricing cliff.
+- New `openai-gpt56` harness (efficiency rules + earlier tool clearing); harness prompt suffix applied in `create_claw_agent`.
+
 ### v6.20.27 — UsageEvent cache fields (July 2026)
 
 - `UsageEvent` now carries `cached_input_tokens` / `cache_creation_tokens` (promoted from stream data) so hosts can show cache hit rate and cache-aware cost.

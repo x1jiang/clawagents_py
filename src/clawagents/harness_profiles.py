@@ -25,6 +25,34 @@ class HarnessProfile:
 
 
 BUILTIN_HARNESS_PROFILES: dict[str, HarnessProfile] = {
+    # GPT-5.6 / Luna: huge tool schemas + multi-round search churn is the
+    # dominant cost driver even when prompt-cache hit rates are excellent.
+    "openai-gpt56": HarnessProfile(
+        name="openai-gpt56",
+        match_models=(
+            "gpt-5.6-luna",
+            "gpt-5.6-terra",
+            "gpt-5.6-sol",
+            "gpt-5.6",
+            "openai.gpt-5.6",
+        ),
+        system_prompt_suffix=(
+            "Efficiency rules (follow strictly):\n"
+            "- When the user names exact file paths, call `read_file` on those "
+            "paths first — do not grep/search the repo to rediscover them.\n"
+            "- After you have enough facts to answer, stop and answer. Do not "
+            "run extra exploratory tools.\n"
+            "- Prefer one targeted read over multiple overlapping greps.\n"
+            "- Do not load skills unless the task clearly needs a specialized workflow.\n"
+            "- Avoid re-reading the same file unless it changed."
+        ),
+        # ~0.22 × 1.05M ≈ 231K — start clearing old tool dumps before Luna's
+        # 272K long-context pricing cliff (see model_profiles).
+        clear_tool_keep=2,
+        clear_tool_trigger_ratio=0.22,
+        compaction_headroom_ratio=0.7,
+        loop_detection_overrides={"critical_threshold": 4},
+    ),
     "anthropic-sonnet": HarnessProfile(
         name="anthropic-sonnet",
         match_models=("claude-sonnet", "claude-4.6-sonnet", "claude-4.5-sonnet"),

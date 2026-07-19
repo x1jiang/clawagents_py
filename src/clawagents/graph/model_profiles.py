@@ -7,10 +7,29 @@ from __future__ import annotations
 # rather than falling back to "gpt-5".
 MODEL_PROFILES: dict[str, dict[str, int | float]] = {
     # ── OpenAI — GPT-5.6 (~1.05M context) ──────────────────────────────
-    "gpt-5.6-sol": {"max_input_tokens": 1_050_000, "budget_ratio": 0.85},
-    "gpt-5.6-terra": {"max_input_tokens": 1_050_000, "budget_ratio": 0.85},
-    "gpt-5.6-luna": {"max_input_tokens": 1_050_000, "budget_ratio": 0.85},
-    "gpt-5.6": {"max_input_tokens": 1_050_000, "budget_ratio": 0.85},
+    # long_context_threshold: official pricing cliff (>272K → 2× input / 1.5× output).
+    # Economic micro-compact / soft-trim start below this so agent loops stay
+    # out of the premium tier when possible (distinct from the 892.5K safety budget).
+    "gpt-5.6-sol": {
+        "max_input_tokens": 1_050_000,
+        "budget_ratio": 0.85,
+        "long_context_threshold": 272_000,
+    },
+    "gpt-5.6-terra": {
+        "max_input_tokens": 1_050_000,
+        "budget_ratio": 0.85,
+        "long_context_threshold": 272_000,
+    },
+    "gpt-5.6-luna": {
+        "max_input_tokens": 1_050_000,
+        "budget_ratio": 0.85,
+        "long_context_threshold": 272_000,
+    },
+    "gpt-5.6": {
+        "max_input_tokens": 1_050_000,
+        "budget_ratio": 0.85,
+        "long_context_threshold": 272_000,
+    },
     # ── OpenAI — GPT-5.5 / 5.4 family (400K context) ───────────────────
     "gpt-5.5": {"max_input_tokens": 400_000, "budget_ratio": 0.85},
     "gpt-5.4-mini": {"max_input_tokens": 400_000, "budget_ratio": 0.85},
@@ -96,14 +115,55 @@ MODEL_PROFILES: dict[str, dict[str, int | float]] = {
 }
 
 
+def resolve_model_profile(model_name: str | None) -> dict[str, int | float] | None:
+    """Return the best-matching MODEL_PROFILES entry, or None."""
+    if not model_name:
+        return None
+    name = str(model_name).strip().lower()
+    if not name:
+        return None
+    # Strip common Bedrock / provider prefixes so openai.gpt-5.6-luna matches.
+    for prefix in (
+        "bedrock/",
+        "global.",
+        "us.",
+        "eu.",
+        "apac.",
+        "ap.",
+        "openai.",
+        "anthropic.",
+        "amazon.",
+    ):
+        if name.startswith(prefix):
+            name = name[len(prefix) :]
+            break
+    profile = MODEL_PROFILES.get(name)
+    if profile:
+        return profile
+    for key, value in MODEL_PROFILES.items():
+        if name.startswith(key):
+            return value
+    return None
+
+
 def resolve_context_budget(model_name: str, context_window: int) -> tuple[int, float]:
     """Return (effective_window, budget_ratio) based on model profile."""
-    profile = MODEL_PROFILES.get(model_name)
-    if not profile:
-        for k, v in MODEL_PROFILES.items():
-            if model_name.startswith(k):
-                profile = v
-                break
+    profile = resolve_model_profile(model_name)
     if profile:
         return int(profile["max_input_tokens"]), float(profile["budget_ratio"])
     return context_window, 0.75
+
+
+def resolve_long_context_threshold(model_name: str | None) -> int | None:
+    """Pricing long-context cliff in tokens, if the model has one (e.g. Luna 272K)."""
+    profile = resolve_model_profile(model_name)
+    if not profile:
+        return None
+    raw = profile.get("long_context_threshold")
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None

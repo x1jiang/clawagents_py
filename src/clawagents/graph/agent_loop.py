@@ -240,7 +240,10 @@ def _run_context_workspace(run_context: Any) -> str | None:
     return None
 
 
-from clawagents.graph.model_profiles import resolve_context_budget as _resolve_context_budget
+from clawagents.graph.model_profiles import (
+    resolve_context_budget as _resolve_context_budget,
+    resolve_long_context_threshold as _resolve_long_context_threshold,
+)
 
 
 AgentStatus = Literal["running", "done", "error", "max_iterations"]
@@ -1179,6 +1182,11 @@ def _soft_trim_messages(
         else (context_window, _CONTEXT_BUDGET_RATIO)
     )
     soft_budget = int(effective_window * budget_ratio * _SOFT_TRIM_BUDGET_FRACTION)
+    # Cap soft-trim trigger by the model's pricing long-context cliff when set
+    # (e.g. Luna 272K) so we shed stale tool dumps before the 2×/1.5× premium.
+    long_ctx = _resolve_long_context_threshold(model_name)
+    if long_ctx:
+        soft_budget = min(soft_budget, max(8_000, int(long_ctx * 0.95)))
     current_tokens = _estimate_messages_tokens(messages, token_multiplier)
 
     if current_tokens <= soft_budget:
@@ -3195,9 +3203,14 @@ async def _run_agent_graph_core(
                 if _mc_profile and _mc_profile.clear_tool_trigger_ratio is not None
                 else _MICRO_COMPACT_MIN_USAGE_RATIO
             )
-            if (
-                _budget_tokens(messages)
-                > context_window * _mc_ratio
+            _mc_tokens = _budget_tokens(messages)
+            _mc_safety = context_window * _mc_ratio
+            # Economic trigger: start clearing old tool results before the
+            # model's long-context pricing cliff (Luna 272K → ~245K).
+            _long_ctx = _resolve_long_context_threshold(resolved_model_name)
+            _mc_econ = int(_long_ctx * 0.90) if _long_ctx else None
+            if _mc_tokens > _mc_safety or (
+                _mc_econ is not None and _mc_tokens > _mc_econ
             ):
                 messages = _micro_compact_tool_results(messages, keep_recent=_mc_keep)
             messages = _soft_trim_messages(messages, context_window, token_multiplier, emit, resolved_model_name)
