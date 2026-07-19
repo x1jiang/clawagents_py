@@ -333,6 +333,20 @@ async def _with_retry(
                 if not _is_retryable(exc):
                     break
                 attempt += 1
+        if last_error is not None:
+            try:
+                from clawagents.circuit_breaker import BreakerOpen as _BO
+
+                if isinstance(last_error, _BO):
+                    raise RuntimeError(
+                        f"Provider circuit breaker open for {bkey} — "
+                        f"endpoint failing repeatedly "
+                        f"(retry after ~{float(last_error.retry_after) or 0:.1f}s)."
+                    ) from last_error
+            except RuntimeError:
+                raise
+            except Exception:
+                pass
         raise last_error  # type: ignore[misc]
 
     # Policy-driven path.
@@ -405,7 +419,14 @@ async def _admit_stream_breaker(breaker: Any) -> None:
             return
         except BreakerOpen as open_exc:
             await asyncio.sleep(max(0.05, float(open_exc.retry_after) or 0.05))
-    breaker.check()
+    try:
+        breaker.check()
+    except BreakerOpen as open_exc:
+        raise RuntimeError(
+            f"Provider circuit breaker open — pausing requests "
+            f"(retry after ~{float(open_exc.retry_after) or 0:.1f}s). "
+            f"Underlying endpoint has been failing repeatedly."
+        ) from open_exc
 
 
 def _record_stream_breaker(breaker: Any, *, success: bool) -> None:
@@ -613,15 +634,26 @@ def _resolve_temperature(model: str, requested: float) -> float:
     return requested
 
 
+def _bare_openai_model_id(model: str) -> str:
+    """Strip vendor prefixes so classifiers agree on ``gpt-5.6-luna`` etc.
+
+    Mantle / catalog ids often look like ``openai.gpt-5.6-luna``. Sibling
+    helpers must all strip the same way or routing/reasoning drift (400s).
+    """
+    m = (model or "").strip().lower()
+    for prefix in ("openai.", "azure.", "mantle."):
+        if m.startswith(prefix):
+            m = m[len(prefix) :]
+    return m
+
+
 def openai_model_rejects_temperature(model: str) -> bool:
     """True when OpenAI / Mantle Responses reject an explicit ``temperature``.
 
     GPT-5.5 / 5.6 (incl. ``openai.gpt-5.6-luna``), o-series, and similar
     reasoning models return 400 if ``temperature`` is present. Omit the field.
     """
-    m = (model or "").strip().lower()
-    if m.startswith("openai."):
-        m = m[len("openai.") :]
+    m = _bare_openai_model_id(model)
     if m.startswith(("o1", "o3", "o4")):
         return True
     if m.startswith(("gpt-5.3", "gpt-5.4", "gpt-5.5", "gpt-5.6")):
@@ -674,7 +706,7 @@ def _chat_completions_needs_reasoning_none(model: str) -> bool:
     Responses for those models; this force-none is only for the Chat Completions
     fallback path.
     """
-    m = (model or "").strip().lower()
+    m = _bare_openai_model_id(model)
     return m.startswith("gpt-5.5") or m.startswith("gpt-5.6")
 
 
@@ -703,7 +735,7 @@ def normalize_reasoning_effort(value: str | None) -> str | None:
 
 def model_supports_reasoning_effort(model: str) -> bool:
     """Heuristic: models that accept ``reasoning_effort`` / Responses ``reasoning``."""
-    m = (model or "").strip().lower()
+    m = _bare_openai_model_id(model)
     if not m:
         return False
     if m.startswith(("o1", "o3", "o4")):
@@ -756,7 +788,7 @@ def prefers_responses_api(
     # auto
     if not _responses_endpoint_likely(base_url, api_type):
         return False
-    m = (model or "").strip().lower()
+    m = _bare_openai_model_id(model)
     if not m:
         return False
     if "codex" in m:
@@ -1166,13 +1198,9 @@ class OpenAIProvider(LLMProvider):
 
         if self._should_use_responses(bool(oai_tools)):
             try:
-                if not on_chunk:
-                    return await _with_retry(
-                        "openai-responses",
-                        lambda: self._request_once_responses(formatted, oai_tools),
-                        policy=getattr(self, "retry_policy", None),
-                        breaker_tag=_bkey_resp,
-                    )
+                # Always use the streaming collector — including non-stream
+                # callers. ``_request_once_responses`` already delegates there;
+                # wrapping it in ``_with_retry`` multiplied attempts (4×4=16).
                 return await self._stream_with_retry_responses(
                     formatted, on_chunk, cancel_event, oai_tools,
                 )
@@ -1335,14 +1363,53 @@ class OpenAIProvider(LLMProvider):
             final_tokens = 0
             final_prompt_tokens = 0
             final_cached_tokens = 0
-            tools_accumulation: dict[int, dict[str, Any]] = {}
+            # Key by call_id when present so a duplicated/colliding output_index
+            # cannot merge two tool calls' arguments. Fall back to idx:* keys.
+            tools_accumulation: dict[str, dict[str, Any]] = {}
+            index_to_key: dict[int, str] = {}
+
+            def _remember_tool(
+                idx: int,
+                *,
+                call_id: str = "",
+                name: str = "",
+                arguments: str | None = None,
+                replace_args: bool = False,
+            ) -> str:
+                cid = (call_id or "").strip()
+                key = f"id:{cid}" if cid else (index_to_key.get(idx) or f"idx:{idx}")
+                prev_key = index_to_key.get(idx)
+                prev = tools_accumulation.get(key) or (
+                    tools_accumulation.get(prev_key, {}) if prev_key else {}
+                )
+                if cid:
+                    # Migrate any idx-keyed stub into the call_id key.
+                    if prev_key and prev_key != key and prev_key in tools_accumulation:
+                        prev = {**tools_accumulation.pop(prev_key), **prev}
+                    index_to_key[idx] = key
+                else:
+                    index_to_key.setdefault(idx, key)
+                if replace_args:
+                    args = (
+                        arguments
+                        if arguments is not None
+                        else (prev.get("arguments", "") or "")
+                    )
+                else:
+                    args = (prev.get("arguments", "") or "") + (arguments or "")
+                tools_accumulation[key] = {
+                    "id": cid or prev.get("id", "") or "",
+                    "name": name or prev.get("name", "") or "",
+                    "arguments": args,
+                }
+                return key
 
             def _accumulated_calls() -> list[NativeToolCall] | None:
                 if not tools_accumulation:
                     return None
                 calls: list[NativeToolCall] = []
-                for _idx in sorted(tools_accumulation.keys()):
-                    _fn = tools_accumulation[_idx]
+                for _key in sorted(tools_accumulation.keys()):
+                    _fn = tools_accumulation[_key]
                     if not _fn.get("name"):
                         continue
                     calls.append(NativeToolCall(
@@ -1384,38 +1451,32 @@ class OpenAIProvider(LLMProvider):
                             item = getattr(event, "item", None)
                             idx = int(getattr(event, "output_index", 0) or 0)
                             if item is not None and getattr(item, "type", None) == "function_call":
-                                tools_accumulation[idx] = {
-                                    "id": getattr(item, "call_id", "")
+                                _remember_tool(
+                                    idx,
+                                    call_id=getattr(item, "call_id", "")
                                     or getattr(item, "id", "")
                                     or "",
-                                    "name": getattr(item, "name", "") or "",
-                                    "arguments": getattr(item, "arguments", "") or "",
-                                }
+                                    name=getattr(item, "name", "") or "",
+                                    arguments=getattr(item, "arguments", "") or "",
+                                    replace_args=True,
+                                )
                         elif etype == "response.function_call_arguments.delta":
                             idx = int(getattr(event, "output_index", 0) or 0)
-                            if idx not in tools_accumulation:
-                                tools_accumulation[idx] = {
-                                    "id": "",
-                                    "name": "",
-                                    "arguments": "",
-                                }
                             delta = getattr(event, "delta", None) or ""
-                            tools_accumulation[idx]["arguments"] += delta
+                            _remember_tool(idx, arguments=delta, replace_args=False)
                         elif etype == "response.output_item.done":
                             item = getattr(event, "item", None)
                             idx = int(getattr(event, "output_index", 0) or 0)
                             if item is not None and getattr(item, "type", None) == "function_call":
-                                prev = tools_accumulation.get(idx, {})
-                                tools_accumulation[idx] = {
-                                    "id": getattr(item, "call_id", "")
+                                _remember_tool(
+                                    idx,
+                                    call_id=getattr(item, "call_id", "")
                                     or getattr(item, "id", "")
-                                    or prev.get("id", ""),
-                                    "name": getattr(item, "name", "")
-                                    or prev.get("name", ""),
-                                    "arguments": getattr(item, "arguments", None)
-                                    or prev.get("arguments", "")
                                     or "",
-                                }
+                                    name=getattr(item, "name", "") or "",
+                                    arguments=getattr(item, "arguments", None),
+                                    replace_args=True,
+                                )
                         elif etype == "response.completed":
                             resp = getattr(event, "response", None)
                             if resp is not None:
@@ -1428,11 +1489,13 @@ class OpenAIProvider(LLMProvider):
                                     await _invoke_callback(on_chunk, _t)
                                 if _c and not tools_accumulation:
                                     for i, call in enumerate(_c):
-                                        tools_accumulation[i] = {
-                                            "id": call.tool_call_id,
-                                            "name": call.tool_name,
-                                            "arguments": json.dumps(call.args),
-                                        }
+                                        _remember_tool(
+                                            i,
+                                            call_id=call.tool_call_id,
+                                            name=call.tool_name,
+                                            arguments=json.dumps(call.args),
+                                            replace_args=True,
+                                        )
                         elif etype in ("response.failed", "error"):
                             raise RuntimeError(f"Responses stream failed: {event}")
                     except RuntimeError:

@@ -34,7 +34,8 @@ def _normalize_input_schema(input_schema: Dict[str, Any]) -> Dict[str, Dict[str,
     for pname, raw in props.items():
         if not isinstance(raw, dict):
             continue
-        node = normalize_json_schema_node(raw)
+        # Pass root so $ref/$defs (pydantic nested models) resolve.
+        node = normalize_json_schema_node(raw, root=input_schema)
         description = str(node.get("description") or "")
         # Surface enum constraints in the description when present.
         enum_vals = node.get("enum")

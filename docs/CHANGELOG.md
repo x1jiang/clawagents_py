@@ -1,6 +1,14 @@
 # ClawAgents Changelog
 
 
+### v6.20.22 — Responses retry, $ref schemas, model-prefix classifiers (July 2026)
+
+- Non-streaming Responses no longer nests ``_with_retry`` around ``_stream_with_retry_responses`` (was up to 16 HTTP calls).
+- MCP/tool schemas resolve ``$ref``/``$defs`` and ``anyOf``/``oneOf`` (pydantic Optional / nested models).
+- Strip ``openai.`` / ``azure.`` / ``mantle.`` prefixes in Responses/reasoning classifiers.
+- Responses stream tool accumulation keys by ``call_id`` (not only ``output_index``).
+- Clearer circuit-breaker-open errors when the feature is enabled.
+
 ### v6.20.21 — Nested tool schemas + model identity (July 2026)
 
 - MCP bridge and OpenAI / Responses / Gemini / Anthropic / Bedrock emitters preserve

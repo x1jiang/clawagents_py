@@ -5,6 +5,7 @@ from clawagents.providers.llm import (
     _chat_completions_needs_reasoning_none,
     model_supports_reasoning_effort,
     normalize_reasoning_effort,
+    prefers_responses_api,
 )
 
 
@@ -17,6 +18,14 @@ def test_reasoning_none_required_for_56_and_55():
     assert _chat_completions_needs_reasoning_none("gpt-5.5-pro")
     assert not _chat_completions_needs_reasoning_none("gpt-5.4")
     assert not _chat_completions_needs_reasoning_none("gpt-4o")
+
+
+def test_openai_vendor_prefix_stripped_for_classifiers():
+    """Catalog ids like openai.gpt-5.6-luna must match bare gpt-5.6-luna."""
+    assert _chat_completions_needs_reasoning_none("openai.gpt-5.6-luna")
+    assert prefers_responses_api("openai.gpt-5.6-luna", has_tools=True)
+    assert prefers_responses_api("openai.gpt-5.6-luna", has_tools=False)
+    assert model_supports_reasoning_effort("openai.gpt-5.6-luna")
 
 
 def test_apply_sets_reasoning_effort_only_with_tools():
