@@ -592,6 +592,29 @@ class ToolRegistry:
         def _skill_key(value: object) -> str:
             return re.sub(r"[\s\-]+", "_", str(value or "").strip().lower())
 
+        # Completed skills compose by intersection. Skill discovery/loading is
+        # control-plane behavior; it may add restrictions but never widen them.
+        # retrieve_tool_result is control-plane recovery for crushed outputs;
+        # crush headers advertise it — the gate must not refuse it.
+        control_plane = {"use_skill", "list_skills", "retrieve_tool_result"}
+
+        def _projected_allowed_tools() -> frozenset[str] | None:
+            """Allow-list after any pending skill page would activate at EOF."""
+            active = getattr(run_context, "active_skill_allowed_tools", None)
+            pending_name_local = getattr(run_context, "pending_skill_name", None)
+            pending_declared = bool(
+                getattr(run_context, "pending_skill_boundary_declared", False)
+            )
+            pending_boundary = getattr(run_context, "pending_skill_allowed_tools", None)
+            if pending_name_local and pending_declared:
+                boundary = (
+                    frozenset() if pending_boundary is None else frozenset(pending_boundary)
+                )
+                if active is None:
+                    return boundary
+                return frozenset(active) & boundary
+            return active if active is None else frozenset(active)
+
         # Partial multi-page skill loads: the harness finishes remaining pages
         # itself (name/offset/hash are deterministic) then runs the tool the
         # model actually asked for. Exact continuations and abort=true still
@@ -624,6 +647,29 @@ class ToolRegistry:
             )
             aborting = tool_name == "use_skill" and bool(args.get("abort"))
             if not continuing and not aborting:
+                # Refuse before drain when the tool would fail the post-EOF
+                # allow-list — otherwise drained pages are discarded on the
+                # gate return below (pending state already cleared).
+                projected = _projected_allowed_tools()
+                if (
+                    projected is not None
+                    and tool_name not in projected
+                    and tool_name not in control_plane
+                ):
+                    skill_label = str(
+                        pending_name
+                        or getattr(run_context, "active_skill_name", "")
+                        or ""
+                    )
+                    return ToolResult(
+                        success=False,
+                        output="",
+                        error=(
+                            f"Refused: skill '{skill_label}' (pending load) allows "
+                            f"only: {', '.join(sorted(projected)) or 'no data-plane tools'}. "
+                            "Finish or abort the skill load before calling other tools."
+                        ),
+                    )
                 drain_text, drain_err = await self._auto_drain_pending_skill(
                     run_context
                 )
@@ -635,21 +681,17 @@ class ToolRegistry:
                     )
                 auto_skill_prefix = drain_text or ""
 
-        # Completed skills compose by intersection. Skill discovery/loading is
-        # control-plane behavior; it may add restrictions but never widen them.
         allowed_tools = getattr(run_context, "active_skill_allowed_tools", None)
-        # retrieve_tool_result is control-plane recovery for crushed outputs;
-        # crush headers advertise it — the gate must not refuse it.
-        control_plane = {"use_skill", "list_skills", "retrieve_tool_result"}
         if (
             allowed_tools is not None
             and tool_name not in allowed_tools
             and tool_name not in control_plane
         ):
             active_name = str(getattr(run_context, "active_skill_name", "") or "")
+            # If drain somehow raced ahead of the preflight, still surface pages.
             return ToolResult(
                 success=False,
-                output="",
+                output=auto_skill_prefix or "",
                 error=(
                     f"Refused: active skill '{active_name}' allows only: "
                     f"{', '.join(sorted(allowed_tools)) or 'no data-plane tools'}."

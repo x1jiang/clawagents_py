@@ -106,8 +106,19 @@ def is_anthropic_model(model: str) -> bool:
     return False
 
 
+def _has_bedrock_fm_prefix(model_id: str) -> bool:
+    lower = (model_id or "").lower()
+    return any(lower.startswith(prefix) for prefix in BEDROCK_FM_PREFIXES)
+
+
 def is_bedrock_model_id(model: str) -> bool:
-    """True for Amazon Bedrock model / inference-profile IDs."""
+    """True for Amazon Bedrock model / inference-profile IDs.
+
+    Geo prefixes (``us.`` / ``eu.`` / ``apac.`` / ``global.``) alone are not
+    enough — the remainder must still look like a Bedrock foundation-model id
+    (``anthropic.`` / ``amazon.`` / …). Otherwise bare strings like
+    ``us.custom-router`` falsely route to Bedrock.
+    """
     ref = parse_model_ref(model)
     if ref.prefix_hint == "bedrock":
         return True
@@ -115,11 +126,8 @@ def is_bedrock_model_id(model: str) -> bool:
     if not lower:
         return False
     if lower.startswith(BEDROCK_GEO_PREFIXES):
-        return True
-    for prefix in BEDROCK_FM_PREFIXES:
-        if lower.startswith(prefix):
-            return True
-    return False
+        return _has_bedrock_fm_prefix(strip_bedrock_geo_prefix(lower))
+    return _has_bedrock_fm_prefix(lower)
 
 
 def strip_bedrock_prefix(model: str) -> str:

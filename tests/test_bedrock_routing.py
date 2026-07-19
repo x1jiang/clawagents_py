@@ -21,6 +21,12 @@ from clawagents.config.config import (
         ("amazon.nova-pro-v1:0", True),
         ("bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0", True),
         ("meta.llama3-70b-instruct-v1:0", True),
+        ("apac.amazon.nova-pro-v1:0", True),
+        ("global.anthropic.claude-sonnet-4-5-20250929-v1:0", True),
+        # Geo prefix alone is not enough — must still look like a Bedrock FM id.
+        ("us.custom-router", False),
+        ("eu.my-internal-model", False),
+        ("global.something", False),
         ("claude-sonnet-4-5", False),
         ("gpt-5-mini", False),
         ("gemini-3-flash", False),

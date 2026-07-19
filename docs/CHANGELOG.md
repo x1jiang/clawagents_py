@@ -1,6 +1,11 @@
 # ClawAgents Changelog
 
 
+### v6.20.24 — Bedrock id + skill drain gate (July 2026)
+
+- ``is_bedrock_model_id`` requires a foundation-model vendor prefix after geo (``us.``/``eu.``/…).
+- Skill allow-list preflight refuses disallowed tools *before* auto-drain so pending pages are not discarded.
+
 ### v6.20.23 — Round-2 audit: skills, apply_patch, MCP, compaction (July 2026)
 
 - Circuit breaker defaults on (``provider_circuit_breaker=1``) now that nested Responses retries are gone.

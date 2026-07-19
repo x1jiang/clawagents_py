@@ -497,6 +497,56 @@ def test_use_skill_auto_continues_before_other_tool(tmp_path):
     assert context.pending_skill_next_offset is None
 
 
+def test_disallowed_tool_refuses_before_auto_drain(tmp_path):
+    """Pending allow-list must gate BEFORE drain so pages are not discarded."""
+    root = tmp_path / "skills"
+    _write_skill(
+        root,
+        "long-restricted",
+        body=("first rules\n\n" + "A" * 10_000 + "\n\nlast rules\n" + "Z" * 4_000),
+        frontmatter=(
+            "name: long-restricted\ndescription: long skill\nallowed-tools: read_file"
+        ),
+    )
+    store = SkillStore()
+    store.add_directory(root)
+    _load(store)
+    use_tool = [tool for tool in create_skill_tools(store) if tool.name == "use_skill"][0]
+
+    class ExecTool:
+        name = "execute"
+        description = "exec"
+        parameters = {}
+
+        async def execute(self, args):
+            return ToolResult(success=True, output="ran")
+
+    registry = ToolRegistry()
+    registry.register(use_tool)
+    registry.register(ExecTool())
+    context = RunContext()
+    first = asyncio.run(
+        registry.execute_tool(
+            "use_skill",
+            {"name": "long-restricted", "max_chars": 4_000},
+            run_context=context,
+        )
+    )
+    assert first.success
+    pending_before = context.pending_skill_next_offset
+    assert pending_before is not None
+
+    refused = asyncio.run(
+        registry.execute_tool("execute", {}, run_context=context)
+    )
+    assert not refused.success
+    assert "allows only" in (refused.error or "")
+    # Pending load must survive — drain must not have run.
+    assert context.pending_skill_next_offset == pending_before
+    assert "long-restricted" not in context.active_skills
+    assert "Harness auto-continued" not in (refused.output or "")
+
+
 def test_use_skill_manual_continuation_still_works(tmp_path):
     root = tmp_path / "skills"
     _write_skill(
