@@ -19,39 +19,107 @@ _FENCE_MARKS = frozenset({_SEARCH_MARK, _DIVIDER_MARK, _REPLACE_MARK})
 _UNIFIED_HUNK = re.compile(r"(?m)^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@")
 
 
+def _fence_kind(line: str) -> str | None:
+    """Recognize fence markers even with trailing spaces on the marker line."""
+    stripped = (line or "").rstrip()
+    if stripped == _SEARCH_MARK:
+        return "search"
+    if stripped == _DIVIDER_MARK:
+        return "divider"
+    if stripped == _REPLACE_MARK:
+        return "replace"
+    return None
+
+
 def _has_fence_markers(text: str) -> bool:
     for ln in text.splitlines():
-        if ln == _SEARCH_MARK or ln == _REPLACE_MARK:
+        kind = _fence_kind(ln)
+        if kind in ("search", "replace"):
             return True
         # Bare ======= alone is too common in markdown; only flag with SEARCH/REPLACE.
     return False
 
 
+def _ws_collapse(s: str) -> str:
+    """Collapse leading/trailing/internal whitespace per line (tabs↔spaces)."""
+    return "\n".join(" ".join(ln.split()) for ln in s.splitlines())
+
+
+def _locate_collapsed_span(content: str, search: str) -> str | None:
+    """Return the original file span that uniquely matches collapsed SEARCH."""
+    needle = _ws_collapse(search)
+    if not needle.strip():
+        return None
+    content_lines = content.splitlines()
+    needle_lines = needle.split("\n")
+    n = len(needle_lines)
+    if n == 0 or n > len(content_lines):
+        return None
+    hits: list[int] = []
+    for i in range(0, len(content_lines) - n + 1):
+        window = "\n".join(content_lines[i : i + n])
+        if _ws_collapse(window) == needle:
+            hits.append(i)
+    if len(hits) != 1:
+        return None
+    i = hits[0]
+    matched = "\n".join(content_lines[i : i + n])
+    # Prefer newline-terminated span when the file continues after it.
+    with_nl = matched + "\n"
+    if with_nl in content:
+        return with_nl
+    if matched in content:
+        return matched
+    return None
+
+
+def _nearest_search_hint(content: str, search: str) -> str:
+    """Port of edit_file's nearest-line hint for SEARCH misses."""
+    needle = (search or "").strip()
+    if not needle:
+        return ""
+    first = needle.splitlines()[0].strip()
+    if not first:
+        return ""
+    best: tuple[float, int, str] | None = None
+    for i, line in enumerate(content.splitlines()):
+        ratio = difflib.SequenceMatcher(None, first, line.strip()).ratio()
+        if best is None or ratio > best[0]:
+            best = (ratio, i + 1, line)
+    if best is None or best[0] < 0.55:
+        return ""
+    score, lineno, line = best
+    preview = line if len(line) <= 120 else line[:117] + "..."
+    return (
+        f" Nearest similar line ~{lineno} (similarity {score:.0%}): {preview!r}."
+    )
+
+
 def _parse_search_replace_hunks(patch: str) -> tuple[list[tuple[str, str]] | None, str]:
     """Parse Aider fences into (search, replace) pairs.
 
-    A line is a marker iff it **exactly** equals a fence string. Empty REPLACE
-    (deletion) is valid: ``=======`` immediately followed by ``>>>>>>> REPLACE``.
+    Fence marker lines may carry trailing spaces. Empty REPLACE (deletion) is
+    valid: ``=======`` immediately followed by ``>>>>>>> REPLACE``.
     """
     lines = patch.splitlines()
     hunks: list[tuple[str, str]] = []
     i = 0
     # Skip leading non-fence preamble
-    while i < len(lines) and lines[i] != _SEARCH_MARK:
+    while i < len(lines) and _fence_kind(lines[i]) != "search":
         i += 1
     if i >= len(lines):
         return None, "malformed SEARCH/REPLACE fences (no <<<<<<< SEARCH)"
 
     while i < len(lines):
-        if lines[i] != _SEARCH_MARK:
+        if _fence_kind(lines[i]) != "search":
             return None, (
                 f"unexpected content at line {i + 1} while expecting {_SEARCH_MARK!r} "
                 f"(unconsumed fence or garbage between hunks)"
             )
         i += 1
         search_lines: list[str] = []
-        while i < len(lines) and lines[i] != _DIVIDER_MARK:
-            if lines[i] in _FENCE_MARKS:
+        while i < len(lines) and _fence_kind(lines[i]) != "divider":
+            if _fence_kind(lines[i]) in ("search", "replace"):
                 return None, (
                     f"unexpected fence marker {lines[i]!r} inside SEARCH block "
                     f"(line {i + 1})"
@@ -62,8 +130,8 @@ def _parse_search_replace_hunks(patch: str) -> tuple[list[tuple[str, str]] | Non
             return None, "SEARCH block not closed with ======="
         i += 1  # skip =======
         replace_lines: list[str] = []
-        while i < len(lines) and lines[i] != _REPLACE_MARK:
-            if lines[i] in _FENCE_MARKS:
+        while i < len(lines) and _fence_kind(lines[i]) != "replace":
+            if _fence_kind(lines[i]) in ("search", "divider"):
                 return None, (
                     f"unexpected fence marker {lines[i]!r} inside REPLACE block "
                     f"(line {i + 1})"
@@ -75,10 +143,7 @@ def _parse_search_replace_hunks(patch: str) -> tuple[list[tuple[str, str]] | Non
         i += 1  # skip >>>>>>> REPLACE
         search = "\n".join(search_lines)
         replace = "\n".join(replace_lines)
-        # Preserve trailing newline semantics: if SEARCH had content, join with \n
-        # between lines only — empty search is rejected later.
         hunks.append((search, replace))
-        # Allow blank lines between hunks
         while i < len(lines) and lines[i].strip() == "":
             i += 1
 
@@ -106,18 +171,21 @@ def _apply_search_replace(content: str, search: str, replace: str) -> tuple[bool
             break
 
     if matched is None:
-        def norm(s: str) -> str:
-            return "\n".join(ln.rstrip() for ln in s.splitlines())
-
-        if norm(search) not in norm(content):
+        # Soft match: collapse whitespace (leading/tabs/internal) and apply
+        # when the collapsed span is unique in the file.
+        soft = _locate_collapsed_span(content, search)
+        if soft is not None:
+            matched = soft
+        else:
+            hint = _nearest_search_hint(content, search)
             return (
                 False,
                 content,
                 "SEARCH block not found (even after whitespace normalize). "
                 "Re-read the file (or use hashline_grep → hashline_edit) and "
-                "copy the exact current text into SEARCH.",
+                "copy the exact current text into SEARCH."
+                + hint,
             )
-        return False, content, "SEARCH whitespace mismatch — provide exact file text"
 
     if content.count(matched) > 1:
         return False, content, "SEARCH block matches multiple locations — make it unique"

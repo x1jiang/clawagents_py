@@ -206,6 +206,21 @@ _ALLOWED_TOOL_ALIASES: dict[str, str] = {
     "websearch": "web_search",
     "webfetch": "web_fetch",
     "notebookedit": "edit_file",
+    # Common Claude Code / review-skill names → clawagents tools
+    "git_status": "git_status",
+    "gitstatus": "git_status",
+    "repomap": "repo_map",
+    "repo_map": "repo_map",
+    "hashlineread": "hashline_read",
+    "hashline_read": "hashline_read",
+    "hashlineedit": "hashline_edit",
+    "hashline_edit": "hashline_edit",
+    "hashlinegrep": "hashline_grep",
+    "hashline_grep": "hashline_grep",
+    "applypatch": "apply_patch",
+    "apply_patch": "apply_patch",
+    "snapshotdiff": "snapshot_diff",
+    "snapshot_diff": "snapshot_diff",
 }
 
 
@@ -326,26 +341,32 @@ def parse_skill_file(content: str, file_path: str) -> Skill:
 
         description = _parse_frontmatter_description(yaml_content)
 
+        # Normalize CRLF so Windows skill files don't parse as "zero tools".
+        yaml_for_tools = yaml_content.replace("\r\n", "\n").replace("\r", "\n")
+
         # Parse allowed-tools: YAML block list (`- Bash`) or inline list.
         # IMPORTANT: do not use `\s*` after the colon — it eats the newline and
         # turns the first bullet into the bogus tokens "-", "Bash".
+        # Also accept flush-left dashes (valid YAML) — previously those silently
+        # fell through to "unrestricted".
         allowed_tools = None
         block_tools = re.search(
-            r"^allowed-tools:[ \t]*\n((?:[ \t]+-[^\n]*\n?)+)",
-            yaml_content,
+            r"^allowed-tools:[ \t]*\n((?:[ \t]*-[^\n]*\n?)+)",
+            yaml_for_tools,
             re.MULTILINE,
         )
         if block_tools:
             allowed_tools = [
                 item.strip().strip("\"'")
                 for item in re.findall(
-                    r"^[ \t]+-\s+(.+)$", block_tools.group(1), re.MULTILINE
+                    r"^[ \t]*-\s+(.+)$", block_tools.group(1), re.MULTILINE
                 )
                 if item.strip().strip("\"'")
             ]
+            # Block present but no parseable items → declared empty (not unrestricted).
         else:
             tools_match = re.search(
-                r"^allowed-tools:[ \t]*(.+)$", yaml_content, re.MULTILINE
+                r"^allowed-tools:[ \t]*(.+)$", yaml_for_tools, re.MULTILINE
             )
             if tools_match:
                 allowed_tools = _parse_inline_list(tools_match.group(1))

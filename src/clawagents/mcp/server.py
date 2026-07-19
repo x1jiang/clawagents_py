@@ -322,29 +322,55 @@ class MCPServer(abc.ABC):
     async def connect(self) -> None:
         """Spawn the transport, open a ClientSession, run the MCP handshake."""
         require_mcp_sdk()
-        if self._phase not in (MCPLifecyclePhase.IDLE, MCPLifecyclePhase.SHUTDOWN, MCPLifecyclePhase.ERRORED):
+        if self._phase not in (
+            MCPLifecyclePhase.IDLE,
+            MCPLifecyclePhase.SHUTDOWN,
+            MCPLifecyclePhase.ERRORED,
+        ):
             return  # Already connecting / ready
+        import asyncio as _asyncio
+        from datetime import timedelta
+
         from mcp import ClientSession
 
         self._transition(MCPLifecyclePhase.CONNECTING)
         self._exit_stack = AsyncExitStack()
-        try:
-            transport = await self._exit_stack.enter_async_context(self._create_streams())
-            # stdio_client / sse_client return (read, write); streamablehttp_client returns (read, write, get_session_id)
-            read, write, *_rest = transport
+        timeout_s = self.client_session_timeout_seconds
+        read_timeout = (
+            timedelta(seconds=float(timeout_s))
+            if timeout_s is not None and float(timeout_s) > 0
+            else None
+        )
+        # Handshake budget: session read timeout, or 30s floor so one hung
+        # server cannot block agent construction forever.
+        connect_budget = float(timeout_s) if timeout_s and float(timeout_s) > 0 else 30.0
+        connect_budget = max(connect_budget, 5.0)
 
+        async def _handshake() -> None:
+            transport = await self._exit_stack.enter_async_context(self._create_streams())
+            # stdio_client / sse_client return (read, write); streamablehttp returns 3-tuple
+            read, write, *_rest = transport
+            session_kwargs: dict[str, Any] = {}
+            if read_timeout is not None:
+                session_kwargs["read_timeout_seconds"] = read_timeout
             session = await self._exit_stack.enter_async_context(
-                ClientSession(read, write)
+                ClientSession(read, write, **session_kwargs)
             )
             self._transition(MCPLifecyclePhase.INITIALIZING)
             await session.initialize()
             self._session = session
-            import asyncio as _asyncio
-
             self._loop = _asyncio.get_running_loop()
             self._transition(MCPLifecyclePhase.READY)
+
+        try:
+            await _asyncio.wait_for(_handshake(), timeout=connect_budget)
         except BaseException as exc:
-            self._transition(MCPLifecyclePhase.ERRORED, error=str(exc))
+            err = (
+                f"MCP connect timed out after {connect_budget:.0f}s"
+                if isinstance(exc, _asyncio.TimeoutError)
+                else str(exc)
+            )
+            self._transition(MCPLifecyclePhase.ERRORED, error=err)
             try:
                 if self._exit_stack is not None:
                     await self._exit_stack.aclose()
@@ -352,11 +378,15 @@ class MCPServer(abc.ABC):
                 pass
             self._exit_stack = None
             self._session = None
+            if isinstance(exc, _asyncio.TimeoutError):
+                raise TimeoutError(err) from exc
             raise
 
     def _session_usable(self) -> bool:
-        """True when a session exists and belongs to the running loop."""
+        """True when a live session exists on the running loop (not errored)."""
         if self._session is None:
+            return False
+        if self._phase == MCPLifecyclePhase.ERRORED:
             return False
         import asyncio as _asyncio
 
@@ -367,7 +397,7 @@ class MCPServer(abc.ABC):
         return self._loop is current and not getattr(self._loop, "is_closed", lambda: False)()
 
     async def _ensure_session(self) -> None:
-        """(Re)connect when the session is missing or owned by another loop.
+        """(Re)connect when the session is missing, errored, or on another loop.
 
         Transports opened in a loop that has since gone away cannot be closed
         from here (anyio cancel scopes are task-affine), so stale references
@@ -376,7 +406,7 @@ class MCPServer(abc.ABC):
         """
         if self._session_usable():
             return
-        if self._session is not None:
+        if self._session is not None or self._phase == MCPLifecyclePhase.ERRORED:
             self._exit_stack = None
             self._session = None
             self._loop = None

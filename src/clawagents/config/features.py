@@ -103,7 +103,10 @@ _FEATURE_DEFAULTS: dict[str, str] = {
     "session_rewind":       "1",   # Rewind to prompt N (files + conversation)
     "hook_taxonomy":        "0",   # Opt-in; requires external_hooks too (was RCE default-on)
     "sandbox_fail_closed":  "0",   # Refuse soft-fallback; secret path deny binds
-    "provider_circuit_breaker": "0",  # Off by default — concurrency burns retries on BreakerOpen
+    # On by default since 6.20.23 — nested Responses retries no longer multiply
+    # BreakerOpen waits into a 16× storm. Set CLAW_FEATURE_PROVIDER_CIRCUIT_BREAKER=0
+    # to disable.
+    "provider_circuit_breaker": "1",
     "tool_error_traceback": "0",   # Include short traceback in ToolResult.error (also CLAW_DEBUG)
 }
 

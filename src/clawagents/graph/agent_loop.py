@@ -1397,22 +1397,38 @@ def _extract_recent_files(messages: list[LLMMessage], *, limit: int = 12) -> lis
     return found
 
 
+def _message_reuse_key(m: LLMMessage) -> tuple[Any, ...]:
+    """Disambiguate reuse keys so empty-content tool calls cannot swap meta.
+
+    Matching only on ``(role, content)`` swapped ``tool_calls_meta`` between
+    unrelated assistants that both had ``content=None`` / ``""``.
+    """
+    role = m.role
+    content = _content_key_text(m.content)
+    if role == "tool":
+        return (role, content, str(m.tool_call_id or ""), ())
+    meta = getattr(m, "tool_calls_meta", None) or []
+    if role == "assistant" and meta:
+        ids = tuple(str(tc.get("id") or "") for tc in meta if isinstance(tc, dict))
+        names = tuple(str(tc.get("name") or "") for tc in meta if isinstance(tc, dict))
+        return (role, content, ids, names)
+    return (role, content, "", ())
+
+
 def _reuse_messages_where_possible(
     originals: list[LLMMessage],
     rebuilt: list[LLMMessage],
 ) -> list[LLMMessage]:
-    """Prefer original LLMMessage object identity when (role, content) match.
+    """Prefer original LLMMessage object identity when reuse keys match.
 
     Required for session-persistence trackers that key off identity.
     """
-    buckets: dict[tuple[str, str], list[LLMMessage]] = {}
+    buckets: dict[tuple[Any, ...], list[LLMMessage]] = {}
     for om in originals:
-        key = (om.role, _content_key_text(om.content))
-        buckets.setdefault(key, []).append(om)
+        buckets.setdefault(_message_reuse_key(om), []).append(om)
     out: list[LLMMessage] = []
     for m in rebuilt:
-        key = (m.role, _content_key_text(m.content))
-        bucket = buckets.get(key)
+        bucket = buckets.get(_message_reuse_key(m))
         if bucket:
             out.append(bucket.pop())
         else:
@@ -1866,19 +1882,24 @@ async def _compact_if_needed(
             # metadata (tool_calls_meta / tool_call_id) that providers need
             # for transcript linkage. Reuse the original LLMMessage object
             # whenever (role, content) survived compression unchanged.
+            # AgentMessage views only carry role+content — empty assistant/tool
+            # bodies are ambiguous and must not reuse originals (that was the
+            # tool_calls_meta swap). Non-empty content still reuses by text.
             _originals_by_key: dict[tuple[str, str], list[LLMMessage]] = {}
             for _om in (*system_msgs, *non_system):
-                _okey = (
-                    _om.role,
-                    _content_key_text(_om.content),
-                )
-                _originals_by_key.setdefault(_okey, []).append(_om)
+                _text = _content_key_text(_om.content)
+                if _om.role in ("assistant", "tool") and not str(_text or "").strip():
+                    continue  # never offer empty bodies for reuse
+                _originals_by_key.setdefault((_om.role, _text), []).append(_om)
 
             def _reuse_original(role: str, content: str) -> LLMMessage:
-                bucket = _originals_by_key.get((role, content))
+                text = content or ""
+                if role in ("assistant", "tool") and not text.strip():
+                    return LLMMessage(role=role, content=text)
+                bucket = _originals_by_key.get((role, _content_key_text(text)))
                 if bucket:
-                    return bucket.pop()  # prefer the most recent original
-                return LLMMessage(role=role, content=content)
+                    return bucket.pop()
+                return LLMMessage(role=role, content=text)
 
             compact_out = [
                 _reuse_original(m.role, m.content or "")
@@ -3270,11 +3291,28 @@ async def _run_agent_graph_core(
                             ),
                         )
                     ]
+                # When a skill has activated an allowed-tools boundary, only
+                # advertise those tools (+ control plane) so the model stops
+                # reaching for tools the registry will refuse.
+                turn_tools = native_schemas
+                if turn_tools and run_context is not None:
+                    allowed = getattr(run_context, "active_skill_allowed_tools", None)
+                    if allowed is not None:
+                        control = {
+                            "use_skill",
+                            "list_skills",
+                            "retrieve_tool_result",
+                        }
+                        turn_tools = [
+                            s
+                            for s in turn_tools
+                            if s.name in allowed or s.name in control
+                        ]
                 response = await llm.chat(
                     chat_messages,
                     on_chunk=on_chunk if streaming else None,
                     cancel_event=cancel_event,
-                    tools=native_schemas,
+                    tools=turn_tools,
                 )
                 if not resolved_model_name and response.model:
                     resolved_model_name = response.model

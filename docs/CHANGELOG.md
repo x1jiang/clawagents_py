@@ -1,6 +1,15 @@
 # ClawAgents Changelog
 
 
+### v6.20.23 — Round-2 audit: skills, apply_patch, MCP, compaction (July 2026)
+
+- Circuit breaker defaults on (``provider_circuit_breaker=1``) now that nested Responses retries are gone.
+- Compaction message reuse keys on tool-call ids / names so empty assistant/tool bodies do not swap ``tool_calls_meta``.
+- Active skill ``allowed-tools`` filters the LLM tool list (not only at call time); Claude Code aliases (``Read``/``Bash``/``git_status``/…).
+- Skill frontmatter: flush-left YAML dashes + CRLF ``allowed-tools`` lists parse correctly.
+- ``apply_patch``: tolerate trailing space on fence markers; softer whitespace match; nearest-match hint on SEARCH miss.
+- MCP: pass ``client_session_timeout_seconds`` to the SDK; connect timeout; reconnect when session is ERRORED.
+
 ### v6.20.22 — Responses retry, $ref schemas, model-prefix classifiers (July 2026)
 
 - Non-streaming Responses no longer nests ``_with_retry`` around ``_stream_with_retry_responses`` (was up to 16 HTTP calls).
