@@ -492,18 +492,16 @@ def _repair_json(text: str) -> Any:
 
 def _to_openai_tools(schemas: list[NativeToolSchema]) -> list[dict[str, Any]]:
     """Convert NativeToolSchema list → OpenAI Chat Completions `tools` param."""
+    from clawagents.providers.tool_schema import emit_openai_schema_node
+
     result = []
     for s in schemas:
         properties: dict[str, Any] = {}
         required: list[str] = []
         for k, v in s.parameters.items():
-            ptype = v.get("type", "string")
-            prop: dict[str, Any] = {"type": ptype, "description": v.get("description", "")}
-            if ptype == "array":
-                items = v.get("items") if isinstance(v.get("items"), dict) else {"type": "string"}
-                prop["items"] = {"type": items.get("type", "string")}
-            elif "items" in v:
-                prop["items"] = v["items"]
+            if not isinstance(v, dict):
+                continue
+            prop = emit_openai_schema_node(v)
             if v.get("required"):
                 required.append(k)
             properties[k] = prop
@@ -520,24 +518,16 @@ def _to_openai_tools(schemas: list[NativeToolSchema]) -> list[dict[str, Any]]:
 
 def _to_gemini_tools(schemas: list[NativeToolSchema]) -> list[dict[str, Any]]:
     """Convert NativeToolSchema list → Gemini FunctionDeclaration format."""
+    from clawagents.providers.tool_schema import emit_gemini_schema_node
+
     declarations = []
     for s in schemas:
-        # Inner dict carries str values plus nested dict for "items" — use Any.
         properties: dict[str, dict[str, Any]] = {}
         required: list[str] = []
         for k, v in s.parameters.items():
-            ptype = str(v.get("type", "string")).upper()
-            prop: dict[str, Any] = {
-                "type": ptype,
-                "description": v.get("description", ""),
-            }
-            # Gemini requires ARRAY properties to declare items.type.
-            if ptype == "ARRAY":
-                items = v.get("items") if isinstance(v.get("items"), dict) else {}
-                item_type = str(items.get("type", "string")).upper()
-                prop["items"] = {"type": item_type}
-            elif "items" in v and isinstance(v["items"], dict):
-                prop["items"] = {"type": str(v["items"].get("type", "string")).upper()}
+            if not isinstance(v, dict):
+                continue
+            prop = emit_gemini_schema_node(v)
             if v.get("required"):
                 required.append(k)
             properties[k] = prop
@@ -2572,16 +2562,7 @@ class AnthropicProvider(LLMProvider):
             except Exception:
                 pass
         if tools:
-            def _anthropic_prop(v: dict[str, Any]) -> dict[str, Any]:
-                prop: dict[str, Any] = {
-                    "type": v.get("type", "string"),
-                    "description": v.get("description", ""),
-                }
-                # Array parameters must carry their ``items`` schema — dropping
-                # it made Claude guess element types (or the API reject the tool).
-                if prop["type"] == "array":
-                    prop["items"] = v.get("items") or {"type": "string"}
-                return prop
+            from clawagents.providers.tool_schema import emit_openai_schema_node
 
             kwargs["tools"] = [
                 {
@@ -2590,9 +2571,13 @@ class AnthropicProvider(LLMProvider):
                     "input_schema": {
                         "type": "object",
                         "properties": {
-                            k: _anthropic_prop(v) for k, v in s.parameters.items()
+                            k: emit_openai_schema_node(v)
+                            for k, v in s.parameters.items()
+                            if isinstance(v, dict)
                         },
-                        "required": [k for k, v in s.parameters.items() if v.get("required")],
+                        "required": [
+                            k for k, v in s.parameters.items() if v.get("required")
+                        ],
                     },
                 }
                 for s in tools
@@ -3006,15 +2991,15 @@ class BedrockConverseProvider(LLMProvider):
         if system_parts:
             kwargs["system"] = [{"text": "\n".join(system_parts)}]
         if tools:
+            from clawagents.providers.tool_schema import emit_openai_schema_node
+
             # Best-effort tool schemas for Converse toolConfig.
             tool_specs = []
             for s in tools:
                 props = {
-                    k: {
-                        "type": v.get("type", "string"),
-                        "description": v.get("description", ""),
-                    }
+                    k: emit_openai_schema_node(v)
                     for k, v in s.parameters.items()
+                    if isinstance(v, dict)
                 }
                 required = [k for k, v in s.parameters.items() if v.get("required")]
                 tool_specs.append(

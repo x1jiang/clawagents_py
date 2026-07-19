@@ -1,6 +1,15 @@
 # ClawAgents Changelog
 
 
+### v6.20.21 — Nested tool schemas + model identity (July 2026)
+
+- MCP bridge and OpenAI / Responses / Gemini / Anthropic / Bedrock emitters preserve
+  nested ``items.properties`` / ``required`` (fixes Gemini 400
+  ``properties[…].items: missing field`` for tools like ``ctx_batch_execute``).
+- Shared helper: ``clawagents.providers.tool_schema``.
+- System prompt includes a static ``## Model identity`` line keyed to the
+  configured ``provider/model`` (stops Claude/Google identity flip-flops).
+
 ### v6.20.20 — Skill continue=true + crush/code sniff + retrieve under skill gate (July 2026)
 
 - ``use_skill(continue=true)`` resumes from server-side offset/hash (no 64-char sha256 echo); continuation prompts and errors mention hash mismatches honestly.

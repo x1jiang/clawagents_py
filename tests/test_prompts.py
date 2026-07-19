@@ -3,11 +3,41 @@ from clawagents.prompts import (
     INJECTION_BEGIN,
     INJECTION_END,
     PROMPT_CACHE_BOUNDARY,
+    append_model_identity,
     append_prompt_injection,
     build_prompt_injection,
     build_system_prompt,
+    model_identity_section,
 )
 from clawagents.prompts.cache_align import normalize_stable_prefix
+
+
+def test_model_identity_section_names_configured_model():
+    block = model_identity_section("gemini", "gemini-3.1-flash-lite")
+    assert "`gemini/gemini-3.1-flash-lite`" in block
+    assert "Do not claim to be a different model" in block
+
+
+def test_append_model_identity_is_idempotent_and_skips_empty_model():
+    assert append_model_identity("base", "openai", "") == "base"
+    once = append_model_identity("base", "openai", "gpt-5.6-luna")
+    assert once.count("## Model identity") == 1
+    assert "`openai/gpt-5.6-luna`" in once
+    twice = append_model_identity(once, "openai", "gpt-5.6-luna")
+    assert twice == once
+
+
+def test_model_identity_stays_in_static_cache_prefix():
+    base = append_model_identity("base instructions", "openai", "gpt-5.6-luna")
+    system = build_system_prompt(
+        base_prompt=base,
+        tool_description="tools",
+        lesson_preamble="lessons",
+    )
+    prefix, _, _ = system.partition(PROMPT_CACHE_BOUNDARY)
+    assert "## Model identity" in prefix
+    assert "gpt-5.6-luna" in prefix
+    assert "lessons" not in prefix
 
 
 def test_build_system_prompt_places_tools_before_cache_boundary():

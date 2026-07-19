@@ -18,6 +18,40 @@ _INJECTION_BLOCK_RE = re.compile(
 )
 
 
+def model_identity_section(
+    provider: Optional[str],
+    model: Optional[str],
+) -> str:
+    """Stable identity line keyed to the configured provider/model.
+
+    Stops proxy/Gemini models from inventing \"I am Claude 3.5\" / \"trained by
+    Google\" when the session is actually a different configured model.
+    """
+    model_id = (model or "").strip()
+    if not model_id:
+        return ""
+    provider_id = (provider or "unknown").strip() or "unknown"
+    return (
+        "## Model identity\n"
+        f"You are ClawAgent. The configured model for this session is "
+        f"`{provider_id}/{model_id}`. Do not claim to be a different model, "
+        "vendor, or training lineage."
+    )
+
+
+def append_model_identity(
+    base_prompt: str,
+    provider: Optional[str],
+    model: Optional[str],
+) -> str:
+    """Append :func:`model_identity_section` unless already present."""
+    base = base_prompt or ""
+    block = model_identity_section(provider, model)
+    if not block or "## Model identity" in base:
+        return base
+    return f"{base.rstrip()}\n\n{block}"
+
+
 def build_system_prompt(
     base_prompt: str,
     tool_description: Optional[str] = "",

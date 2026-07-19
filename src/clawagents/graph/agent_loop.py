@@ -57,7 +57,7 @@ from clawagents.stream_events import (
 )
 from clawagents.context.carryover import get_compaction_carryover
 from clawagents.handoffs import Handoff, HandoffInputData
-from clawagents.prompts import build_system_prompt
+from clawagents.prompts import append_model_identity, build_system_prompt
 from clawagents.tokenizer import (
     count_messages_tokens as _count_messages_tokens,
     count_tokens_content,
@@ -2722,7 +2722,11 @@ async def _run_agent_graph_core(
         except Exception as err:
             emit("warn", {"message": f"advisor consultation failed: {err}"})
 
-    prompt_to_use = system_prompt or BASE_SYSTEM_PROMPT
+    prompt_to_use = append_model_identity(
+        system_prompt or BASE_SYSTEM_PROMPT,
+        getattr(llm, "name", None),
+        getattr(llm, "model", None),
+    )
     lesson_preamble = ""
     dynamic_parts: list[str] = []
 

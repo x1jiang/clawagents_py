@@ -10,21 +10,19 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional, TYPE_CHECKING
 
+from clawagents.providers.tool_schema import normalize_json_schema_node
 from clawagents.tools.registry import ToolResult
 
 if TYPE_CHECKING:
     from clawagents.mcp.server import MCPServer, MCPToolDescriptor
 
 
-_PRIMITIVE_TYPES = {"string", "number", "integer", "boolean", "array", "object"}
-
-
 def _normalize_input_schema(input_schema: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     """Convert an MCP-tool JSON-Schema ``inputSchema`` into clawagents' parameter dict.
 
-    clawagents tools use a flat ``{name: {type, description, required}}``
-    shape; MCP tools use full JSON Schema. We pull out just the top-level
-    properties.
+    Top-level params keep clawagents' ``required: bool``. Nested
+    ``items`` / ``properties`` keep full JSON-Schema shape so array-of-object
+    tools (e.g. ``commands: [{label, command}]``) survive into Gemini/OpenAI.
     """
     if not isinstance(input_schema, dict):
         return {}
@@ -36,38 +34,20 @@ def _normalize_input_schema(input_schema: Dict[str, Any]) -> Dict[str, Dict[str,
     for pname, raw in props.items():
         if not isinstance(raw, dict):
             continue
-        ptype = raw.get("type")
-        if isinstance(ptype, list):
-            ptype = next((t for t in ptype if t != "null"), "string")
-        if ptype not in _PRIMITIVE_TYPES:
-            ptype = "string"
-        description = raw.get("description", "") or ""
-        # Surface enum constraints in the description — the flat parameter
-        # shape has no enum field, and without the allowed values the model
-        # guesses (e.g. "bash" for a language enum that wants "shell").
-        enum_vals = raw.get("enum")
+        node = normalize_json_schema_node(raw)
+        description = str(node.get("description") or "")
+        # Surface enum constraints in the description when present.
+        enum_vals = node.get("enum")
         if isinstance(enum_vals, list) and enum_vals:
             allowed = ", ".join(str(v) for v in enum_vals[:24])
             suffix = f" Allowed values: {allowed}."
             if suffix.strip() not in description:
                 description = (description.rstrip(". ") + "." if description else "") + suffix
-        out[pname] = {
-            "type": ptype,
-            "description": description,
-            "required": pname in required,
-        }
-        # Preserve array item schemas — Gemini rejects ARRAY props without items.
-        if ptype == "array":
-            items = raw.get("items")
-            if isinstance(items, dict):
-                item_type = items.get("type", "string")
-                if isinstance(item_type, list):
-                    item_type = next((t for t in item_type if t != "null"), "string")
-                if item_type not in _PRIMITIVE_TYPES:
-                    item_type = "string"
-                out[pname]["items"] = {"type": item_type}
-            else:
-                out[pname]["items"] = {"type": "string"}
+            node["description"] = description
+        elif description:
+            node["description"] = description
+        node["required"] = pname in required
+        out[pname] = node
     return out
 
 
