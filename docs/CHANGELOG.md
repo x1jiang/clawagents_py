@@ -1,6 +1,17 @@
 # ClawAgents Changelog
 
 
+### v6.20.37 — Plan invariant enforcement (July 2026)
+
+- **Plan invariants survive Act:** approved plans can declare exact backticked
+  commands under `Verification gates`; the shared registry persists their state
+  and blocks publish/deploy-style commands until every gate succeeds.
+- **Fresh evidence only:** any later source mutation invalidates all prior checks,
+  successful high-impact actions consume their authorization, pending plans stay
+  fail-closed across turns, and corrupt contract state cannot silently bypass the
+  gate. Invariant-only plans require a recognized test/validation/dry-run command.
+
+
 ### v6.20.36 — Bounded scratch cleanup permissions (July 2026)
 
 - **Permission precision:** allow direct recursive cleanup of exactly one literal

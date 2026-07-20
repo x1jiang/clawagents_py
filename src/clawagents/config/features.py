@@ -58,6 +58,7 @@ _FEATURE_DEFAULTS: dict[str, str] = {
 
     # Grok-Build inspired (v6.14) — on by default where safe
     "plan_approval":        "1",   # Host gate on exit_plan_mode when callback set
+    "act_invariant_gate":   "1",   # Persist Plan gates; verify before publish/deploy
     "task_worktree":        "1",   # Allow task(isolation=worktree)
     "hunk_review":          "1",   # Attributed hunk accept/reject tools
     "compact_reinject_plan": "1",  # Re-inject plan reminder into compaction carryover

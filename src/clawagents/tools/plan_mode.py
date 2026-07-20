@@ -14,6 +14,10 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 from clawagents.config.features import is_enabled
+from clawagents.permissions.act_invariants import (
+    approve_plan_contract,
+    mark_plan_pending,
+)
 from clawagents.permissions.mode import PermissionMode
 from clawagents.permissions.plan_approval import (
     PLAN_APPROVAL_META_KEY,
@@ -43,9 +47,9 @@ _ENTER_REMINDER = (
 _EXIT_REMINDER = (
     "<system-reminder>\n"
     "You have exited plan mode. Permission mode is back to DEFAULT. "
-    "Write-class tools are unblocked.\n"
-    "If you drafted a plan, call write_plan(content=...) so Act mode can load "
-    ".clawagents/plan.md on the next turns.\n"
+    "Write-class tools are unblocked. If the approved plan has verification "
+    "gates, high-impact publish/deploy commands remain blocked until every "
+    "gate succeeds after the latest mutation.\n"
     "</system-reminder>"
 )
 
@@ -88,6 +92,18 @@ class EnterPlanModeTool:
                     "permission mode; this run does not propagate one."
                 ),
             )
+        if is_enabled("act_invariant_gate"):
+            try:
+                mark_plan_pending(run_context)
+            except OSError as exc:
+                return ToolResult(
+                    success=False,
+                    output="",
+                    error=(
+                        "plan_contract_persist_failed: Plan mode cannot fail closed "
+                        f"({type(exc).__name__}: {exc})"
+                    ),
+                )
         run_context.permission_mode = PermissionMode.PLAN
         return ToolResult(success=True, output=_ENTER_REMINDER)
 
@@ -132,7 +148,7 @@ class ExitPlanModeTool:
         if callback is None and is_enabled("plan_approval"):
             raw = run_context._metadata.get(PLAN_APPROVAL_META_KEY)
             if callable(raw):
-                callback = raw  # type: ignore[assignment]
+                callback = raw
 
         # Fire lifecycle hooks (best-effort) before awaiting host decision.
         for h in run_context._metadata.get("hooks") or []:
@@ -153,6 +169,19 @@ class ExitPlanModeTool:
         )
 
         if decision.action == PlanApprovalAction.APPROVE:
+            if is_enabled("act_invariant_gate"):
+                try:
+                    approve_plan_contract(plan_text, run_context, workspace=workspace)
+                except OSError as exc:
+                    run_context.permission_mode = PermissionMode.PLAN
+                    return ToolResult(
+                        success=False,
+                        output="",
+                        error=(
+                            "plan_contract_persist_failed: approved plan could not "
+                            f"be made enforceable ({type(exc).__name__}: {exc})"
+                        ),
+                    )
             run_context.permission_mode = PermissionMode.DEFAULT
             note = _EXIT_REMINDER
             if decision.comment:

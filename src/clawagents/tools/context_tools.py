@@ -395,7 +395,10 @@ class WritePlanTool:
     name = "write_plan"
     description = (
         "Write/update .clawagents/plan.md for Plan→Act handoff "
-        "(goals, steps, risks, files)."
+        "(goals, invariants, steps, risks, files). Before a publish/deploy-style "
+        "side effect, add exact shell commands as backticked bullets under a "
+        "'Verification gates' heading; Act mode will require every command to "
+        "succeed after the latest edit."
     )
     parameters = {
         "content": {
@@ -408,7 +411,7 @@ class WritePlanTool:
     def __init__(self, workspace: str | None = None) -> None:
         self._workspace = workspace or os.getcwd()
 
-    async def execute(self, args: dict[str, Any]) -> ToolResult:
+    async def execute(self, args: dict[str, Any], run_context: Any = None) -> ToolResult:
         root = Path(self._workspace) / ".clawagents"
         root.mkdir(parents=True, exist_ok=True)
         path = root / "plan.md"
@@ -418,6 +421,25 @@ class WritePlanTool:
         if not body.startswith("#"):
             body = "# Plan\n\n" + body
         path.write_text(body + "\n", encoding="utf-8")
+        if run_context is not None and isinstance(
+            getattr(run_context, "_metadata", None), dict
+        ):
+            run_context._metadata["pending_plan_text"] = body
+        from clawagents.config.features import is_enabled
+        from clawagents.permissions.act_invariants import (
+            clear_contract,
+            mark_plan_pending,
+        )
+        from clawagents.permissions.mode import PermissionMode
+
+        if is_enabled("act_invariant_gate"):
+            if (
+                run_context is not None
+                and getattr(run_context, "permission_mode", None) == PermissionMode.PLAN
+            ):
+                mark_plan_pending(run_context, body, workspace=self._workspace)
+            else:
+                clear_contract(run_context, workspace=self._workspace)
         return ToolResult(success=True, output=f"Wrote {path}")
 
 
@@ -430,7 +452,16 @@ def load_plan_preamble(workspace: str | Path | None = None, max_chars: int = 3_0
         return ""
     if len(text) > max_chars:
         text = text[: max_chars - 20] + "\n…"
-    return f"## Active Plan\n\n{text}\n"
+    preamble = f"## Active Plan\n\n{text}\n"
+    from clawagents.config.features import is_enabled
+
+    if is_enabled("act_invariant_gate"):
+        from clawagents.permissions.act_invariants import contract_preamble
+
+        gate = contract_preamble(workspace=workspace)
+        if gate:
+            preamble += "\n" + gate
+    return preamble
 
 
 def create_context_tools(workspace: str | None = None) -> list[Tool]:

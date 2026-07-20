@@ -782,6 +782,19 @@ class ToolRegistry:
                     ),
                 )
 
+            from clawagents.config.features import is_enabled
+
+            if is_enabled("act_invariant_gate"):
+                from clawagents.permissions.act_invariants import gate_tool_call
+
+                invariant_reason = gate_tool_call(tool_name, args, run_context)
+                if invariant_reason:
+                    return ToolResult(
+                        success=False,
+                        output="",
+                        error=invariant_reason,
+                    )
+
         # Declarative permission rules (deny wins)
         engine = getattr(self, "_permission_engine", None)
         if engine is not None and hasattr(engine, "gate"):
@@ -833,10 +846,27 @@ class ToolRegistry:
                 execute_awaitable,
                 timeout=self._tool_timeout_s,
             )
+            invariant_note = ""
+            if run_context is not None:
+                from clawagents.config.features import is_enabled
+
+                if is_enabled("act_invariant_gate"):
+                    from clawagents.permissions.act_invariants import observe_tool_result
+
+                    invariant_note = observe_tool_result(
+                        tool_name,
+                        effective_args,
+                        success=result.success,
+                        run_context=run_context,
+                    )
             # Keep full output on ``raw_output`` so prepare_tool_output_for_context
             # / retrieve_tool_result can archive the real dump. ``output`` is a
             # bounded preview for UI/cache hot paths.
             full_output = result.output
+            if invariant_note and isinstance(full_output, str):
+                full_output = (
+                    f"{full_output}\n{invariant_note}" if full_output else invariant_note
+                )
             if (
                 result.success
                 and tool_name in _WRITE_TOOLS
