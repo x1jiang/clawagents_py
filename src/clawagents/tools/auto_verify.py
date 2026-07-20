@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +13,15 @@ from typing import Any
 _EDIT_TOOLS = frozenset({
     "write_file", "edit_file", "apply_patch", "insert_lines",
 })
+
+
+def _python_exe() -> str:
+    """Prefer python3 / current interpreter — bare ``python`` is often missing."""
+    for name in ("python3", "python"):
+        found = shutil.which(name)
+        if found:
+            return found
+    return sys.executable or "python3"
 
 
 def detect_verify_commands(workspace: str | Path | None = None) -> list[list[str]]:
@@ -30,10 +41,11 @@ def detect_verify_commands(workspace: str | Path | None = None) -> list[list[str
     pyproject = root / "pyproject.toml"
     if pyproject.is_file():
         text = pyproject.read_text(encoding="utf-8", errors="replace")
+        py = _python_exe()
         if "[tool.ruff]" in text or "ruff" in text:
-            cmds.append(["python", "-m", "ruff", "check", "."])
+            cmds.append([py, "-m", "ruff", "check", "."])
         if "[tool.pytest" in text or "pytest" in text:
-            cmds.append(["python", "-m", "pytest", "-q", "--tb=no"])
+            cmds.append([py, "-m", "pytest", "-q", "--tb=no"])
     return cmds[:3]
 
 

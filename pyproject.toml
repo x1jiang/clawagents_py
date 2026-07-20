@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "clawagents"
-version = "6.20.32"
+version = "6.20.33"
 description = "Lean, full-stack agentic AI framework with PTRL (Prompt-Time Reinforcement Learning)"
 readme = "README.md"
 license = "MIT"

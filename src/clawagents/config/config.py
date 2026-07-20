@@ -112,6 +112,21 @@ def _discover_env_file():
         # Host-injected secrets always win over workspace .env.
         for key, value in protected.items():
             os.environ[key] = value
+        _strip_cr_from_secret_env()
+
+
+def _strip_cr_from_secret_env() -> None:
+    """Remove lone CR left by bad CRLF parsers (``rstrip('\\n')`` only).
+
+    Stock python-dotenv is usually fine; this is belt-and-suspenders for
+    password/key values that must never carry ``\\r``.
+    """
+    for key, val in list(os.environ.items()):
+        if "\r" not in val:
+            continue
+        ku = key.upper()
+        if any(tok in ku for tok in ("KEY", "PASSWORD", "SECRET", "TOKEN", "PASSWD")):
+            os.environ[key] = val.replace("\r", "")
 
 
 class EngineConfig(BaseSettings):

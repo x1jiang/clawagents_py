@@ -1,6 +1,13 @@
 # ClawAgents Changelog
 
 
+### v6.20.33 — Scratch /tmp write parity + secret CRLF hygiene (July 2026)
+
+- **`write_file` /tmp parity:** writable OS sandbox profiles allow OS temp /
+  `/tmp` / `/private/tmp` for in-process file tools (matches seatbelt execute).
+- **Secret CRLF scrub:** strip lone `\r` from password/key env values after
+  dotenv load; prefer `python3` in auto-verify and Graphify skill docs.
+
 ### v6.20.32 — Graphify skill: code-only bootstrap (July 2026)
 
 - Document `extract --code-only` / `update` as the reliable offline path; plain

@@ -112,6 +112,32 @@ def _path_matches_secret_globs(
     return _path_matches_secret_globs_central(resolved, cwd, secret_globs)
 
 
+def _scratch_roots() -> list[str]:
+    """OS temp roots writable by in-process tools (parity with seatbelt /tmp allow).
+
+    Models often ``write_file`` under ``/tmp`` while ``execute`` already can; without
+    this, ProfileBackend rejects absolute temp paths that LocalBackend.safe_path
+    cannot resolve inside the workspace.
+    """
+    seen: list[str] = []
+
+    def _add(p: str) -> None:
+        for form in (os.path.realpath(p), os.path.abspath(p)):
+            if form and form not in seen:
+                seen.append(form)
+
+    try:
+        _add(tempfile.gettempdir())
+    except OSError:
+        pass
+    for extra in ("/tmp", "/private/tmp"):
+        try:
+            _add(extra)
+        except OSError:
+            pass
+    return seen
+
+
 def _resolve_secret_overlay_paths(
     workspace: str,
     secret_globs: tuple[str, ...],
@@ -405,22 +431,42 @@ class ProfileBackend:
                 root = os.path.abspath(os.path.join(self.cwd, allow))
             if resolved == root or resolved.startswith(root + os.sep):
                 return True
+        # Match seatbelt: writable profiles may use OS temp / /tmp scratch
+        # (write_file previously blocked these while execute could use them).
+        if not self._profile.read_only:
+            for root in _scratch_roots():
+                if resolved == root or resolved.startswith(root + os.sep):
+                    return True
         return False
 
-    def safe_path(self, user_path: str) -> str:
-        resolved = self._inner.safe_path(user_path)
+    def _apply_deny_and_secrets(self, resolved: str, user_path: str) -> None:
         for deny in self._profile.deny_paths:
             deny_abs = os.path.abspath(os.path.join(self.cwd, deny))
             if resolved == deny_abs or resolved.startswith(deny_abs + os.sep):
                 raise ValueError(
                     f"Path denied by profile {self._profile.name}: {user_path}"
                 )
-        # Secret deny applies to in-process reads too (not only bwrap/seatbelt exec).
         secret_globs = getattr(self._profile, "secret_deny_paths", ()) or ()
         if secret_globs and _path_matches_secret_globs(resolved, self.cwd, secret_globs):
             raise ValueError(
                 f"Secret path denied by profile {self._profile.name}: {user_path}"
             )
+
+    def safe_path(self, user_path: str) -> str:
+        raw = str(user_path or "")
+        # Absolute/tilde paths under allow_paths or scratch must not go through
+        # LocalBackend.safe_path first — that helper rejects anything outside cwd.
+        if raw.startswith("~") or os.path.isabs(raw):
+            candidate = os.path.realpath(os.path.abspath(os.path.expanduser(raw)))
+            self._apply_deny_and_secrets(candidate, user_path)
+            if not self._path_allowed(candidate):
+                raise ValueError(
+                    f"Path outside allow_paths for profile {self._profile.name}: {user_path}"
+                )
+            return candidate
+
+        resolved = self._inner.safe_path(user_path)
+        self._apply_deny_and_secrets(resolved, user_path)
         if not self._path_allowed(resolved):
             raise ValueError(
                 f"Path outside allow_paths for profile {self._profile.name}: {user_path}"
@@ -441,7 +487,8 @@ class ProfileBackend:
             raise PermissionError(
                 f"Profile {self._profile.name} is read-only; write blocked: {path}"
             )
-        await self._inner.write_file(path, content)
+        safe = self.safe_path(path)
+        await self._inner.write_file(safe, content)
 
     async def read_dir(self, path: str) -> list:
         return await self._inner.read_dir(path)
@@ -451,7 +498,8 @@ class ProfileBackend:
             raise PermissionError(
                 f"Profile {self._profile.name} is read-only; mkdir blocked: {path}"
             )
-        await self._inner.mkdir(path, recursive=recursive)
+        safe = self.safe_path(path)
+        await self._inner.mkdir(safe, recursive=recursive)
 
     async def exists(self, path: str) -> bool:
         return await self._inner.exists(path)
