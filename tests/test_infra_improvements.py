@@ -183,6 +183,156 @@ def test_execute_classifies_missing_package_without_suggesting_tool_churn():
     assert "do not" in interpretation.lower()
 
 
+def test_execute_classifies_quarantine_as_application_outcome():
+    payload = json.loads(
+        _format_nonzero_command_output(
+            "python split_all.py --input-dir input --output-dir output",
+            1,
+            "QUARANTINED: output/quarantine/run-id\nQuarantined runs: 1",
+            "",
+            "",
+        )
+    )
+
+    interpretation = payload["interpretation"].lower()
+    assert "application" in interpretation
+    assert "quarantine" in interpretation
+    assert "manifest" in interpretation
+
+
+def test_execute_identifies_primary_and_cleanup_missing_executables():
+    stderr = """Traceback (most recent call last):
+  File \"publish_sandbox.py\", line 57, in main
+    subprocess.run([\"kinit\", principal])
+  File \"/usr/lib/python3.12/subprocess.py\", line 1955, in _execute_child
+FileNotFoundError: [Errno 2] No such file or directory: 'kinit'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File \"publish_sandbox.py\", line 73, in main
+    subprocess.run([\"kdestroy\"])
+  File \"/usr/lib/python3.12/subprocess.py\", line 1955, in _execute_child
+FileNotFoundError: [Errno 2] No such file or directory: 'kdestroy'
+"""
+    payload = json.loads(
+        _format_nonzero_command_output("python3 publish_sandbox.py", 1, "", stderr, "")
+    )
+
+    interpretation = payload["interpretation"].lower()
+    assert "missing required external executable `kinit`" in interpretation
+    assert "`kdestroy`" in interpretation
+    assert "cleanup" in interpretation
+    assert "secondary" in interpretation
+    assert "command -v" in interpretation
+    assert "did not reach" in interpretation
+
+
+def test_execute_explains_empty_compound_failure_with_redirected_output():
+    command = (
+        "rm -rf experiment/naming-test && mkdir -p experiment/naming-test/input "
+        "&& python split_all.py --profile billing_img >/tmp/hca-naming-test.log "
+        "&& python -c \"print('validate')\""
+    )
+    payload = json.loads(
+        _format_nonzero_command_output(
+            command,
+            1,
+            "",
+            "",
+            "[bash_validator: WARN DESTRUCTIVE — rm -rf is destructive]",
+        )
+    )
+
+    interpretation = payload["interpretation"].lower()
+    assert "advisory" in interpretation
+    assert "did not cause" in interpretation
+    assert "&&" in interpretation
+    assert "later stages" in interpretation
+    assert "/tmp/hca-naming-test.log" in interpretation
+    assert "redirect" in interpretation
+    assert "rerun" in interpretation
+
+
+def test_execute_classifies_missing_input_and_empty_json_as_cascade():
+    command = (
+        "for pdf in missing-a.pdf present.pdf missing-b.pdf; do "
+        "python diagnose.py \"$pdf\" >\"/tmp/$pdf.json\"; "
+        "python -c 'import json,sys; json.load(open(sys.argv[1]))' "
+        "\"/tmp/$pdf.json\"; done"
+    )
+    stderr = """split_hca_pdf.SplitError: Input file does not exist: missing-a.pdf
+json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+split_hca_pdf.SplitError: Input file does not exist: missing-b.pdf
+json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+"""
+    stdout = "present.pdf:\npages 169 packets 54\n"
+    payload = json.loads(
+        _format_nonzero_command_output(command, 1, stdout, stderr, "")
+    )
+
+    interpretation = payload["interpretation"].lower()
+    assert "primary" in interpretation
+    assert "missing-a.pdf" in interpretation
+    assert "missing-b.pdf" in interpretation
+    assert "secondary" in interpretation
+    assert "empty" in interpretation
+    assert "redirection" in interpretation
+    assert "preflight" in interpretation
+    assert "producer" in interpretation
+    assert "consumer" in interpretation
+    assert "for` loop" in interpretation
+    assert "continues" in interpretation
+    assert "partial success" in interpretation
+
+
+def test_execute_classifies_missing_python_module_as_interpreter_issue():
+    payload = json.loads(
+        _format_nonzero_command_output(
+            "python3 - <<'PY'\nfrom pypdf import PdfReader\nPY",
+            1,
+            "",
+            "ModuleNotFoundError: No module named 'pypdf'",
+            "",
+        )
+    )
+
+    interpretation = payload["interpretation"].lower()
+    assert "selected python interpreter" in interpretation
+    assert "`pypdf`" in interpretation
+    assert "did not reach" in interpretation
+    assert ".venv/bin/python" in interpretation
+    assert "same interpreter" in interpretation
+    assert "-m pip show" in interpretation
+    assert "global" in interpretation
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("program", ["grep", "rg"])
+async def test_execute_normalizes_search_exit_one_with_no_output(program: str):
+    class Backend:
+        async def exec(self, command, timeout=None, cwd=None, env=None):
+            return ExecResult(stdout="", stderr="", exit_code=1)
+
+    tool = create_exec_tools(Backend())[0]
+    result = await tool.execute({"command": f"{program} needle manifest.json"})
+
+    assert result.success is True
+    assert "no matches" in str(result.output).lower()
+
+
+@pytest.mark.asyncio
+async def test_execute_keeps_non_search_exit_one_as_failure():
+    class Backend:
+        async def exec(self, command, timeout=None, cwd=None, env=None):
+            return ExecResult(stdout="", stderr="", exit_code=1)
+
+    tool = create_exec_tools(Backend())[0]
+    result = await tool.execute({"command": "pytest"})
+
+    assert result.success is False
+
+
 def test_execute_redacts_high_entropy_shell_command_failure():
     secret = "vP7Vf5uipuaO"
     payload = json.loads(

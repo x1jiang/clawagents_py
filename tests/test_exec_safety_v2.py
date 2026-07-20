@@ -158,6 +158,18 @@ def test_obfuscation_not_detected(command: str):
     )
 
 
+def test_python_inspection_before_find_exec_is_not_encoded_execution():
+    command = (
+        'runtime=/tmp/hca-split-runtime.kzhfnq && python3 -c "import json, pathlib; '
+        "[print(p, json.loads(p.read_text())['status']) for p in "
+        "pathlib.Path('$runtime/work').glob('*/output/runs/*/manifest.json')]\" "
+        "&& find \"$runtime/work\" -path '*/quarantine/*/manifest.json' "
+        "-print -exec sed -n '1,80p' {} \\;"
+    )
+
+    assert detect_obfuscation(command) is None
+
+
 # ─── Plan mode integration: registry refusal ─────────────────────────────
 
 class _FakeWriteTool:
@@ -281,6 +293,18 @@ def test_exec_tool_refuses_obfuscation():
         assert r.success is False
         assert "obfuscat" in (r.error or "").lower()
         assert sb.calls == []
+
+    asyncio.run(run())
+
+
+def test_exec_tool_empty_command_has_visible_error():
+    from clawagents.tools.exec import ExecTool
+
+    async def run():
+        result = await ExecTool(_DummySandbox()).execute({"command": ""})
+        assert result.success is False
+        assert result.error == "No command provided"
+        assert result.output == "No command provided"
 
     asyncio.run(run())
 

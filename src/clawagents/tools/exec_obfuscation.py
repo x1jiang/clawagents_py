@@ -14,7 +14,9 @@ or ``None`` on a clean command.
 
 from __future__ import annotations
 
+import os
 import re
+import shlex
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 from urllib.parse import urlparse
@@ -136,6 +138,47 @@ _RAW_GITHUB_OWNER_PATH_PREFIXES: tuple[str, ...] = (
 _URL_RE = re.compile(r"https?://\S+")
 
 
+def _has_interpreter_encoded_exec(command: str) -> bool:
+    """Inspect only an interpreter's own ``-c``/``-e`` payload.
+
+    The broad regex is a useful prefilter, but it can span shell clauses and
+    mistake a later ``find -exec`` for Python execution. Tokenizing first keeps
+    unrelated commands outside the interpreter payload.
+    """
+    try:
+        tokens = shlex.split(command, comments=False, posix=True)
+    except ValueError:
+        return False
+
+    interpreters = {"python", "python2", "python3", "perl", "ruby"}
+    controls = {"&&", "||", ";", "|", "&"}
+    for index, token in enumerate(tokens):
+        program = os.path.basename(token.lstrip("\\"))
+        if program not in interpreters:
+            continue
+        option = "-c" if program.startswith("python") else "-e"
+        try:
+            payload_index = tokens.index(option, index + 1) + 1
+        except ValueError:
+            continue
+        if payload_index >= len(tokens) or any(
+            part in controls for part in tokens[index + 1 : payload_index]
+        ):
+            continue
+        payload = tokens[payload_index]
+        encoded = re.search(
+            r"base64|b64decode|fromhex|codecs\.decode|marshal\.loads",
+            payload,
+            re.IGNORECASE,
+        )
+        execution = re.search(
+            r"\b(?:exec|eval|system|popen)\s*\(", payload, re.IGNORECASE
+        )
+        if encoded and execution:
+            return True
+    return False
+
+
 def detect_obfuscation(command: str) -> Optional[ObfuscationFinding]:
     """Return a finding if the command looks obfuscated, else ``None``.
 
@@ -153,6 +196,8 @@ def detect_obfuscation(command: str) -> Optional[ObfuscationFinding]:
 
     for pat_id, desc, regex in _PATTERNS:
         if not regex.search(command):
+            continue
+        if pat_id == "python-exec-encoded" and not _has_interpreter_encoded_exec(command):
             continue
 
         suppressed = False

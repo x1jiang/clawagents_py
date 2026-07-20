@@ -124,6 +124,9 @@ class TestReadFileTool:
         result = await tool.execute({"path": os.path.join(self.tmpdir, "nonexistent.txt")})
 
         assert result.success is False
+        assert "not found" in result.error.lower()
+        assert "list_files" in result.error
+        assert "do not create" in result.error.lower()
 
 
 class TestWriteFileTool:

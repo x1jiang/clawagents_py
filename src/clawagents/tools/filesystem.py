@@ -232,6 +232,16 @@ class ReadFileTool:
                 f"showing {offset + 1}-{offset + len(slice_lines)}, tier={tier})"
             )
             return ToolResult(success=True, output=header + "\n" + "\n".join(numbered))
+        except FileNotFoundError:
+            return ToolResult(
+                success=False,
+                output="",
+                error=(
+                    f"read_file not found: {file_path}. Verify the parent directory "
+                    "with list_files before retrying. Optional files may be absent; "
+                    "do not create one unless the task requires it."
+                ),
+            )
         except Exception as e:
             return ToolResult(success=False, output="", error=f"read_file failed: {str(e)}")
 

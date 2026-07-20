@@ -11,10 +11,15 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+import posixpath
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, List
+
+
+RuleMatcher = Callable[[str, dict[str, Any]], bool]
 
 
 @dataclass
@@ -36,6 +41,9 @@ class PermissionRule:
     decision: str = "allow"
     message: str = ""
     priority: int = 0
+    # Internal semantic matchers let built-in security rules reason about
+    # structured arguments. They are deliberately not loadable from JSON.
+    matcher: RuleMatcher | None = field(default=None, repr=False, compare=False)
 
 
 _DECISION_RANK = {"deny": 3, "ask": 2, "allow": 1}
@@ -132,6 +140,8 @@ class PermissionEngine:
             args_str = json.dumps(args, default=str)
             if not fnmatch(args_str, rule.arg_pattern):
                 return False
+        if rule.matcher is not None and not rule.matcher(tool_name, args):
+            return False
         return True
 
     def evaluate(self, tool_name: str, args: dict[str, Any]) -> tuple[str, str]:
@@ -178,8 +188,118 @@ class PermissionEngine:
     def from_config(cls, rules_data: list[dict[str, Any]]) -> "PermissionEngine":
         engine = cls()
         for data in rules_data:
-            engine.add_rule(PermissionRule(**{k: v for k, v in data.items() if k in PermissionRule.__dataclass_fields__}))
+            engine.add_rule(_rule_from_config(data))
         return engine
+
+
+def _rule_from_config(data: dict[str, Any]) -> PermissionRule:
+    fields = PermissionRule.__dataclass_fields__
+    return PermissionRule(**{k: v for k, v in data.items() if k in fields and k != "matcher"})
+
+
+_DYNAMIC_RM_TARGET_CHARS = frozenset("$`*?[]{}\n\r\x00")
+_ROOT_LIKE_RM_TARGETS = frozenset({"", "/", ".", "..", "*", "./*", "~", "~/"})
+
+
+def _is_literal_tmp_descendant(target: str) -> bool:
+    """Only accept one statically named descendant of ``/tmp``.
+
+    Variable expansion, globbing, traversal, and cleanup of ``/tmp`` itself
+    remain denied. This is intentionally narrower than general shell safety:
+    it exists solely for the common create-clean-scratch-directory workflow.
+    """
+    raw = target.rstrip("/")
+    if not raw.startswith("/tmp/") or raw == "/tmp":
+        return False
+    if any(char in raw for char in _DYNAMIC_RM_TARGET_CHARS):
+        return False
+    if any(part in {"", ".", ".."} for part in raw.split("/")[2:]):
+        return False
+    return posixpath.normpath(raw) == raw
+
+
+def _recursive_force_rm(tokens: list[str]) -> tuple[bool, list[str], bool]:
+    """Return (is_recursive_force, targets, option_shape_is_proven)."""
+    recursive = False
+    force = False
+    targets: list[str] = []
+    options_proven = True
+    options_done = False
+
+    for token in tokens[1:]:
+        if not options_done and token == "--":
+            options_done = True
+            continue
+        if not options_done and token.startswith("--"):
+            if token == "--recursive":
+                recursive = True
+            elif token == "--force":
+                force = True
+            else:
+                options_proven = False
+            continue
+        if not options_done and token.startswith("-") and token != "-":
+            flags = token[1:]
+            recursive = recursive or "r" in flags or "R" in flags
+            force = force or "f" in flags
+            if any(flag not in "fRrv" for flag in flags):
+                options_proven = False
+            continue
+        targets.append(token)
+
+    return recursive and force, targets, options_proven
+
+
+def _default_destructive_rm_matcher(_tool_name: str, args: dict[str, Any]) -> bool:
+    """Match recursive-force deletes that the default policy must refuse.
+
+    A direct, fully literal cleanup of exactly one ``/tmp/<name>`` directory is
+    the sole absolute-path exception. Relative build-directory cleanup remains
+    subject to the execute tool's path-aware WARN/BLOCK validator.
+    """
+    from clawagents.tools.bash_validator import (
+        _WRAPPER_PROGRAMS,
+        _collect_clauses,
+        _peel_wrapper,
+        _split_first_token,
+    )
+
+    command = str(args.get("command") or "")
+
+    def must_deny(clause: str, depth: int = 0) -> bool:
+        program, tokens = _split_first_token(clause)
+        if program in _WRAPPER_PROGRAMS and depth < 6:
+            inner = _peel_wrapper(program, tokens)
+            if inner:
+                # Wrapper evaluation makes the executed argv less obvious. Keep
+                # recursive-force deletion behind explicit approval even when
+                # its textual target happens to be under /tmp.
+                for nested in _collect_clauses(inner) or [inner]:
+                    nested_program, nested_tokens = _split_first_token(nested)
+                    if nested_program == "rm" and _recursive_force_rm(nested_tokens)[0]:
+                        return True
+                    if must_deny(nested, depth + 1):
+                        return True
+            return False
+        if program != "rm":
+            return False
+
+        is_recursive_force, targets, options_proven = _recursive_force_rm(tokens)
+        if not is_recursive_force:
+            return False
+        if options_proven and len(targets) == 1 and _is_literal_tmp_descendant(targets[0]):
+            return False
+
+        for target in targets:
+            if target.startswith("/"):
+                return True
+            if target in _ROOT_LIKE_RM_TARGETS or target.startswith("~"):
+                return True
+            if "$" in target or "`" in target:
+                return True
+        return False
+
+    return any(must_deny(clause) for clause in (_collect_clauses(command) or [command]))
 
 
 def _build_default_secure_rules() -> list[PermissionRule]:
@@ -189,10 +309,10 @@ def _build_default_secure_rules() -> list[PermissionRule]:
     rules: list[PermissionRule] = [
         PermissionRule(
             tool="execute",
-            arg_pattern="*rm -rf /**",
             decision="deny",
             priority=100,
             message="Refused destructive rm",
+            matcher=_default_destructive_rm_matcher,
         ),
         PermissionRule(
             tool="execute",
@@ -249,7 +369,7 @@ def load_permission_engine(
             if isinstance(rules, list):
                 engine.add_rules(
                     [
-                        PermissionRule(**{k: v for k, v in row.items() if k in PermissionRule.__dataclass_fields__})
+                        _rule_from_config(row)
                         for row in rules
                         if isinstance(row, dict)
                     ]

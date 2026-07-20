@@ -19,6 +19,7 @@ import asyncio
 import json
 import os
 import re
+import shlex
 import sys
 from typing import Any, Dict, List, Optional
 
@@ -150,6 +151,25 @@ def _short_exit_error(exit_code: int) -> str:
     return f"Command exited with code {exit_code}"
 
 
+def _is_empty_search_result(command: str, exit_code: int, stdout: str, stderr: str) -> bool:
+    """Recognize grep/rg's documented exit-1 meaning: no selected lines."""
+    if exit_code != 1 or stdout.strip() or stderr.strip():
+        return False
+    try:
+        tokens = shlex.split(command, comments=False, posix=True)
+    except ValueError:
+        return False
+    if not tokens or any(token in {"&&", "||", ";", "|", "&"} for token in tokens):
+        return False
+    index = 0
+    while index < len(tokens) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", tokens[index]):
+        index += 1
+    if index >= len(tokens):
+        return False
+    program = os.path.basename(tokens[index].lstrip("\\"))
+    return program in {"grep", "egrep", "fgrep", "rg"}
+
+
 def _failure_diagnostic_hint(stdout: str, stderr: str) -> str:
     """Classify failures that require diagnosis/user action, not tool churn."""
     blob = f"{stdout}\n{stderr}"
@@ -172,6 +192,26 @@ def _failure_diagnostic_hint(stdout: str, stderr: str) -> str:
             "user requests it; verify the package name/channel or use an already "
             "available runtime."
         )
+    missing_modules = list(
+        dict.fromkeys(
+            re.findall(
+                r"ModuleNotFoundError:\s*No module named ['\"]([^'\"]+)['\"]",
+                blob,
+            )
+        )
+    )
+    if missing_modules:
+        shown = ", ".join(f"`{name}`" for name in missing_modules)
+        probe = missing_modules[0].split(".", 1)[0]
+        return (
+            f"The selected Python interpreter is missing module {shown}; execution "
+            "stopped at import and did not reach the application or data logic. "
+            "First use the intended project interpreter (for example "
+            "`.venv/bin/python`) and check with that same interpreter using "
+            f"`.venv/bin/python -m pip show {probe}`. Do not use a bare pip or "
+            "global install. If it is truly absent, install/add the project-declared "
+            "dependency in that environment."
+        )
     if re.search(
         r"(?m)(?<=: )"
         r"(?=[A-Za-z0-9_+./=\-]{10,}:(?: command)? not found$)"
@@ -184,13 +224,147 @@ def _failure_diagnostic_hint(stdout: str, stderr: str) -> str:
             "unsafe secret interpolation: stop, do not print the value, avoid "
             "sourcing .env, and pass credentials through an env/auth file."
         )
+    missing_inputs = list(
+        dict.fromkeys(
+            match.strip()
+            for match in re.findall(
+                r"Input file does not exist:\s*([^\r\n]+)", blob
+            )
+            if match.strip()
+        )
+    )
+    empty_json = re.search(
+        r"JSONDecodeError:\s*Expecting value:\s*line 1 column 1",
+        blob,
+    )
+    if missing_inputs and empty_json:
+        shown = ", ".join(f"`{path}`" for path in missing_inputs[:3])
+        if len(missing_inputs) > 3:
+            shown += f", and {len(missing_inputs) - 3} more"
+        partial = ""
+        if re.search(r"(?m)^pages\s+\d+\s+packets\s+\d+", stdout):
+            partial = (
+                " Stdout shows at least one iteration succeeded; preserve that "
+                "partial success when reporting results."
+            )
+        return (
+            f"Primary failures are missing input files: {shown}. The JSON decode "
+            "errors are secondary: shell redirection created empty output files "
+            "before the producer failed, then the consumer tried to parse them. "
+            "Do not debug the JSON parser. Preflight input paths and guard each "
+            "producer result before running its consumer."
+            f"{partial}"
+        )
+    if "subprocess.py" in blob and ("_execute_child" in blob or "Popen" in blob):
+        missing = list(
+            dict.fromkeys(
+                re.findall(
+                    r"FileNotFoundError: \[Errno 2\] No such file or directory: "
+                    r"['\"]([^'\"]+)['\"]",
+                    blob,
+                )
+            )
+        )
+        if missing:
+            primary = missing[0]
+            later = missing[1:]
+            detail = ""
+            if "kdestroy" in later:
+                detail = (
+                    " The later missing `kdestroy` occurred during cleanup and is "
+                    "secondary; guarding cleanup can remove that traceback but cannot "
+                    "fix the primary dependency."
+                )
+            elif later:
+                names = ", ".join(f"`{name}`" for name in later)
+                detail = f" Additional missing executables: {names}."
+            reach = "the external program"
+            if primary in {"kinit", "klist", "kdestroy"}:
+                reach = "Kerberos authentication or remote publish"
+            checks = " ".join(f"command -v {name};" for name in missing).rstrip(";")
+            return (
+                f"The runtime is missing required external executable `{primary}`; "
+                f"this attempt did not reach {reach}.{detail} Stop retrying or changing "
+                "credentials. Verify the same runtime/container PATH with "
+                f"`{checks}`, then install or provide the required client there."
+            )
     if "Not enough '\\' characters in service" in blob or "Usage: smbclient" in blob:
         return (
             "The client rejected its command-line syntax before authentication. "
             "Fix the service/option quoting using the installed client's --help; "
             "do not infer a credential failure from this attempt."
         )
+    if re.search(
+        r"(?im)^\s*(?:QUARANTINED:|Quarantined runs:\s*[1-9]\d*)",
+        blob,
+    ):
+        return (
+            "The application completed processing and deliberately quarantined "
+            "the input; this is an application validation outcome, not an execute "
+            "transport failure. Do not rerun unchanged. Inspect the quarantine "
+            "manifest and logs for the validation errors/warnings."
+        )
     return ""
+
+
+def _redirect_targets(command: str) -> list[str]:
+    """Extract explicit shell redirection targets without reading them."""
+    try:
+        tokens = shlex.split(command, comments=False, posix=True)
+    except ValueError:
+        return []
+    targets: list[str] = []
+    redirect = re.compile(r"^(?:[012]?>{1,2}|&>)")
+    for index, token in enumerate(tokens):
+        match = redirect.match(token)
+        if not match:
+            continue
+        target = token[match.end() :]
+        if not target and index + 1 < len(tokens):
+            target = tokens[index + 1]
+        if target and not target.startswith("&") and target not in targets:
+            targets.append(target)
+    return targets
+
+
+def _command_failure_hint(
+    command: str,
+    stdout: str,
+    stderr: str,
+    warning_prefix: str,
+) -> str:
+    """Explain shell structure that otherwise makes an empty failure opaque."""
+    hints: list[str] = []
+    if "bash_validator: WARN" in warning_prefix:
+        hints.append(
+            "The bash-validator warning was advisory and did not cause the "
+            "nonzero exit; execution proceeded."
+        )
+    try:
+        tokens = shlex.split(command, comments=False, posix=True)
+    except ValueError:
+        tokens = []
+    if "&&" in tokens:
+        hints.append(
+            "This was an `&&` chain: the shell stopped at the first failing "
+            "stage, so any later stages after it did not run."
+        )
+    if "for" in tokens and "do" in tokens and "done" in tokens:
+        hints.append(
+            "A shell `for` loop normally continues after a failed iteration; "
+            "guard each producer/consumer pair explicitly so one failure does not "
+            "generate cascading errors while other items may still succeed."
+        )
+    redirects = _redirect_targets(command)
+    if redirects and not stdout.strip() and not stderr.strip():
+        rendered = ", ".join(f"`{target}`" for target in redirects)
+        hints.append(
+            "Captured stdout/stderr are empty; useful output may have been "
+            f"redirected to {rendered}. Inspect a bounded, non-sensitive tail "
+            "or rerun the stages separately without redirection to identify the "
+            "failing stage."
+        )
+    return " ".join(hints)
 
 
 def _format_nonzero_command_output(
@@ -218,6 +392,11 @@ def _format_nonzero_command_output(
     diagnostic = _failure_diagnostic_hint(stdout, stderr)
     if diagnostic:
         interpretation = f"{interpretation} {diagnostic}"
+    command_hint = _command_failure_hint(
+        command, stdout, stderr, warning_prefix
+    )
+    if command_hint:
+        interpretation = f"{interpretation} {command_hint}"
     payload: dict[str, Any] = {
         "command_executed": True,
         "success": False,
@@ -560,7 +739,11 @@ class ExecTool:
         timeout_ms, immediate_bg = _resolve_block_until_ms(args)
 
         if not command:
-            return ToolResult(success=False, output="", error="No command provided")
+            return ToolResult(
+                success=False,
+                output="No command provided",
+                error="No command provided",
+            )
 
         permission_mode = getattr(run_context, "permission_mode", PermissionMode.DEFAULT)
         is_background = _truthy(args.get("is_background")) or immediate_bg
@@ -747,6 +930,16 @@ class ExecTool:
 
             success = exit_code == 0
             if not success:
+                if _is_empty_search_result(
+                    str(args.get("command", command)),
+                    exit_code,
+                    stdout or "",
+                    stderr or "",
+                ):
+                    return ToolResult(
+                        success=True,
+                        output=warning_prefix + "Search completed: no matches found.",
+                    )
                 return ToolResult(
                     success=False,
                     output=_format_nonzero_command_output(
@@ -838,6 +1031,16 @@ class ExecTool:
 
             success = result.exit_code == 0
             if not success:
+                if _is_empty_search_result(
+                    str(args.get("command", command)),
+                    result.exit_code,
+                    stdout,
+                    stderr,
+                ):
+                    return ToolResult(
+                        success=True,
+                        output=warning_prefix + "Search completed: no matches found.",
+                    )
                 return ToolResult(
                     success=False,
                     output=_format_nonzero_command_output(

@@ -7,6 +7,7 @@ hunks are representable and fence markers can never be swallowed into content.
 from __future__ import annotations
 
 import difflib
+import json
 import re
 from typing import Any
 
@@ -92,9 +93,36 @@ def _nearest_search_hint(content: str, search: str) -> str:
     if best is None or best[0] < 0.55:
         return ""
     score, lineno, line = best
+    actual = line.strip()
+    common = 0
+    for expected_char, actual_char in zip(first, actual):
+        if expected_char != actual_char:
+            break
+        common += 1
+    if common == min(len(first), len(actual)) and len(first) == len(actual):
+        difference = ""
+    else:
+        expected_tail = first[common : common + 24]
+        actual_tail = actual[common : common + 24]
+        difference = (
+            f" First difference at column {common + 1}: SEARCH has "
+            f"{expected_tail!r}, file has {actual_tail!r}."
+        )
+    structure = ""
+    if first.startswith("- ") and actual.startswith("| "):
+        structure = (
+            " SEARCH uses a list marker (`- `), but the file uses a Markdown "
+            "table row (`| ... |`); copy the complete table row including pipes."
+        )
+    elif first.startswith("| ") and actual.startswith("- "):
+        structure = (
+            " SEARCH uses a Markdown table row, but the file uses a list marker "
+            "(`- `); copy the exact current line."
+        )
     preview = line if len(line) <= 120 else line[:117] + "..."
     return (
-        f" Nearest similar line ~{lineno} (similarity {score:.0%}): {preview!r}."
+        f" Nearest similar line ~{lineno} (similarity {score:.1%}): {preview!r}."
+        f"{difference}{structure}"
     )
 
 
@@ -200,6 +228,55 @@ def _apply_search_replace(content: str, search: str, replace: str) -> tuple[bool
     else:
         new_content = content.replace(matched, replace, 1)
     return True, new_content, "ok"
+
+
+def _hunk_failure_message(
+    message: str,
+    *,
+    index: int,
+    total: int,
+    search: str,
+    patch: str,
+) -> str:
+    previous = index - 1
+    staged = ""
+    if previous:
+        noun = "hunk" if previous == 1 else "hunks"
+        staged = f" after {previous} earlier {noun} matched in memory"
+    first = next((line.strip() for line in search.splitlines() if line.strip()), "")
+    excerpt = first if len(first) <= 120 else first[:117] + "..."
+    escape_hint = ""
+    if "\\n" in patch or '\\"' in patch:
+        escape_hint = (
+            " Patch contains literal escape sequences such as `\\n` or `\\\"`; "
+            "do not copy JSON-escaped tool arguments into patch text unless those "
+            "backslashes belong in the file."
+        )
+    return (
+        f"Hunk {index}/{total} failed{staged}. No changes written (atomic). "
+        f"SEARCH starts with {excerpt!r}. {message}{escape_hint}"
+    )
+
+
+def _prewrite_validation_error(path: str, content: str, patch: str) -> str:
+    """Reject structurally invalid formats before the sandbox writes them."""
+    if not path.lower().endswith(".json"):
+        return ""
+    candidate = content[1:] if content.startswith("\ufeff") else content
+    try:
+        json.loads(candidate)
+    except json.JSONDecodeError as exc:
+        escape_hint = ""
+        if "\\n" in patch or '\\"' in patch:
+            escape_hint = (
+                " The patch contains literal escape sequences; provide ordinary "
+                "unescaped JSON lines in SEARCH/REPLACE fences."
+            )
+        return (
+            "refuse write: apply_patch would produce invalid JSON at "
+            f"line {exc.lineno}, column {exc.colno}: {exc.msg}.{escape_hint}"
+        )
+    return ""
 
 
 def _unified_diff_summary(before: str, after: str, path: str, *, max_lines: int = 80) -> str:
@@ -419,10 +496,20 @@ class ApplyPatchTool:
                     return ToolResult(success=False, output="", error=parse_msg)
                 new_content = content
                 applied = 0
-                for search, replace in hunks:
+                for index, (search, replace) in enumerate(hunks, start=1):
                     ok, new_content, msg = _apply_search_replace(new_content, search, replace)
                     if not ok:
-                        return ToolResult(success=False, output="", error=msg)
+                        return ToolResult(
+                            success=False,
+                            output="",
+                            error=_hunk_failure_message(
+                                msg,
+                                index=index,
+                                total=len(hunks),
+                                search=search,
+                                patch=patch,
+                            ),
+                        )
                     applied += 1
                 if not had_fences and _has_fence_markers(new_content):
                     return ToolResult(
@@ -434,6 +521,11 @@ class ApplyPatchTool:
                             "Fix the patch and retry."
                         ),
                     )
+                validation_error = _prewrite_validation_error(
+                    display_path, new_content, patch
+                )
+                if validation_error:
+                    return ToolResult(success=False, output="", error=validation_error)
                 await sb.write_file(file_path, new_content)
                 diff = _unified_diff_summary(content, new_content, display_path)
                 return ToolResult(
@@ -452,12 +544,22 @@ class ApplyPatchTool:
                     return ToolResult(success=False, output="", error=parse_msg)
                 new_content = content
                 applied = 0
-                for search, replace in hunks:
+                for index, (search, replace) in enumerate(hunks, start=1):
                     ok, new_content, msg = _apply_search_replace(
                         new_content, search, replace
                     )
                     if not ok:
-                        return ToolResult(success=False, output="", error=msg)
+                        return ToolResult(
+                            success=False,
+                            output="",
+                            error=_hunk_failure_message(
+                                msg,
+                                index=index,
+                                total=len(hunks),
+                                search=search,
+                                patch=patch,
+                            ),
+                        )
                     applied += 1
                 if not had_fences and _has_fence_markers(new_content):
                     return ToolResult(
@@ -469,6 +571,11 @@ class ApplyPatchTool:
                             "Fix the patch and retry."
                         ),
                     )
+                validation_error = _prewrite_validation_error(
+                    display_path, new_content, patch
+                )
+                if validation_error:
+                    return ToolResult(success=False, output="", error=validation_error)
                 await sb.write_file(file_path, new_content)
                 diff = _unified_diff_summary(content, new_content, display_path)
                 return ToolResult(
@@ -490,6 +597,11 @@ class ApplyPatchTool:
                         "fence markers into the file (corruption guard)."
                     ),
                 )
+            validation_error = _prewrite_validation_error(
+                display_path, new_content, patch
+            )
+            if validation_error:
+                return ToolResult(success=False, output="", error=validation_error)
             await sb.write_file(file_path, new_content)
             diff = _unified_diff_summary(content, new_content, display_path)
             return ToolResult(

@@ -1,6 +1,35 @@
 # ClawAgents Changelog
 
 
+### v6.20.36 — Bounded scratch cleanup permissions (July 2026)
+
+- **Permission precision:** allow direct recursive cleanup of exactly one literal
+  `/tmp/<name>` directory instead of rejecting every absolute `rm -rf` command.
+- **Safety retained:** root/system paths, `/tmp` itself, globs, variables,
+  traversal, multiple targets, and wrapper-launched recursive deletes stay denied;
+  explicit user permission rules still override the built-in exception.
+- **False-failure cleanup:** constrain encoded-interpreter detection to the actual
+  `python -c` / `perl -e` / `ruby -e` payload, normalize empty `grep`/`rg` exit 1
+  as “no matches,” and keep empty-command failures visible.
+- **Recovery guidance:** identify intentional quarantine outcomes and missing-file
+  probes so agents inspect manifests/parents instead of retrying unchanged; detect
+  missing subprocess executables and separate cleanup cascades from the root cause.
+- **Patch diagnostics:** multi-hunk SEARCH failures identify the failing hunk and
+  staged predecessors while confirming atomic rollback; JSON output is parsed
+  before write to reject copied escape sequences or other structural corruption.
+  Near-match percentages no longer round mismatches to 100%, and diagnostics
+  expose the first differing column plus Markdown list/table structure mistakes.
+- **Opaque shell failures:** distinguish advisory validator warnings from the
+  actual exit, explain `&&` short-circuiting, and identify redirected log paths
+  when a nonzero command returns no captured stdout/stderr.
+- **Loop cascades:** recognize missing-input producer failures followed by
+  empty-JSON consumer errors, preserve partial successes, and explain that shell
+  `for` loops require explicit per-iteration guards.
+- **Python environments:** classify `ModuleNotFoundError` as a selected-interpreter
+  dependency issue, prefer the project virtual environment and same-interpreter
+  `-m pip show` checks, and discourage accidental global installs.
+
+
 ### v6.20.35 — Failure discipline + shell-secret redaction (July 2026)
 
 - **Execute diagnosis:** classify external authentication rejection, unavailable
