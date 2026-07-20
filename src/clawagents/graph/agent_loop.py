@@ -216,6 +216,45 @@ def _evict_large_tool_result(tool_name: str, output: str) -> str:
         )
 
 
+# Hosts (VS Code gateway) accept up to ~8KB of tool_completed text. Keep the
+# model/console ``preview_chars`` small, but stream a longer UI-facing body.
+UI_TOOL_RESULT_CHARS = 8_000
+
+
+def _format_failed_exec_observation(payload: str) -> str | None:
+    """Reorder execute failures: exit/stderr/stdout before the long command."""
+    text = (payload or "").strip()
+    if not text.startswith("{"):
+        return None
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(data, dict) or not data.get("command_executed"):
+        return None
+    parts: list[str] = [
+        f"Command exited with code {data.get('exit_code', '?')}",
+    ]
+    stderr = str(data.get("stderr") or "").strip()
+    stdout = str(data.get("stdout") or "").strip()
+    if stderr:
+        parts.append(f"stderr:\n{stderr}")
+    if stdout:
+        parts.append(f"stdout:\n{stdout}")
+    cmd = str(data.get("command") or "").strip()
+    if cmd:
+        if len(cmd) > 240:
+            cmd = cmd[:240] + "…"
+        parts.append(f"command: {cmd}")
+    interp = str(data.get("interpretation") or "").strip()
+    if interp:
+        parts.append(interp)
+    warning = str(data.get("warning") or "").strip()
+    if warning:
+        parts.append(warning)
+    return "\n\n".join(parts)
+
+
 def _tool_observation(result: ToolResult) -> str | list[dict[str, Any]]:
     """Observation text for the model — prefers full ``raw_output`` when present."""
     payload = getattr(result, "raw_output", None)
@@ -223,11 +262,32 @@ def _tool_observation(result: ToolResult) -> str | list[dict[str, Any]]:
         payload = result.output
     if result.success:
         return payload
-    error = f"Error: {result.error}" if result.error else "Error: Tool failed"
     if isinstance(payload, list):
+        error = f"Error: {result.error}" if result.error else "Error: Tool failed"
         return [{"type": "text", "text": error}, *payload]
     output = str(payload or "").strip()
+    exec_obs = _format_failed_exec_observation(output)
+    if exec_obs is not None:
+        return exec_obs
+    error = f"Error: {result.error}" if result.error else "Error: Tool failed"
     return f"{error}\nOutput:\n{output}" if output else error
+
+
+def _ui_tool_result_text(
+    result: ToolResult,
+    observation: str | list[dict[str, Any]],
+    *,
+    max_chars: int = UI_TOOL_RESULT_CHARS,
+) -> str:
+    """Sanitized tool text for the IDE UI (longer than model preview)."""
+    if isinstance(observation, list):
+        return "[Multimodal Array Content]"
+    text = str(observation or "")
+    if not text.strip() and not result.success and result.error:
+        text = f"Error: {result.error}"
+    if len(text) > max_chars:
+        return text[: max(0, max_chars - 20)].rstrip() + "\n…[truncated]"
+    return text
 
 
 def _run_context_workspace(run_context: Any) -> str | None:
@@ -4364,6 +4424,8 @@ async def _run_agent_graph_core(
                         emit("warn", {"message": f"after_tool hook error: {hook_err}"})
 
                 raw_output: str | list[dict[str, Any]] = _tool_observation(tool_result)
+                # UI gets uncrushed observation (bounded); model gets crushed tool_output.
+                ui_text = _ui_tool_result_text(tool_result, raw_output)
                 tool_output: str | list[dict[str, Any]]
                 if isinstance(raw_output, list):
                     try:
@@ -4403,12 +4465,13 @@ async def _run_agent_graph_core(
                     "name": call.tool_name,
                     "success": tool_result.success,
                     "preview": preview,
+                    "output": ui_text,
                 })
                 _emit_typed("tool_result", {
                     "tool_name": call.tool_name,
                     "call_id": native_tc_id,
                     "success": tool_result.success,
-                    "output": preview if isinstance(preview, str) else "[multimodal]",
+                    "output": ui_text,
                     "error": tool_result.error if not tool_result.success else None,
                 })
 
@@ -4784,6 +4847,7 @@ async def _run_agent_graph_core(
                 tool_outputs: list[str] = []
                 for _idx2, (call, result) in enumerate(zip(approved_calls, results)):
                     raw_out: str | list[dict[str, Any]] = _tool_observation(result)
+                    ui_text = _ui_tool_result_text(result, raw_out)
                     output: str | list[dict[str, Any]]
                     _call_id = (
                         _approved_call_ids[_idx2]
@@ -4828,12 +4892,13 @@ async def _run_agent_graph_core(
                         "name": call.tool_name,
                         "success": result.success,
                         "preview": preview,
+                        "output": ui_text,
                     })
                     _emit_typed("tool_result", {
                         "tool_name": call.tool_name,
                         "call_id": _call_id,
                         "success": result.success,
-                        "output": preview if isinstance(preview, str) else "[multimodal]",
+                        "output": ui_text,
                         "error": result.error if not result.success else None,
                     })
 

@@ -1,6 +1,15 @@
 # ClawAgents Changelog
 
 
+### v6.20.34 — UI tool results + Codex apply_patch (July 2026)
+
+- **UI tool results:** stream up to 8KB of uncrushed tool text to hosts while
+  keeping model/console ``preview_chars`` small.
+- **Failed execute:** observation shows exit code + stderr/stdout before the
+  long command; short ``error`` field is exit-code-only.
+- **apply_patch:** accept single-file Codex ``*** Begin Patch`` / ``*** Update
+  File`` envelopes (path must match; multi-file / Add / Delete / Move rejected).
+
 ### v6.20.33 — Scratch /tmp write parity + secret CRLF hygiene (July 2026)
 
 - **`write_file` /tmp parity:** writable OS sandbox profiles allow OS temp /

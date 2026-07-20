@@ -97,7 +97,7 @@ def test_grep_accepts_glob_as_path(tmp_path: Path):
     assert not (result.error or "")
 
 
-def test_apply_patch_rejects_begin_patch_envelope(tmp_path: Path):
+def test_apply_patch_accepts_single_file_begin_patch_envelope(tmp_path: Path):
     (tmp_path / "cli.py").write_text("import json\n", encoding="utf-8")
     tool = ApplyPatchTool(LocalBackend(str(tmp_path)))
     patch = (
@@ -105,6 +105,5 @@ def test_apply_patch_rejects_begin_patch_envelope(tmp_path: Path):
         "@@\n import json\n+import sys\n*** End Patch"
     )
     result = asyncio.run(tool.execute({"path": "cli.py", "patch": patch}))
-    assert not result.success
-    assert "Begin Patch" in (result.error or "")
-    assert "SEARCH" in (result.error or "") or "edit_file" in (result.error or "")
+    assert result.success, result.error
+    assert "import sys" in (tmp_path / "cli.py").read_text(encoding="utf-8")

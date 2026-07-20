@@ -17,6 +17,9 @@ _DIVIDER_MARK = "======="
 _REPLACE_MARK = ">>>>>>> REPLACE"
 _FENCE_MARKS = frozenset({_SEARCH_MARK, _DIVIDER_MARK, _REPLACE_MARK})
 _UNIFIED_HUNK = re.compile(r"(?m)^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@")
+_CODEX_UPDATE = re.compile(r"(?m)^\*\*\*\s*Update\s+File:\s*(.+?)\s*$")
+_CODEX_END = re.compile(r"(?m)^\*\*\*\s*End\s+Patch\s*$")
+_CODEX_HUNK = re.compile(r"(?m)^@@.*$")
 
 
 def _fence_kind(line: str) -> str | None:
@@ -217,6 +220,107 @@ def _unified_diff_summary(before: str, after: str, path: str, *, max_lines: int 
     return "".join(diff)
 
 
+def _codex_paths_match(expected: str, header: str) -> bool:
+    """True when Codex ``Update File`` path refers to the tool ``path`` arg."""
+    e = (expected or "").replace("\\", "/").lstrip("./")
+    h = (header or "").replace("\\", "/").lstrip("./")
+    if not e or not h:
+        return False
+    if e == h:
+        return True
+    if e.endswith("/" + h) or h.endswith("/" + e):
+        return True
+    # Basename match only when the header is a bare filename.
+    return "/" not in h and e.rsplit("/", 1)[-1] == h
+
+
+def _normalize_codex_envelope(
+    patch: str, expected_path: str
+) -> tuple[str | None, str]:
+    """Convert a single-file Codex ``*** Begin Patch`` envelope to SEARCH/REPLACE.
+
+    Rejects multi-file envelopes and Add/Delete/Move ops. Returns
+    ``(fences, "ok")`` or ``(None, error)``.
+    """
+    if "*** Begin Patch" not in patch and "*** Update File:" not in patch:
+        return None, "not codex"
+    lowered = patch
+    if re.search(r"(?m)^\*\*\*\s*Add\s+File:", lowered):
+        return None, (
+            "Codex *** Add File not supported here — use write_file, or a "
+            "single-file *** Update File envelope"
+        )
+    if re.search(r"(?m)^\*\*\*\s*Delete\s+File:", lowered):
+        return None, "Codex *** Delete File not supported — use delete/edit_file"
+    if re.search(r"(?m)^\*\*\*\s*Move\s+(File:|to:)", lowered):
+        return None, "Codex move ops not supported — use a dedicated rename tool"
+    updates = list(_CODEX_UPDATE.finditer(patch))
+    if not updates:
+        return None, "Codex envelope missing *** Update File:"
+    if len(updates) > 1:
+        return None, (
+            "multi-file Codex envelope rejected; call apply_patch once per file "
+            "with matching path"
+        )
+    header_path = updates[0].group(1).strip()
+    if not _codex_paths_match(expected_path, header_path):
+        return None, (
+            f"Codex Update File path {header_path!r} does not match tool path "
+            f"{expected_path!r}"
+        )
+    start = updates[0].end()
+    end_m = _CODEX_END.search(patch, start)
+    body = patch[start : end_m.start() if end_m else len(patch)]
+    # Split on @@ hunk headers (optional context hint after @@).
+    chunks = _CODEX_HUNK.split(body)
+    fence_parts: list[str] = []
+    for chunk in chunks:
+        body_lines: list[str] = []
+        for ln in chunk.splitlines():
+            if ln.startswith("***"):
+                continue
+            if not ln and not body_lines:
+                continue
+            if ln[:1] in " +-":
+                body_lines.append(ln)
+            elif not ln.strip():
+                body_lines.append(" ")
+            else:
+                # Unprefixed context (some models omit the leading space).
+                body_lines.append(" " + ln)
+        if not body_lines:
+            continue
+        search_lines: list[str] = []
+        replace_lines: list[str] = []
+        for ln in body_lines:
+            tag, text = ln[0], ln[1:]
+            if tag == " ":
+                search_lines.append(text)
+                replace_lines.append(text)
+            elif tag == "-":
+                search_lines.append(text)
+            elif tag == "+":
+                replace_lines.append(text)
+        if not search_lines and not replace_lines:
+            continue
+        if not search_lines:
+            return None, (
+                "addition-only Codex hunk needs context lines (space-prefixed); "
+                "re-send with surrounding context or use edit_file"
+            )
+        fence_parts.append(
+            f"{_SEARCH_MARK}\n"
+            + "\n".join(search_lines)
+            + "\n"
+            + f"{_DIVIDER_MARK}\n"
+            + (("\n".join(replace_lines) + "\n") if replace_lines else "")
+            + f"{_REPLACE_MARK}\n"
+        )
+    if not fence_parts:
+        return None, "Codex envelope had no applicable hunks"
+    return "".join(fence_parts), "ok"
+
+
 def _apply_unified_diff(content: str, patch: str) -> tuple[bool, str, str]:
     """Minimal single-file unified diff applier (context-aware)."""
     src = content.splitlines()
@@ -275,17 +379,20 @@ class ApplyPatchTool:
     keywords = ["patch", "diff", "search replace", "surgical edit"]
     description = (
         "Apply a surgical edit to a file using either Aider-style "
-        "<<<<<<< SEARCH / ======= / >>>>>>> REPLACE fences, or a unified diff hunk. "
+        "<<<<<<< SEARCH / ======= / >>>>>>> REPLACE fences, a unified diff hunk, "
+        "or a single-file Codex *** Begin Patch / *** Update File envelope "
+        "(path must match; multi-file envelopes are rejected). "
         "Empty REPLACE deletes the SEARCH block. Prefer this over write_file for "
-        "localized changes. Returns a unified diff of what changed. "
-        "Do not send Cursor/Codex '*** Begin Patch' envelopes — use SEARCH/REPLACE "
-        "or a plain unified diff body with @@ hunks."
+        "localized changes. Returns a unified diff of what changed."
     )
     parameters = {
         "path": {"type": "string", "description": "File to patch", "required": True},
         "patch": {
             "type": "string",
-            "description": "SEARCH/REPLACE fences or unified diff for this file",
+            "description": (
+                "SEARCH/REPLACE fences, unified diff, or single-file Codex "
+                "*** Begin Patch envelope for this file"
+            ),
             "required": True,
         },
     }
@@ -337,13 +444,38 @@ class ApplyPatchTool:
                     ),
                 )
             if "*** Begin Patch" in patch or "*** Update File:" in patch:
+                fences, nmsg = _normalize_codex_envelope(patch, display_path)
+                if fences is None:
+                    return ToolResult(success=False, output="", error=nmsg)
+                hunks, parse_msg = _parse_search_replace_hunks(fences)
+                if hunks is None:
+                    return ToolResult(success=False, output="", error=parse_msg)
+                new_content = content
+                applied = 0
+                for search, replace in hunks:
+                    ok, new_content, msg = _apply_search_replace(
+                        new_content, search, replace
+                    )
+                    if not ok:
+                        return ToolResult(success=False, output="", error=msg)
+                    applied += 1
+                if not had_fences and _has_fence_markers(new_content):
+                    return ToolResult(
+                        success=False,
+                        output="",
+                        error=(
+                            "refuse write: apply_patch would introduce SEARCH/REPLACE "
+                            "fence markers into the file (parser/corruption guard). "
+                            "Fix the patch and retry."
+                        ),
+                    )
+                await sb.write_file(file_path, new_content)
+                diff = _unified_diff_summary(content, new_content, display_path)
                 return ToolResult(
-                    success=False,
-                    output="",
-                    error=(
-                        "unsupported patch envelope (*** Begin Patch). "
-                        "Use <<<<<<< SEARCH / ======= / >>>>>>> REPLACE fences "
-                        "or a unified diff with @@ hunks, or call edit_file instead."
+                    success=True,
+                    output=(
+                        f"Applied {applied} Codex hunk(s) to {display_path}\n\n"
+                        f"{diff}"
                     ),
                 )
             ok, new_content, msg = _apply_unified_diff(content, patch)

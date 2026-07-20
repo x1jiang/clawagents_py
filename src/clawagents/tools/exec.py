@@ -139,6 +139,11 @@ def _may_run_unsandboxed(run_context: Any, args: Dict[str, Any]) -> bool:
     return bool(meta.get("allow_unsandboxed_exec"))
 
 
+def _short_exit_error(exit_code: int) -> str:
+    """UI/error field: exit code only — full command lives in structured output."""
+    return f"Command exited with code {exit_code}"
+
+
 def _format_nonzero_command_output(
     command: str,
     exit_code: int,
@@ -699,10 +704,7 @@ class ExecTool:
                         stderr or "",
                         warning_prefix,
                     ),
-                    error=(
-                        f"Command exited with code {exit_code}: "
-                        f"{args.get('command', command)}"
-                    ),
+                    error=_short_exit_error(exit_code),
                 )
 
             output = stdout or ""
@@ -793,10 +795,7 @@ class ExecTool:
                         stderr,
                         warning_prefix,
                     ),
-                    error=(
-                        f"Command exited with code {result.exit_code}: "
-                        f"{args.get('command', command)}"
-                    ),
+                    error=_short_exit_error(result.exit_code),
                 )
 
             output = stdout
