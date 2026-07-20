@@ -1,4 +1,4 @@
-__version__ = "6.20.34"
+__version__ = "6.20.35"
 
 from clawagents.agent import ClawAgent, create_claw_agent
 from clawagents.run_result import RunResult
@@ -356,4 +356,3 @@ def __getattr__(name: str):
 
         return _run_goal
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-

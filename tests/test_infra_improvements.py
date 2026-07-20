@@ -17,7 +17,7 @@ from clawagents.sandbox.docker import DockerBackend
 from clawagents.session import InMemorySession
 from clawagents.tools.cache import SqliteResultCacheManager
 from clawagents.tools.catalog import create_tool_discovery_tools, names_for_tool_profile
-from clawagents.tools.exec import create_exec_tools
+from clawagents.tools.exec import _format_nonzero_command_output, create_exec_tools
 from clawagents.tools.registry import ToolRegistry, ToolResult
 
 
@@ -151,6 +151,54 @@ async def test_execute_returns_structured_context_for_nonzero_command_exits():
     assert "nonzero" in payload["interpretation"].lower()
 
 
+def test_execute_classifies_external_authentication_failure():
+    payload = json.loads(
+        _format_nonzero_command_output(
+            "smbclient //server/share",
+            1,
+            "session setup failed: NT_STATUS_LOGON_FAILURE",
+            "",
+            "",
+        )
+    )
+    interpretation = payload["interpretation"]
+    assert "authentication" in interpretation.lower()
+    assert "stop changing" in interpretation.lower()
+    assert "user" in interpretation.lower()
+
+
+def test_execute_classifies_missing_package_without_suggesting_tool_churn():
+    payload = json.loads(
+        _format_nonzero_command_output(
+            "conda create -n smb samba",
+            1,
+            "PackagesNotFoundError: samba",
+            "",
+            "",
+        )
+    )
+    interpretation = payload["interpretation"]
+    assert "package" in interpretation.lower()
+    assert "package manager" in interpretation.lower()
+    assert "do not" in interpretation.lower()
+
+
+def test_execute_redacts_high_entropy_shell_command_failure():
+    secret = "vP7Vf5uipuaO"
+    payload = json.loads(
+        _format_nonzero_command_output(
+            "python3 hca_smb.py ls",
+            127,
+            "",
+            f"bash: line 1: {secret}: command not found",
+            "",
+        )
+    )
+    assert secret not in payload["stderr"]
+    assert "[REDACTED:SHELL_SECRET]" in payload["stderr"]
+    assert "unsafe secret interpolation" in payload["interpretation"]
+
+
 @pytest.mark.asyncio
 async def test_repeated_execute_calls_get_command_specific_recovery_hint():
     class RepeatingExecuteLLM:
@@ -210,12 +258,67 @@ async def test_repeated_execute_calls_get_command_specific_recovery_hint():
         if message.role == "user"
     ]
     transcript = "\n".join(str(message.content) for batch in llm.seen for message in batch)
-    assert "command_executed" in transcript
-    assert "exit_code" in transcript
+    assert "Command exited with code 1" in transcript
+    assert "FAILED" in transcript
     assert any(
         "execute command" in hint and "nonzero" in hint and "Do not rerun" in hint
         for hint in hints
     )
+
+
+@pytest.mark.asyncio
+async def test_three_failures_trigger_rethink_without_opt_in_flag():
+    class FailureAwareLLM:
+        name = "failure-aware"
+
+        def __init__(self):
+            self.calls = 0
+            self.saw_rethink = False
+
+        async def chat(self, messages, **kwargs):
+            self.calls += 1
+            transcript = "\n".join(str(message.content) for message in messages)
+            self.saw_rethink = "Classify the failure" in transcript
+            if self.saw_rethink:
+                return LLMResponse(content="stopped", model="fake", tokens_used=1)
+            return LLMResponse(
+                content="",
+                model="fake",
+                tokens_used=1,
+                tool_calls=[
+                    NativeToolCall(
+                        "probe",
+                        {"attempt": self.calls},
+                        tool_call_id=f"probe_{self.calls}",
+                    )
+                ],
+            )
+
+    class ProbeTool:
+        name = "probe"
+        description = "Probe an external dependency"
+        parameters = {"attempt": {"type": "integer", "required": True}}
+
+        async def execute(self, args):
+            return ToolResult(False, "external service rejected request", "probe failed")
+
+    llm = FailureAwareLLM()
+    registry = ToolRegistry()
+    registry.register(ProbeTool())
+    result = await run_agent_graph(
+        "diagnose external service",
+        llm,
+        tools=registry,
+        max_iterations=8,
+        streaming=False,
+        use_native_tools=True,
+        rethink=False,
+    )
+    assert result.result == "stopped"
+    assert llm.saw_rethink is True
+    # Three failing turns + the recovery turn; a configured final-check pass
+    # may make one additional model call.
+    assert llm.calls in (4, 5)
 
 
 def test_sqlite_result_cache_persists_successful_tool_results(tmp_path: Path):

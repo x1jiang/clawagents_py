@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 
 import pytest
 
@@ -29,6 +30,47 @@ def test_shell_session_updates_on_cd(tmp_path):
     out = f"{PWD_MARKER}{sub.resolve()}\n"
     sess.consume_stdout(out)
     assert sess.cwd == str(sub.resolve())
+
+
+@pytest.mark.parametrize("sticky_env", [False, True])
+def test_shell_session_wrap_preserves_quoted_heredoc(tmp_path, sticky_env):
+    sub = tmp_path / "nested"
+    sub.mkdir()
+    sess = ShellSession(cwd=str(tmp_path))
+    command = """cd nested && python3 - <<'PY'
+from pathlib import Path
+print(Path.cwd().name)
+PY"""
+
+    proc = subprocess.run(
+        ["bash", "-c", sess.wrap(command, sticky_env=sticky_env)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert "SyntaxError" not in proc.stderr
+    assert sess.consume_stdout(proc.stdout, sticky_env=sticky_env) == "nested\n"
+    assert sess.cwd == str(sub.resolve())
+
+
+def test_shell_session_heredoc_preserves_user_exit_code(tmp_path):
+    sess = ShellSession(cwd=str(tmp_path))
+    command = """python3 - <<'PY'
+raise SystemExit(7)
+PY"""
+
+    proc = subprocess.run(
+        ["bash", "-c", sess.wrap(command)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert proc.returncode == 7
+    assert "SyntaxError" not in proc.stderr
+    assert sess.consume_stdout(proc.stdout) == ""
 
 
 @pytest.mark.asyncio
@@ -62,6 +104,40 @@ async def test_execute_cwd_persists(tmp_path, monkeypatch: pytest.MonkeyPatch):
     )
     assert r2.success, r2.error
     assert (sub / "marker.txt").is_file()
+
+
+@pytest.mark.asyncio
+async def test_execute_shell_session_runs_heredoc_without_corrupting_terminator(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("CLAW_FEATURE_EXECUTE_SHELL_SESSION", "1")
+    monkeypatch.setenv("CLAW_FEATURE_EXECUTE_SHELL_ENV", "1")
+    monkeypatch.setenv("CLAW_FEATURE_EXECUTE_AUTO_BACKGROUND", "0")
+    monkeypatch.setenv("CLAW_FEATURE_EXECUTE_STREAMING", "0")
+    monkeypatch.setenv("CLAW_FEATURE_RTK_WRAP", "0")
+    from clawagents.config import features as feat
+
+    feat._resolved = None  # type: ignore[attr-defined]
+
+    from clawagents.sandbox.local import LocalBackend
+    from clawagents.tools.exec import ExecTool
+
+    class Ctx:
+        pass
+
+    tool = ExecTool(LocalBackend(root=str(tmp_path)))
+    result = await tool.execute(
+        {
+            "command": """python3 - <<'PY'
+print('heredoc-ok')
+PY""",
+        },
+        run_context=Ctx(),
+    )
+
+    assert result.success, result.error
+    assert str(result.output).endswith("heredoc-ok\n")
+    assert "__claw_ec" not in str(result.output)
 
 
 @pytest.mark.asyncio

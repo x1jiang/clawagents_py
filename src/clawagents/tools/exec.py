@@ -60,6 +60,12 @@ def _is_dangerous_command(command: str) -> bool:
 
 
 def _truncate_exec_output(output: str) -> str:
+    # Execute output crosses every display/persistence boundary. Scrub here so
+    # failures cannot leak a provider key or a password that malformed shell
+    # interpolation accidentally treated as a command name.
+    from clawagents.redact import redact
+
+    output = redact(output)
     if len(output) <= MAX_OUTPUT_CHARS:
         return output
     original_len = len(output)
@@ -144,6 +150,49 @@ def _short_exit_error(exit_code: int) -> str:
     return f"Command exited with code {exit_code}"
 
 
+def _failure_diagnostic_hint(stdout: str, stderr: str) -> str:
+    """Classify failures that require diagnosis/user action, not tool churn."""
+    blob = f"{stdout}\n{stderr}"
+    if re.search(
+        r"NT_STATUS_(?:LOGON_FAILURE|ACCESS_DENIED)|STATUS_LOGON_FAILURE|"
+        r"authentication (?:failed|failure)|invalid credentials",
+        blob,
+        re.IGNORECASE,
+    ):
+        return (
+            "Remote authentication was rejected. Stop changing runtimes, clients, "
+            "or transport code: they reached the service. Report the exact server "
+            "response and ask the user to verify/rotate the credential and the "
+            "domain-qualified username before retrying."
+        )
+    if re.search(r"PackagesNotFoundError|No matching distribution found", blob):
+        return (
+            "The requested package is unavailable from the configured repository. "
+            "Do not switch package managers or install unrelated tooling unless the "
+            "user requests it; verify the package name/channel or use an already "
+            "available runtime."
+        )
+    if re.search(
+        r"(?m)(?<=: )"
+        r"(?=[A-Za-z0-9_+./=\-]{10,}:(?: command)? not found$)"
+        r"(?=[^:\n]*[A-Z])(?=[^:\n]*[a-z])(?=[^:\n]*\d)"
+        r"[A-Za-z0-9_+./=\-]+(?=:(?: command)? not found$)",
+        blob,
+    ):
+        return (
+            "A high-entropy value was interpreted as a shell command. Treat this as "
+            "unsafe secret interpolation: stop, do not print the value, avoid "
+            "sourcing .env, and pass credentials through an env/auth file."
+        )
+    if "Not enough '\\' characters in service" in blob or "Usage: smbclient" in blob:
+        return (
+            "The client rejected its command-line syntax before authentication. "
+            "Fix the service/option quoting using the installed client's --help; "
+            "do not infer a credential failure from this attempt."
+        )
+    return ""
+
+
 def _format_nonzero_command_output(
     command: str,
     exit_code: int,
@@ -166,11 +215,14 @@ def _format_nonzero_command_output(
     hint = _sandbox_write_hint(stdout, stderr)
     if hint:
         interpretation = f"{interpretation} {hint}"
+    diagnostic = _failure_diagnostic_hint(stdout, stderr)
+    if diagnostic:
+        interpretation = f"{interpretation} {diagnostic}"
     payload: dict[str, Any] = {
         "command_executed": True,
         "success": False,
         "exit_code": exit_code,
-        "command": command,
+        "command": _truncate_exec_output(command),
         "stdout": _truncate_exec_output(stdout or ""),
         "stderr": _truncate_exec_output(stderr or ""),
         "interpretation": interpretation,

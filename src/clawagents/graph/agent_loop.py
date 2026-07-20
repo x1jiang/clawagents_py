@@ -795,9 +795,11 @@ _MAX_RETHINKS = 3
 
 _RETHINK_MESSAGE = (
     "[System] Your last {n} tool calls all failed. "
-    "Stop and reconsider your approach before trying again. "
-    "Review the errors above, think about what went wrong, "
-    "and try a fundamentally different strategy."
+    "Stop before trying another workaround. Classify the failure as code/format, "
+    "local environment, dependency availability, permission, or external service. "
+    "Retry only after relevant state changed. If the evidence says authentication "
+    "was rejected, a package is unavailable, or user-owned configuration is needed, "
+    "report the exact error and request that action instead of changing runtimes or tools."
 )
 
 
@@ -2707,7 +2709,9 @@ async def _run_agent_graph_core(
             adaptive_threshold = _RETHINK_THRESHOLD
     else:
         adaptive_threshold = _RETHINK_THRESHOLD
-    failure_tracker = _FailureTracker(threshold=adaptive_threshold) if rethink else None
+    # The lightweight stop-and-classify guard is always valuable. ``rethink``
+    # controls optional advisor/learning behavior, not basic loop safety.
+    failure_tracker = _FailureTracker(threshold=adaptive_threshold)
     _compaction_savings: list[float] = []
 
     # Trajectory recorder (opt-in; learn implies trajectory)

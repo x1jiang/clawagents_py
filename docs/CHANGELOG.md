@@ -1,6 +1,19 @@
 # ClawAgents Changelog
 
 
+### v6.20.35 — Failure discipline + shell-secret redaction (July 2026)
+
+- **Execute diagnosis:** classify external authentication rejection, unavailable
+  packages, unsafe secret interpolation, and client syntax failures so agents stop
+  switching runtimes/tools when the evidence requires user or configuration action.
+- **Secret hygiene:** redact mixed-case high-entropy values accidentally interpreted
+  as shell commands before execute stdout/stderr reaches model, UI, or persistence.
+- **Loop safety:** the existing three-consecutive-failure stop-and-classify guard is
+  active by default; optional ``rethink`` still controls advisor/learning behavior.
+- **Shell-session heredocs:** separate cwd/env bookkeeping with a newline so quoted
+  heredoc terminators remain valid and the user's original exit code is preserved.
+
+
 ### v6.20.34 — UI tool results + Codex apply_patch (July 2026)
 
 - **UI tool results:** stream up to 8KB of uncrushed tool text to hosts while

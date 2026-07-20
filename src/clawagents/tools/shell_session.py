@@ -223,7 +223,11 @@ print({ENV_MARKER!r} + json.dumps(o, separators=(",", ":")))
             return (
                 f"cd {q} || exit 121; "
                 f"{exports}"
-                f"{command}; "
+                # A heredoc terminator must be the only text on its line. A
+                # semicolon here produced ``PY; __claw_ec=…`` and fed our
+                # bookkeeping shell back into Python/Ruby/etc. A real newline
+                # is also a valid separator for ordinary shell commands.
+                f"{command}\n"
                 f"__claw_ec=$?; "
                 f"printf '%s%s\\n' '{PWD_MARKER}' \"$(pwd -P 2>/dev/null || pwd)\"; "
                 f"{dump_cmd}; "
@@ -231,7 +235,7 @@ print({ENV_MARKER!r} + json.dumps(o, separators=(",", ":")))
             )
         return (
             f"cd {q} || exit 121; "
-            f"{command}; "
+            f"{command}\n"
             f"__claw_ec=$?; "
             f"printf '%s%s\\n' '{PWD_MARKER}' \"$(pwd -P 2>/dev/null || pwd)\"; "
             f"exit $__claw_ec"

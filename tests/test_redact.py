@@ -36,6 +36,18 @@ def test_anthropic_key_redacted():
     assert "sk-ant-api03-thisis_a_long_key_value_1234567890" not in out
 
 
+def test_high_entropy_shell_command_not_found_is_redacted():
+    raw = "bash: line 1: vP7Vf5uipuaO: command not found"
+    out = redact(raw)
+    assert "vP7Vf5uipuaO" not in out
+    assert "[REDACTED:SHELL_SECRET]" in out
+
+
+def test_normal_missing_command_name_is_preserved():
+    raw = "bash: line 1: smbclient: command not found"
+    assert redact(raw) == raw
+
+
 def test_google_key_redacted():
     # Google API keys: AIza + exactly 35 [A-Za-z0-9_-] chars.
     key = "AIzaSyAa1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6"

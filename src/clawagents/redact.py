@@ -113,6 +113,17 @@ _BUILTIN_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
         r"password|passwd|pwd|secret|credential)"
         r"\s*[:=]\s*['\"]?([A-Za-z0-9_\-+/=.~]{6,})['\"]?",
     ),
+    # A malformed shell interpolation can turn a password into a command name,
+    # e.g. ``bash: line 1: vP7Vf5uipuaO: command not found``.  Restrict this to
+    # mixed-case, digit-bearing, high-entropy-looking tokens so ordinary missing
+    # commands such as ``smbclient`` remain useful diagnostic text.
+    _compile(
+        "SHELL_SECRET",
+        r"(?m)(?<=: )"
+        r"(?=[A-Za-z0-9_+./=\-]{10,}:(?: command)? not found$)"
+        r"(?=[^:\n]*[A-Z])(?=[^:\n]*[a-z])(?=[^:\n]*\d)"
+        r"[A-Za-z0-9_+./=\-]+(?=:(?: command)? not found$)",
+    ),
 ]
 
 
