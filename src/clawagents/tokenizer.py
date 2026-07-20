@@ -86,6 +86,28 @@ def _get_encoder(encoding_name: str):
 # ── Public API ────────────────────────────────────────────────────────────
 
 
+def token_estimator_info(model: str | None = None) -> dict[str, Any]:
+    """Report which token estimator is active (for doctor / diagnostics)."""
+    enc_name = _encoding_for_model(model)
+    encoder = _get_encoder(enc_name)
+    if encoder is not None:
+        return {
+            "estimator": "tiktoken",
+            "encoding": enc_name,
+            "accurate": True,
+            "detail": f"tiktoken/{enc_name}",
+        }
+    return {
+        "estimator": "chars_div_4",
+        "encoding": None,
+        "accurate": False,
+        "detail": (
+            "heuristic ≈4 chars/token — install clawagents[accurate-tokens] "
+            "(tiktoken) for BPE counts used by compaction thresholds"
+        ),
+    }
+
+
 def count_tokens(text: str, model: str | None = None) -> int:
     """Return the token count for *text*.
 

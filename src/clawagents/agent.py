@@ -1374,7 +1374,7 @@ def create_claw_agent(
         from clawagents.harness_profiles import resolve_harness_profile
         from clawagents.tools.tool_groups import (
             ActivateToolGroupTool,
-            apply_core_active_profile,
+            apply_mode_active_profile,
         )
 
         _mid = (
@@ -1386,7 +1386,11 @@ def create_claw_agent(
         if _hp is not None and _hp.name == "openai-gpt56":
             if registry.get("activate_tool_group") is None:
                 registry.register(ActivateToolGroupTool(registry))
-            apply_core_active_profile(registry)
+            apply_mode_active_profile(
+                registry,
+                chat_mode=str(chat_mode or "").strip().lower() or None,
+                goal_mode=bool(goal_mode),
+            )
     except Exception:
         pass
 

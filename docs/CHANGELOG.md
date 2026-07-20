@@ -1,6 +1,15 @@
 # ClawAgents Changelog
 
 
+### v6.20.30 — Contained-read reuse + mode tool profiles (July 2026)
+
+- **Overlapping reads:** reuse a prior read stub only when the new line range is
+  fully contained in a prior range (or the prior was unbounded). Partial overlaps
+  (e.g. 0–100 then 50–150) run a real read so required lines are not dropped.
+- **`token_estimator_info()`:** diagnostics can report tiktoken vs chars÷4.
+- **Mode tool profiles:** read-only / coding / goal active sets via
+  `apply_mode_active_profile` (Luna / openai-gpt56).
+
 ### v6.20.29 — Luna active tools + loop guard + economic fixes (July 2026)
 
 - Active tool surface for GPT-5.6: core profile + `activate_tool_group` (web/git/pty/…)

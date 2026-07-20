@@ -11,19 +11,10 @@ from typing import Any
 
 from clawagents.tools.registry import ToolResult
 
-# Always advertised for coding agents (intersection with what's registered).
-CORE_TOOL_NAMES: frozenset[str] = frozenset(
+# Shared discovery / HITL surface for every mode profile.
+_CONTROL_PLANE: frozenset[str] = frozenset(
     {
-        "ls",
-        "read_file",
-        "write_file",
-        "edit_file",
-        "grep",
-        "glob",
-        "execute",
         "think",
-        "write_todos",
-        "update_todo",
         "ask_user",
         "ask_user_question",
         "list_skills",
@@ -33,22 +24,58 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset(
         "tool_describe",
         "tool_profile",
         "activate_tool_group",
+        "search_history",
+    }
+)
+
+# Explore / Plan — no mutating tools, no shell.
+READ_ONLY_TOOL_NAMES: frozenset[str] = _CONTROL_PLANE | frozenset(
+    {
+        "ls",
+        "read_file",
+        "grep",
+        "glob",
         "hashline_read",
         "hashline_grep",
-        "hashline_edit",
-        "apply_patch",
-        "tree",
-        "diff",
-        "insert_lines",
         "write_plan",
         "enter_plan_mode",
         "exit_plan_mode",
-        "search_history",
-        "tool_program",
-        "task",
-        "read_and_grep",
+        "tree",
     }
 )
+
+# Default coding — prefer hashline over overlapping edit APIs; drop rarely-needed
+# helpers (insert_lines / tool_program / read_and_grep) until activated.
+CODING_TOOL_NAMES: frozenset[str] = READ_ONLY_TOOL_NAMES | frozenset(
+    {
+        "write_file",
+        "edit_file",
+        "hashline_edit",
+        "apply_patch",
+        "execute",
+        "write_todos",
+        "update_todo",
+        "diff",
+    }
+)
+
+# Goal / autopilot — coding + subagent task + todos already included.
+GOAL_TOOL_NAMES: frozenset[str] = CODING_TOOL_NAMES | frozenset({"task"})
+
+# Back-compat alias (full historical core before mode split).
+CORE_TOOL_NAMES: frozenset[str] = CODING_TOOL_NAMES | frozenset(
+    {
+        "insert_lines",
+        "tool_program",
+        "read_and_grep",
+        "task",
+    }
+)
+
+# Optional groups unlocked via activate_tool_group (includes overlapping editors).
+TOOL_GROUPS_EXTRA_CODING: dict[str, frozenset[str]] = {
+    "editors_extra": frozenset({"insert_lines", "tool_program", "read_and_grep"}),
+}
 
 TOOL_GROUPS: dict[str, frozenset[str]] = {
     "web": frozenset({"web_fetch", "web_search"}),
@@ -82,6 +109,7 @@ TOOL_GROUPS: dict[str, frozenset[str]] = {
     "hunks": frozenset({"hunk_list", "hunk_accept", "hunk_reject"}),
     "skills_extra": frozenset({"skill_workshop"}),
     "mcp": frozenset({"mcp_auth"}),
+    **TOOL_GROUPS_EXTRA_CODING,
 }
 
 
@@ -93,11 +121,30 @@ def tools_in_group(group: str) -> frozenset[str]:
     return TOOL_GROUPS.get(group.strip().lower(), frozenset())
 
 
+def _profile_for_mode(chat_mode: str | None, *, goal_mode: bool = False) -> frozenset[str]:
+    mode = (chat_mode or "").strip().lower()
+    if goal_mode or mode == "goal":
+        return GOAL_TOOL_NAMES
+    if mode in ("read_only", "plan", "ask"):
+        return READ_ONLY_TOOL_NAMES
+    return CODING_TOOL_NAMES
+
+
 def apply_core_active_profile(registry: Any) -> list[str]:
-    """Restrict schemas/execution to core ∩ registered (+ activate_tool_group)."""
+    """Restrict to coding profile (legacy entrypoint)."""
+    return apply_mode_active_profile(registry, chat_mode="auto", goal_mode=False)
+
+
+def apply_mode_active_profile(
+    registry: Any,
+    *,
+    chat_mode: str | None = None,
+    goal_mode: bool = False,
+) -> list[str]:
+    """Restrict schemas/execution to a mode profile ∩ registered tools."""
     registered = {t.name for t in registry.list_registered()}
-    active = (CORE_TOOL_NAMES & registered) | ({"activate_tool_group"} & registered)
-    # Keep discovery helpers if present so the model can find hidden groups.
+    wanted = _profile_for_mode(chat_mode, goal_mode=goal_mode)
+    active = (wanted & registered) | ({"activate_tool_group"} & registered)
     for name in ("tool_discover", "tool_describe", "tool_profile"):
         if name in registered:
             active.add(name)

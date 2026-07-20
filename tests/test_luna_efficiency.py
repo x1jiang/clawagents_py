@@ -101,6 +101,8 @@ def test_execute_refuses_inactive_tool():
 
 
 def test_identical_and_overlapping_read_reuse():
+    from clawagents.loop_detection import range_contains
+
     tr = _ToolCallTracker(soft_limit=2, hard_limit=3)
     tr.cache_result_output(
         "read_file", {"path": "a.py", "offset": 0, "limit": 100}, "LINEDATA" * 20
@@ -108,15 +110,28 @@ def test_identical_and_overlapping_read_reuse():
     stub = tr.reuse_tool_output("read_file", {"path": "a.py", "offset": 0, "limit": 100})
     assert stub and "Reused identical" in stub
 
-    overlap = detect_overlapping_read(
+    # Fully contained → reuse
+    contained = detect_overlapping_read(
+        tool_name="read_file",
+        params={"path": "a.py", "offset": 10, "limit": 40},
+        prior_reads=[
+            ("read_file", {"path": "a.py", "offset": 0, "limit": 100}, "PRIOR"),
+        ],
+    )
+    assert contained and "contained" in contained.lower()
+
+    # Partial overlap that extends past prior end → must NOT stub (would lose 100–150)
+    partial = detect_overlapping_read(
         tool_name="read_file",
         params={"path": "a.py", "offset": 50, "limit": 100},
         prior_reads=[
             ("read_file", {"path": "a.py", "offset": 0, "limit": 100}, "PRIOR"),
         ],
     )
-    assert overlap and "overlapping" in overlap.lower()
+    assert partial is None
     assert ranges_overlap((0, 100), (50, 150))
+    assert range_contains((0, 100), (10, 50))
+    assert not range_contains((0, 100), (50, 150))
     assert not ranges_overlap((0, 50), (50, 100))
 
 
