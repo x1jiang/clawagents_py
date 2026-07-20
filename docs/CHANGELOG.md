@@ -1,6 +1,11 @@
 # ClawAgents Changelog
 
 
+### v6.20.32 — Graphify skill: code-only bootstrap (July 2026)
+
+- Document `extract --code-only` / `update` as the reliable offline path; plain
+  `extract` can exit 0 without writing `graph.json` when the semantic pass fails.
+
 ### v6.20.31 — Native Graphify companion (July 2026)
 
 - **`MIN_GRAPHIFY` / `probe_graphify()`** — version floor for PyPI `graphifyy` (local knowledge graph).

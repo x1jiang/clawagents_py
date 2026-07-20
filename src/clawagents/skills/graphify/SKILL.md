@@ -22,14 +22,28 @@ Do **not** paste `graph.json` or `GRAPH_REPORT.md` into the system prompt — qu
 
 ## Bootstrap (workspace)
 
+Prefer **code-only** extract. A plain `extract` without `--code-only` runs a
+semantic/docs pass that needs an LLM backend; without keys it can exit 0 and
+still leave **no** `graph.json`.
+
 ```bash
 # Prefer ClawAgents layout (VS Code uses this path)
 export GRAPHIFY_OUT=.clawagents/graphify
-python -m graphify extract .
-# or: graphify extract .
+python -m graphify extract . --code-only
+# Augment after edits (AST, no LLM):
+python -m graphify update .
 ```
 
-Upstream default output is `graphify-out/` if `GRAPHIFY_OUT` is unset.
+Full extract (docs/images, needs LLM):
+
+```bash
+export GRAPHIFY_OUT=.clawagents/graphify
+python -m graphify extract .
+```
+
+Upstream default output is `graphify-out/` if `GRAPHIFY_OUT` is unset. If that
+already exists, VS Code can **Use existing graphify-out** to copy it into
+`.clawagents/graphify/`.
 
 ## Query
 
