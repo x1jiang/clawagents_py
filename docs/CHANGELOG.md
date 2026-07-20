@@ -1,6 +1,12 @@
 # ClawAgents Changelog
 
 
+### v6.20.31 — Native Graphify companion (July 2026)
+
+- **`MIN_GRAPHIFY` / `probe_graphify()`** — version floor for PyPI `graphifyy` (local knowledge graph).
+- Bundled skill `skills/graphify/SKILL.md` for CLI/MCP workflows.
+- VS Code wires Graphify as a Context Mode–style MCP companion (see clawagents-vscode).
+
 ### v6.20.30 — Contained-read reuse + mode tool profiles (July 2026)
 
 - **Overlapping reads:** reuse a prior read stub only when the new line range is

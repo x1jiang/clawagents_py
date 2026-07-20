@@ -10,11 +10,13 @@ import pytest
 
 from clawagents.companions import (
     MIN_CONTEXT_MODE,
+    MIN_GRAPHIFY,
     MIN_RTK,
     format_version,
     parse_version,
     probe_companions,
     probe_context_mode,
+    probe_graphify,
     probe_rtk,
     version_at_least,
 )
@@ -39,6 +41,31 @@ def test_version_at_least():
 def test_format_version():
     assert format_version(MIN_CONTEXT_MODE) == "1.0.169"
     assert format_version(MIN_RTK) == "0.43.0"
+    assert format_version(MIN_GRAPHIFY) == "0.9.20"
+
+
+def test_probe_graphify_missing(monkeypatch: pytest.MonkeyPatch):
+    import clawagents.companions as companions
+
+    monkeypatch.setattr(companions, "graphify_version", lambda python=None: (None, None))
+    status = probe_graphify()
+    assert status.found is False
+    assert status.ok_vs_floor is False
+    assert "graphifyy" in status.hint
+
+
+def test_probe_graphify_ok(monkeypatch: pytest.MonkeyPatch):
+    import clawagents.companions as companions
+
+    monkeypatch.setattr(
+        companions,
+        "graphify_version",
+        lambda python=None: ("0.9.20", "/venv/bin/python"),
+    )
+    status = probe_graphify()
+    assert status.found is True
+    assert status.ok_vs_floor is True
+    assert status.version == "0.9.20"
 
 
 def test_probe_context_mode_missing(monkeypatch: pytest.MonkeyPatch):
@@ -113,8 +140,11 @@ def test_probe_rtk_version(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
 
 
 def test_probe_companions_default(monkeypatch: pytest.MonkeyPatch):
+    import clawagents.companions as companions
+
     monkeypatch.delenv("CLAW_RTK_BIN", raising=False)
     monkeypatch.setattr("clawagents.companions.shutil.which", lambda _n: None)
+    monkeypatch.setattr(companions, "graphify_version", lambda python=None: (None, None))
     statuses = probe_companions()
-    assert {s.name for s in statuses} == {"context-mode", "rtk"}
+    assert {s.name for s in statuses} == {"context-mode", "rtk", "graphify"}
     assert all(not s.ok_vs_floor for s in statuses)

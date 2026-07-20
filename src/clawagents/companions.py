@@ -1,4 +1,4 @@
-"""Companion CLI version floors and probes (context-mode, rtk).
+"""Companion CLI version floors and probes (context-mode, rtk, graphify).
 
 Keep floors in lockstep with clawagents_vscode/src/companionDeps.ts.
 Bump these when shipping a clawagents release that requires newer companions.
@@ -6,11 +6,13 @@ Bump these when shipping a clawagents release that requires newer companions.
 
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import os
 import re
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional, Sequence, Tuple
@@ -21,9 +23,13 @@ VersionTuple = Tuple[int, int, int]
 MIN_CONTEXT_MODE: VersionTuple = (1, 0, 169)
 # Homebrew / cargo rtk (Rust Token Killer) — https://www.rtk-ai.app/
 MIN_RTK: VersionTuple = (0, 43, 0)
+# PyPI graphifyy (import graphify) — https://github.com/Graphify-Labs/graphify
+MIN_GRAPHIFY: VersionTuple = (0, 9, 20)
 
 CONTEXT_MODE_BINARY = "context-mode"
 RTK_BINARY = "rtk"
+GRAPHIFY_PACKAGE = "graphifyy"
+GRAPHIFY_BINARY = "graphify"
 
 _VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 
@@ -208,17 +214,102 @@ def probe_rtk(*, min_version: VersionTuple = MIN_RTK) -> CompanionStatus:
     )
 
 
+def graphify_version(
+    python: Optional[str] = None,
+) -> tuple[Optional[str], Optional[str]]:
+    """Return (version, path) for graphifyy in *python* (default: this interpreter).
+
+    Path is the graphify console script when present, else the python used to
+    import the package (``python -m graphify``).
+    """
+    py = python or sys.executable
+    # Prefer importlib against the current interpreter when probing self.
+    if py == sys.executable or Path(py).resolve() == Path(sys.executable).resolve():
+        try:
+            ver = importlib.metadata.version(GRAPHIFY_PACKAGE)
+        except importlib.metadata.PackageNotFoundError:
+            ver = None
+        if ver:
+            path = _which(GRAPHIFY_BINARY) or py
+            return ver.strip(), path
+        # Module may be importable under a different dist name in some installs.
+        try:
+            import graphify  # noqa: F401
+
+            ver2 = getattr(graphify, "__version__", None)
+            if isinstance(ver2, str) and ver2.strip():
+                return ver2.strip(), _which(GRAPHIFY_BINARY) or py
+        except ImportError:
+            pass
+        return None, None
+
+    try:
+        proc = subprocess.run(
+            [
+                py,
+                "-c",
+                (
+                    "import importlib.metadata as m\n"
+                    f"print(m.version({GRAPHIFY_PACKAGE!r}))\n"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None, None
+    if proc.returncode != 0:
+        return None, None
+    text = (proc.stdout or "").strip().splitlines()
+    ver = text[0].strip() if text else None
+    if not ver:
+        return None, None
+    return ver, py
+
+
+def probe_graphify(
+    *,
+    min_version: VersionTuple = MIN_GRAPHIFY,
+    python: Optional[str] = None,
+) -> CompanionStatus:
+    ver, path = graphify_version(python)
+    found = ver is not None
+    ok = found and version_at_least(ver, min_version)
+    if not found:
+        hint = "pip install 'graphifyy[mcp]'  (https://github.com/Graphify-Labs/graphify)"
+    elif not ok:
+        hint = (
+            f"upgrade: pip install -U 'graphifyy[mcp]'  "
+            f"(have {ver or '?'}, need >={format_version(min_version)})"
+        )
+    else:
+        hint = "ok"
+    return CompanionStatus(
+        name="graphify",
+        found=found,
+        version=ver,
+        min_version=format_version(min_version),
+        ok_vs_floor=bool(ok),
+        hint=hint,
+        path=path,
+    )
+
+
 def probe_companions(
     *,
     names: Optional[Sequence[str]] = None,
 ) -> list[CompanionStatus]:
-    """Probe companion CLIs. Default: context-mode + rtk."""
-    wanted = set(names) if names else {"context-mode", "rtk"}
+    """Probe companion CLIs. Default: context-mode + rtk + graphify."""
+    wanted = set(names) if names else {"context-mode", "rtk", "graphify"}
     out: list[CompanionStatus] = []
     if "context-mode" in wanted:
         out.append(probe_context_mode())
     if "rtk" in wanted:
         out.append(probe_rtk())
+    if "graphify" in wanted:
+        out.append(probe_graphify())
     return out
 
 
@@ -228,15 +319,19 @@ def companions_ok(statuses: Optional[Iterable[CompanionStatus]] = None) -> bool:
 
 
 __all__ = [
+    "GRAPHIFY_PACKAGE",
     "MIN_CONTEXT_MODE",
+    "MIN_GRAPHIFY",
     "MIN_RTK",
     "CompanionStatus",
     "companions_ok",
     "context_mode_version",
     "format_version",
+    "graphify_version",
     "parse_version",
     "probe_companions",
     "probe_context_mode",
+    "probe_graphify",
     "probe_rtk",
     "rtk_version",
     "version_at_least",
