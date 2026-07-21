@@ -489,756 +489,62 @@ async def _run_agent_graph_core(
     file_blocks: Optional[list[dict]] = None,
     session_end_tail: bool = True,
 ) -> AgentState:
-    """Internal ReAct loop body (feature overrides applied by :func:`run_agent_graph`)."""
-    registry = tools or ToolRegistry()
-    action_mode_norm = action_mode if action_mode in ("tools", "code") else "tools"
-    require_approval_set = {
-        n for n in (require_approval_tools or []) if n
-    }
-    # When approval_handler is set, write-class tools require approval by default.
-    if approval_handler is not None:
-        from clawagents.permissions.mode import WRITE_CLASS_TOOLS
+    """Internal ReAct loop body (feature overrides applied by :func:`run_agent_graph`).
 
-        require_approval_set |= set(WRITE_CLASS_TOOLS)
-    native_schemas: list[NativeToolSchema] | None = (
-        registry.to_native_schemas() if use_native_tools and tools else None
-    )
-    tool_desc = registry.describe_for_llm() if not use_native_tools else ""
-    # Harness may tighten soft/hard loop thresholds (e.g. Luna → warn@2 / stop@3).
-    _loop_soft, _loop_hard = 3, 6
-    _loop_cfg = None
-    try:
-        from clawagents.harness_profiles import resolve_harness_profile as _rhp_loop
-        from clawagents.loop_detection import LoopDetectionConfig
+    All initialization is delegated to :class:`RunBootstrapper`.  This
+    function constructs a config, bootstraps, and hands off to the pure
+    loop executor.
+    """
+    from .run_bootstrapper import RunBootstrapper, _bind_agent_loop_refs
 
-        _hp_loop = _rhp_loop(getattr(llm, "model", None))
-        if _hp_loop and _hp_loop.loop_detection_overrides:
-            ov = _hp_loop.loop_detection_overrides
-            if ov.get("warning_threshold") is not None:
-                _loop_soft = int(ov["warning_threshold"])
-            if ov.get("critical_threshold") is not None:
-                _loop_hard = int(ov["critical_threshold"])
-            _loop_cfg = LoopDetectionConfig(
-                warning_threshold=_loop_soft,
-                critical_threshold=_loop_hard,
-            )
-    except Exception:
-        pass
-    loop_tracker = _ToolCallTracker(
-        soft_limit=_loop_soft,
-        hard_limit=_loop_hard,
-        loop_config=_loop_cfg,
-    )
-    emit = on_event or _default_on_event
+    _bind_agent_loop_refs()
 
-    # ── Synthesise handoff tools (v6.4) ──
-    # Each Handoff becomes a synthetic tool the LLM can call. We DO NOT add
-    # these to the registry — they're dispatched directly by the loop so
-    # they can switch the active agent rather than execute a tool. We also
-    # build a name → Handoff map for fast lookup at dispatch time.
-    handoff_list: list[Handoff] = list(handoffs) if handoffs else []
-    handoff_map: dict[str, Handoff] = {h.name: h for h in handoff_list}
-    if handoff_list:
-        handoff_params = {
-            "reason": {
-                "type": "string",
-                "description": "Free-text rationale for why the handoff is appropriate.",
-                "required": False,
-            }
-        }
-        if use_native_tools:
-            if native_schemas is None:
-                native_schemas = []
-            for h in handoff_list:
-                native_schemas.append(NativeToolSchema(
-                    name=h.name,
-                    description=h.description,
-                    parameters=handoff_params,
-                ))
-        else:
-            # Append handoff descriptions to the text-mode tool block so the
-            # LLM still discovers them.
-            extra_lines = ["", "## Handoffs"]
-            for h in handoff_list:
-                extra_lines.append(f"### {h.name}\n{h.description}")
-                extra_lines.append("Parameters:")
-                extra_lines.append("- `reason` (string): Free-text rationale.")
-                extra_lines.append("")
-            tool_desc = (tool_desc or "") + "\n" + "\n".join(extra_lines)
-
-    # ── Typed run context + usage accumulator ──
-    if run_context is None:
-        run_context = RunContext(context=user_context)
-    elif user_context is not None and run_context.context is None:
-        run_context.context = user_context
-    # Ephemeral id for ${SESSION_ID} skill substitutions when persistence is off.
-    # Also used as the OpenAI prompt_cache_key / session affinity identity.
-    import uuid as _uuid
-
-    _meta_sid = run_context._metadata.get("session_id") or run_context._metadata.get(
-        "sessionId"
-    )
-    if getattr(session, "session_id", None):
-        provider_session_id = str(session.session_id)
-    elif getattr(run_context, "session_id", None):
-        provider_session_id = str(run_context.session_id)
-    elif isinstance(_meta_sid, str) and _meta_sid:
-        provider_session_id = _meta_sid
-    else:
-        provider_session_id = f"run-{_uuid.uuid4().hex[:12]}"
-    run_context.session_id = provider_session_id
-    run_context._metadata["session_id"] = provider_session_id
-    run_context._metadata["sessionId"] = provider_session_id
-    usage = run_context.usage
-
-    # Per-agent iteration budget (Hermes parity). If the caller has not
-    # already attached one (e.g., through a subagent-spawning path that
-    # creates a fresh budget), build one sized to ``max_iterations`` so
-    # the loop has a single source of truth for "are we out of turns?".
-    # We size it to ``max_iterations`` directly; the existing ``for
-    # round_idx in range(effective_max_rounds)`` loop still acts as a
-    # belt-and-braces hard ceiling, but the budget is the user-visible
-    # control surface.
-    _budget_size = max_iterations if max_iterations > 0 else MAX_TOOL_ROUNDS
-    await run_context.ensure_iteration_budget(_budget_size)
-
-    # Tools (execute streaming, skills) read callbacks/metadata from run_context.
-    run_context.on_event = emit
-
-    def _accumulate_usage(
-        resp: LLMResponse,
-        *,
-        time_to_first_token_ms: float | None = None,
-        peak_memory_bytes: int = 0,
-    ) -> RequestUsage:
-        prompt_t = int(getattr(resp, "prompt_tokens", 0) or 0)
-        total_t = int(getattr(resp, "tokens_used", 0) or 0)
-        output_t = int(getattr(resp, "completion_tokens", max(total_t - prompt_t, 0)) or 0)
-        cache_read_t = int(getattr(resp, "cache_read_tokens", 0) or 0)
-        cache_write_t = int(getattr(resp, "cache_creation_tokens", 0) or 0)
-        uncached_input_t = int(
-            getattr(
-                resp,
-                "uncached_input_tokens",
-                max(prompt_t - cache_read_t - cache_write_t, 0),
-            )
-            or 0
-        )
-        req = usage.add_response(
-            model=getattr(resp, "model", None) or "",
-            prompt_tokens=prompt_t,
-            input_tokens=uncached_input_t,
-            output_tokens=output_t,
-            total_tokens=total_t,
-            cached_input_tokens=cache_read_t,
-            cache_creation_tokens=cache_write_t,
-            time_to_first_token_ms=time_to_first_token_ms,
-            peak_memory_bytes=peak_memory_bytes,
-        )
-        _emit_typed("usage", {
-            "prompt_tokens": req.prompt_tokens,
-            "input_tokens": req.input_tokens,
-            "output_tokens": req.output_tokens,
-            "total_tokens": req.total_tokens,
-            "cached_input_tokens": req.cached_input_tokens,
-            "cache_creation_tokens": req.cache_creation_tokens,
-            "time_to_first_token_ms": req.time_to_first_token_ms,
-            "peak_memory_bytes": usage.peak_memory_bytes,
-            "model": req.model,
-        })
-        return req
-
-    # RunHooks / AgentHooks — combine into a single call list.
-    active_hooks: list[RunHooks] = []
-    if hooks is not None:
-        active_hooks.append(hooks)
-    if agent_hooks is not None and agent_hooks is not hooks:
-        active_hooks.append(agent_hooks)
-    # Expose hooks to nested tools (e.g. task → on_subagent_start/end).
-    run_context._metadata["hooks"] = active_hooks
-    run_context._metadata["agent_name"] = agent_name or "ClawAgent"
-
-    # Feature C + F: detect task type for adaptive rethink threshold
-    _task_type = "general"
-    if rethink or learn:
-        try:
-            from clawagents.trajectory.verifier import detect_task_type, compute_adaptive_rethink_threshold
-            _task_type = detect_task_type(task)
-            adaptive_threshold = compute_adaptive_rethink_threshold(_task_type, 0, 0)
-        except Exception:
-            adaptive_threshold = _RETHINK_THRESHOLD
-    else:
-        adaptive_threshold = _RETHINK_THRESHOLD
-    # The lightweight stop-and-classify guard is always valuable. ``rethink``
-    # controls optional advisor/learning behavior, not basic loop safety.
-    failure_tracker = _FailureTracker(threshold=adaptive_threshold)
-    _compaction_savings: list[float] = []
-
-    # Trajectory recorder (opt-in; learn implies trajectory)
-    recorder = None
-    if trajectory or learn:
-        from clawagents.trajectory.recorder import TrajectoryRecorder
-        recorder = TrajectoryRecorder(task=task, response_chars=response_chars)
-
-    # Bind workspace + goal LLM for tools / final gate (parent runs).
-    if run_context is not None:
-        meta = run_context._metadata
-        if not isinstance(meta.get("workspace"), str):
-            meta["workspace"] = os.getcwd()
-        if getattr(registry, "_permission_engine", None) is not None:
-            meta.setdefault("permission_engine", registry._permission_engine)
-        if before_tool is not None:
-            meta["before_tool"] = before_tool
-        if approval_handler is not None:
-            meta["approval_handler"] = approval_handler
-
-        async def _bound_goal_llm(prompt: str) -> str:
-            resp = await llm.chat([LLMMessage(role="user", content=prompt)])
-            return str(getattr(resp, "content", "") or "")
-
-        meta["goal_llm_complete"] = _bound_goal_llm
-        try:
-            from clawagents.config.features import is_enabled as _feat_goal_bind
-            from clawagents.goal import (
-                GoalTracker,
-                attach_goal_to_run_context,
-                get_goal_tracker,
-            )
-
-            # Only bind the disk-backed goal tracker in Goal mode. Act/Plan must
-            # not inherit an active `.clawagents/goal/state.json` from a prior run.
-            _want_goal = bool(meta.get("goal_mode"))
-            if (
-                _want_goal
-                and _feat_goal_bind("goal_autopilot")
-                and get_goal_tracker(run_context) is None
-            ):
-                attach_goal_to_run_context(
-                    run_context, GoalTracker(meta["workspace"])
-                )
-        except Exception:
-            logger.debug("goal tracker bind failed", exc_info=True)
-
-
-    # Feature: Session Persistence — save session as append-only JSONL
-    session_writer = None
-    from clawagents.config.features import is_enabled as _feat_enabled
-    if _feat_enabled("session_persistence"):
-        from clawagents.session.persistence import SessionWriter
-        session_writer = SessionWriter()
-        run_context.session_id = session_writer.session_id
-        run_context._metadata["session_id"] = session_writer.session_id
-        emit("context", {"message": f"session: {session_writer.session_id} → {session_writer.path}"})
-
-    # Feature: External Hooks — load shell hooks from .clawagents/hooks.json or env
-    ext_hook_runner = None
-    hooks_cfg = None
-    if _feat_enabled("external_hooks"):
-        from clawagents.hooks.external import load_hooks_config, ExternalHookRunner
-        hooks_cfg = load_hooks_config()
-        if hooks_cfg:
-            ext_hook_runner = ExternalHookRunner(hooks_cfg)
-            emit("context", {"message": "external hooks: loaded"})
-
-    taxonomy_dispatcher = None
-    try:
-        from clawagents.hooks.external import build_taxonomy_dispatcher
-
-        taxonomy_dispatcher = build_taxonomy_dispatcher(hooks_cfg)
-        if taxonomy_dispatcher is not None:
-            emit("context", {"message": "hook taxonomy: loaded"})
-    except Exception:
-        logger.debug("hook taxonomy load failed", exc_info=True)
-
-    if taxonomy_dispatcher is not None and isinstance(
-        getattr(run_context, "_metadata", None), dict
-    ):
-        run_context._metadata["taxonomy_dispatcher"] = taxonomy_dispatcher
-
-    _base_emit = emit
-
-    async def _fire_taxonomy(
-        event: Any,
-        payload: dict[str, Any] | None = None,
-        *,
-        blocking: bool = False,
-    ) -> None:
-        if taxonomy_dispatcher is None:
-            return
-        try:
-            from clawagents.hooks.external import dispatch_taxonomy_hook
-
-            await dispatch_taxonomy_hook(
-                taxonomy_dispatcher,
-                event,
-                payload or {},
-                blocking=blocking,
-            )
-        except Exception:
-            pass
-
-    def emit(kind: EventKind, data: dict[str, Any] | None = None) -> None:
-        payload = data or {}
-        _base_emit(kind, payload)
-        if kind == "warn" and taxonomy_dispatcher is not None:
-            from clawagents.hooks.taxonomy import HookEvent
-
-            msg = str(payload.get("message") or payload)
-            try:
-                asyncio.get_running_loop().create_task(
-                    _fire_taxonomy(
-                        HookEvent.NOTIFICATION,
-                        {"message": msg, "kind": "warn"},
-                    )
-                )
-            except RuntimeError:
-                pass
-
-    # Run-scoped side effects have explicit owners.  The local aliases keep
-    # the existing loop code mechanically stable while subsequent extractions
-    # move callers to these collaborators directly.
-    events = RunEvents(emit, on_stream_event)
-    _emit_typed = events.typed
-    run_context._metadata["_emit_typed_event"] = _emit_typed
-    hook_dispatcher = HookDispatcher(active_hooks, run_context, events)
-    _fire_hook = hook_dispatcher.fire
-    llm_caller = TurnLLMCaller(
-        llm=llm,
-        events=events,
-        hooks=hook_dispatcher,
-        registry=registry,
-        session_writer=session_writer,
-        external_hooks=ext_hook_runner,
-        accumulate_usage=_accumulate_usage,
-        provider_session_id=provider_session_id,
-    )
-    response_interpreter = TurnResponseInterpreter(
-        llm=llm,
-        registry=registry,
-        events=events,
-    )
-    tool_batch_safety = ToolBatchSafety(loop_tracker, events)
-    rethink_controller = RethinkController(events)
-    tool_call_runner = ToolCallRunner(
-        registry=registry,
-        tracker=loop_tracker,
-        events=events,
-        hooks=hook_dispatcher,
-        run_context=run_context,
-        legacy_on_event=on_event,
-    )
-    tool_result_processor = ToolResultProcessor(
-        external_hooks=ext_hook_runner,
-        taxonomy_dispatcher=taxonomy_dispatcher,
-        after_tool=after_tool,
-        events=events,
-        session_writer=session_writer,
-        run_context=run_context,
-        preview_chars=preview_chars,
-    )
-    tool_policy_gate = ToolPolicyGate(
-        external_hooks=ext_hook_runner,
-        taxonomy_dispatcher=taxonomy_dispatcher,
-        before_tool=before_tool,
-        hook_result_type=HookResult,
-        events=events,
-    )
-
-    _cached_sys_tokens: int = 0  # Feature D: cache system prompt token count
-
-    # ── Advisor model: phone-a-friend for strategic guidance ────────
-    _advisor_call_count = 0
-
-    async def _consult_advisor(msgs: list[LLMMessage], trigger: str) -> None:
-        nonlocal _advisor_call_count
-        if not advisor_llm or _advisor_call_count >= advisor_max_calls:
-            return
-        _advisor_call_count += 1
-        emit("context", {"message": f"advisor consultation #{_advisor_call_count} ({trigger})"})
-        try:
-            advisor_response = await advisor_llm.chat([
-                LLMMessage(role="system", content="You are a senior advisor. Review the agent's full transcript and provide concise strategic guidance. Under 150 words. Use numbered steps, not explanations."),
-                *msgs,
-                LLMMessage(role="user", content=f"[Advisor Request — {trigger}] Review the conversation above and provide strategic guidance for the next steps."),
-            ])
-            if advisor_response.content:
-                msgs.append(LLMMessage(role="user", content=f"[Advisor Guidance]\n{advisor_response.content}"))
-                emit("context", {"message": f"advisor: {advisor_response.content[:120]}..."})
-        except Exception as err:
-            emit("warn", {"message": f"advisor consultation failed: {err}"})
-
-    tool_turn_executor = ToolTurnExecutor(
-        registry=registry,
-        run_context=run_context,
-        events=events,
-        policy_gate=tool_policy_gate,
-        call_runner=tool_call_runner,
-        result_processor=tool_result_processor,
-        rethink_controller=rethink_controller,
-        loop_tracker=loop_tracker,
-        failure_tracker=failure_tracker,
-        recorder=recorder,
-        session_writer=session_writer,
-        require_approval_set=require_approval_set,
+    config = AgentRunConfig(
+        task=task, llm=llm, tools=tools, system_prompt=system_prompt,
+        max_iterations=max_iterations, streaming=streaming,
+        context_window=context_window, on_event=on_event,
+        before_llm=before_llm, before_tool=before_tool, after_tool=after_tool,
+        use_native_tools=use_native_tools, trajectory=trajectory,
+        rethink=rethink, learn=learn, atlas=atlas, atlas_config=atlas_config,
+        preview_chars=preview_chars, response_chars=response_chars,
+        timeout_s=timeout_s, features=features, advisor_llm=advisor_llm,
+        advisor_max_calls=advisor_max_calls, run_context=run_context,
+        user_context=user_context, hooks=hooks, agent_hooks=agent_hooks,
+        input_guardrails=input_guardrails, output_guardrails=output_guardrails,
+        output_type=output_type, on_stream_event=on_stream_event,
+        session=session, session_preload_limit=session_preload_limit,
+        handoffs=handoffs, agent_name=agent_name, action_mode=action_mode,
         approval_handler=approval_handler,
-        use_native_tools=use_native_tools,
-        preview_chars=preview_chars,
-        task_type=_task_type,
-        learn=learn,
-        consult_advisor=_consult_advisor,
-        llm=llm,
-    )
-    completion_handler = CompletionHandler(
-        registry=registry,
-        run_context=run_context,
-        events=events,
-        recorder=recorder,
-        llm=llm,
-        before_tool=before_tool,
-        action_mode=action_mode_norm,
-        looks_like_truncated_json=_looks_like_truncated_json,
-        sanitize_assistant_text=_sanitize_assistant_text,
-        goal_llm_complete=_goal_llm_complete,
-    )
-
-    prompt_to_use = append_model_identity(
-        system_prompt or BASE_SYSTEM_PROMPT,
-        getattr(llm, "name", None),
-        getattr(llm, "model", None),
-    )
-    lesson_preamble = ""
-    dynamic_parts: list[str] = []
-
-    # PTRL Layer 1: Pre-run lesson injection (skipped for isolated subagents).
-    if learn and not getattr(run_context, "skip_memory", False):
-        from clawagents.trajectory.lessons import build_lesson_preamble
-        preamble = build_lesson_preamble()
-        if preamble:
-            dynamic_parts.append(preamble)
-            emit("context", {"message": "PTRL: injected lessons from past runs"})
-
-    # Goal autopilot standing reminder (preferred long-horizon gate).
-    # Wrapped in markers so mid-run start_goal can refresh it each turn.
-    try:
-        from clawagents.config.features import is_enabled as _feat_goal_sys
-        from clawagents.goal import get_goal_tracker, goal_system_reminder
-
-        _goal_mode_on = bool(
-            isinstance(run_context._metadata, dict)
-            and run_context._metadata.get("goal_mode")
-        )
-        if _goal_mode_on and _feat_goal_sys("goal_autopilot"):
-            _gt_sys = get_goal_tracker(run_context)
-            _rem = goal_system_reminder(_gt_sys.state if _gt_sys else None)
-            if _rem:
-                dynamic_parts.append(
-                    "<!--claw:goal-reminder-->\n"
-                    + _rem
-                    + "\n<!--/claw:goal-reminder-->"
-                )
-                emit("context", {"message": "goal: injected active goal reminder"})
-    except Exception:
-        logger.debug("goal system reminder failed", exc_info=True)
-
-    # Dynamic context packs
-    # Dynamic context packs (after cache boundary) — local only.
-    if not getattr(run_context, "skip_memory", False):
-        from clawagents.config.features import is_enabled
-        try:
-            if is_enabled("core_memory"):
-                from clawagents.memory.core_memory import load_core_memory
-                cm = load_core_memory()
-                if cm:
-                    dynamic_parts.append(cm)
-            if is_enabled("context_ledger"):
-                from clawagents.memory.context_ledger import load_ledger_preamble
-                led = load_ledger_preamble()
-                if led:
-                    dynamic_parts.append(led)
-            if is_enabled("memory_bank"):
-                from clawagents.memory.core_memory import (
-                    ensure_memory_bank_stubs,
-                    load_memory_bank_preamble,
-                )
-                ensure_memory_bank_stubs()
-                mb = load_memory_bank_preamble()
-                if mb:
-                    dynamic_parts.append(mb)
-            if is_enabled("fact_store"):
-                from clawagents.memory.facts import live_facts_preamble
-                facts = live_facts_preamble()
-                if facts:
-                    dynamic_parts.append(facts)
-            from clawagents.tools.context_tools import load_plan_preamble
-            plan = load_plan_preamble()
-            if plan:
-                dynamic_parts.append(plan)
-            if is_enabled("repo_map_inject"):
-                from clawagents.memory.repo_map import build_repo_map
-                rm = build_repo_map(max_chars=3_500)
-                if rm:
-                    dynamic_parts.append(rm)
-                    emit("context", {"message": "injected ranked repo map"})
-            # Workspace facts models need before inventing git /tmp paths.
-            try:
-                import tempfile
-                from pathlib import Path as _P
-
-                from clawagents.tools.git_tools import is_git_work_tree
-
-                ws = str(getattr(run_context, "workspace", None) or _P.cwd())
-                git_ok = is_git_work_tree(ws)
-                scratch = tempfile.gettempdir()
-                meta = getattr(run_context, "_metadata", None)
-                sb_name = "workspace"
-                if isinstance(meta, dict):
-                    sb_name = str(meta.get("sandbox_profile") or sb_name)
-                dynamic_parts.append(
-                    "## Workspace env\n"
-                    f"- workspace: `{ws}`\n"
-                    f"- is_git_repo: {'true' if git_ok else 'false'}\n"
-                    f"- sandbox: `{sb_name}`\n"
-                    f"- scratch_dir: `{scratch}` (also /tmp when sandbox allows)\n"
-                    + (
-                        "- Prefer `snapshot_diff` to review edits (no git).\n"
-                        if not git_ok
-                        else "- Prefer `git_status` / `git_diff` to review edits.\n"
-                    )
-                    + "- Do not chain `&& git …` after syntax checks when is_git_repo is false.\n"
-                    + (
-                        "- OS sandbox is off — home config CLIs (gcloud/aws/docker) may run.\n"
-                        if sb_name == "off"
-                        else ""
-                    )
-                )
-            except Exception:
-                logger.debug("workspace env preamble failed", exc_info=True)
-        except Exception:
-            logger.debug("dynamic context pack failed", exc_info=True)
-
-    if dynamic_parts:
-        lesson_preamble = "\n\n".join(dynamic_parts)
-
-    # Insert __CACHE_BOUNDARY__ between static (instructions + tools) and dynamic content.
-    # The Anthropic provider splits on this marker to enable prompt caching.
-    system_content = build_system_prompt(
-        base_prompt=prompt_to_use,
-        tool_description=tool_desc,
-        lesson_preamble=lesson_preamble,
-    )
-    # Attach images/files (if any) to the first user message as content
-    # blocks so the model sees pixels/documents. ``current_task`` stays the
-    # plain string, so compaction/events/session paths that expect text are
-    # unaffected.
-    if image_blocks or file_blocks:
-        first_user_content: Any = (
-            ([{"type": "text", "text": task}] if task else [])
-            + list(image_blocks or [])
-            + list(file_blocks or [])
-        )
-    else:
-        first_user_content = task
-    messages: list[LLMMessage] = [
-        LLMMessage(role="system", content=system_content),
-        LLMMessage(role="user", content=first_user_content),
-    ]
-
-    # Session: write initial state
-    if session_writer:
-        session_writer.write_system_prompt(system_content)
-
-    # Pre-flight: ensure initial payload fits in context window
-    messages, tool_desc, native_schemas = _preflight_context_check(
-        messages, context_window, tool_desc, native_schemas, registry, emit,
-    )
-
-    # Feature D: cache system prompt tokens (static prefix never changes)
-    if messages:
-        _cached_sys_tokens = _estimate_tokens(messages[0].content)
-        emit("context", {"message": f"system prompt: ~{_cached_sys_tokens} tokens (cached for budget calc)"})
-
-    # IncrementalTokenLedger: O(1) prefix-aware token estimation
-    from functools import partial as _partial
-    from .tool_observation import _estimate_messages_tokens as _est_msgs
-    _token_ledger = IncrementalTokenLedger(
-        _partial(_est_msgs, model=None, cached_system_tokens=_cached_sys_tokens)
-    )
-    _token_ledger.rebase(messages)
-
-    state = AgentState(
-        messages=messages,
-        current_task=task,
-        status="running",
-        result="",
-        iterations=0,
-        max_iterations=max_iterations,
-        tool_calls=0,
-        usage=usage,
-        run_context=run_context,
-    )
-
-    if taxonomy_dispatcher is not None:
-        try:
-            from clawagents.hooks.external import dispatch_taxonomy_hook
-            from clawagents.hooks.taxonomy import HookEvent
-
-            await dispatch_taxonomy_hook(
-                taxonomy_dispatcher,
-                HookEvent.SESSION_START,
-                {"task": task[:500] if task else ""},
-                blocking=False,
-            )
-            await dispatch_taxonomy_hook(
-                taxonomy_dispatcher,
-                HookEvent.USER_PROMPT_SUBMIT,
-                {"prompt": task[:2000] if task else ""},
-                blocking=False,
-            )
-        except Exception:
-            logger.debug("taxonomy session_start hook failed", exc_info=True)
-
-    # Session rewind: snapshot workspace-touched files at prompt boundary
-    try:
-        from clawagents.config.features import is_enabled as _feat_rw
-
-        if _feat_rw("session_rewind") or _feat_rw("hunk_watcher"):
-            from clawagents.memory.hunk_watcher import get_watcher
-
-            _ws_rw = None
-            if run_context is not None and isinstance(run_context._metadata, dict):
-                _ws_rw = run_context._metadata.get("workspace")
-            w = get_watcher(_ws_rw)
-            meta_rw = (
-                run_context._metadata
-                if run_context is not None and isinstance(run_context._metadata, dict)
-                else None
-            )
-            idx = int((meta_rw or {}).get("prompt_index") or 0) + 1
-            # RunContext is recreated every VS Code turn, so metadata alone always
-            # yields idx=1 and overwrites prompt_0001.json. Prefer the watcher.
-            idx = max(idx, int(getattr(w, "_prompt_index", 0) or 0) + 1)
-            if meta_rw is not None:
-                meta_rw["prompt_index"] = idx
-            _conv_marker: list[dict[str, str]] = []
-            for _m in messages[-6:]:
-                if _m.role in ("user", "assistant"):
-                    _preview = (
-                        _m.content
-                        if isinstance(_m.content, str)
-                        else str(_m.content)
-                    )
-                    _conv_marker.append(
-                        {"role": _m.role, "preview": _preview[:120]}
-                    )
-            w.snapshot_turn(
-                idx,
-                user_text=(task or "")[:2000],
-                message_count=len(messages),
-                conversation_marker=_conv_marker,
-            )
-    except Exception:
-        logger.debug("rewind snapshot failed", exc_info=True)
-
-    # Session history is an independent concern.  Its journal owns identity
-    # tracking so transcript rewrites from compaction never leak into durable
-    # conversation history.
-    session_journal = SessionMessageJournal(session)
-    try:
-        messages = await session_journal.preload(
-            messages,
-            limit=session_preload_limit,
-            repair=_patch_dangling_tool_calls,
-            drop_leading_orphans=_drop_leading_orphan_tools,
-        )
-        state.messages = messages
-    except Exception as err:
-        # A broken backend must not prevent an otherwise valid agent run.
-        session_journal.begin(messages)
-        emit("warn", {"message": f"session load failed: {err}"})
-    _session_initial_ids = session_journal.initial_ids
-    handoff_router = HandoffRouter(
-        handoffs=handoff_map,
-        events=events,
-        hooks=hook_dispatcher,
-        run_context=run_context,
-        from_agent=agent_name or "ClawAgent",
-        task=task,
-        use_native_tools=use_native_tools,
-        session_initial_ids=_session_initial_ids,
-        on_stream_event=on_stream_event,
-    )
-    run_finalizer = RunFinalizer(
-        events=events,
-        hooks=hook_dispatcher,
-        run_context=run_context,
-        session_journal=session_journal,
-        session_writer=session_writer,
-        recorder=recorder,
-        llm=llm,
-        task=task,
-        learn=learn,
-        output_guardrails=output_guardrails,
-        output_type=output_type,
-        run_output_guardrails=_run_output_guardrails,
-        coerce_output_type=_coerce_output_type,
-        accumulate_usage=_accumulate_usage,
-        taxonomy_dispatcher=taxonomy_dispatcher,
+        require_approval_tools=require_approval_tools,
+        image_blocks=image_blocks, file_blocks=file_blocks,
         session_end_tail=session_end_tail,
     )
-    turn_driver = TurnDriver(
-        llm=llm,
-        caller=llm_caller,
-        events=events,
-        run_context=run_context,
-        session_journal=session_journal,
-        external_hooks=ext_hook_runner,
-        before_llm=before_llm,
-        fire_hook=_fire_hook,
-        taxonomy_dispatcher=taxonomy_dispatcher,
-        native_schemas=native_schemas,
-        handoffs=handoff_list,
-        use_native_tools=use_native_tools,
-        tools_supplied=tools is not None,
-        streaming=streaming,
-        output_type=output_type,
-        context_window=context_window,
-        resolved_model_name=None,
-        cached_system_tokens=_cached_sys_tokens,
-        compaction_savings=_compaction_savings,
-        token_ledger=_token_ledger,
-    )
+    rs = await RunBootstrapper(config).bootstrap()
+    return await _execute_loop(rs)
 
-    def _should_run_final_advisor_check(current_state: AgentState) -> bool:
-        return bool(
-            advisor_llm is not None
-            and _advisor_call_count > 0
-            and _advisor_call_count < advisor_max_calls
-            and current_state.tool_calls > 0
-        )
 
-    round_dispatcher = RoundDispatcher(
-        driver=turn_driver,
-        response_interpreter=response_interpreter,
-        completion_handler=completion_handler,
-        handoff_router=handoff_router,
-        safety=tool_batch_safety,
-        tool_executor=tool_turn_executor,
-        run_context=run_context,
-        use_native_tools=use_native_tools,
-        consult_advisor=_consult_advisor,
-        should_final_check=_should_run_final_advisor_check,
-    )
+async def _execute_loop(rs: Any) -> AgentState:
+    """Pure ReAct control loop — no initialization, only control flow.
+
+    ``rs`` is a :class:`RunSession` from the bootstrapper.
+    """
+    state = rs.state
+    messages = rs.messages
+    emit = rs.emit
+    events = rs.events
+    run_context = rs.run_context
+    advisor = rs.advisor
 
     # RunHooks: on_run_start
-    if active_hooks:
-        await _fire_hook("on_run_start", task)
-    _emit_typed("turn_started", {"iteration": 0, "task": task})
+    if rs.active_hooks:
+        await rs.hook_dispatcher.fire("on_run_start", rs.task)
+    events.typed("turn_started", {"iteration": 0, "task": rs.task})
 
     # Input guardrails (short-circuit before the first LLM call).
-    if input_guardrails:
+    if rs.input_guardrails:
         try:
             tripped = await _run_input_guardrails(
-                input_guardrails, run_context, task,
+                rs.input_guardrails, run_context, rs.task,
             )
         except GuardrailTripwireTriggered as tripwire:
             state.status = "done"
@@ -1247,19 +553,19 @@ async def _run_agent_graph_core(
                 or f"Input rejected by guardrail '{tripwire.guardrail_name}'"
             )
             state.guardrail_triggered = tripwire.guardrail_name
-            _emit_typed("guardrail_tripped", {
+            events.typed("guardrail_tripped", {
                 "guardrail_name": tripwire.guardrail_name,
                 "where": "input",
                 "behavior": tripwire.result.behavior.value,
                 "message": state.result,
             })
             emit("warn", {"message": f"input guardrail tripped: {tripwire.guardrail_name}"})
-            if active_hooks:
-                await _fire_hook("on_run_end", state.result)
+            if rs.active_hooks:
+                await rs.hook_dispatcher.fire("on_run_end", state.result)
             return state
         if tripped:
             messages.append(LLMMessage(role="user", content=tripped))
-            _emit_typed("guardrail_tripped", {
+            events.typed("guardrail_tripped", {
                 "guardrail_name": "input",
                 "where": "input",
                 "behavior": "reject_content",
@@ -1286,23 +592,11 @@ async def _run_agent_graph_core(
         # runs agent turns in worker threads. Ctrl-C handling is best-effort.
         pass
 
-    effective_max_rounds = min(
-        max_iterations if max_iterations > 0 else MAX_TOOL_ROUNDS,
-        MAX_TOOL_ROUNDS,
-    )
-
     t0 = time.monotonic()
-    round_scheduler = RoundScheduler(
-        run_context=run_context,
-        events=events,
-        session_writer=session_writer,
-        timeout_s=timeout_s,
-        started_at=t0,
-    )
 
     try:
-        for round_idx in range(effective_max_rounds):
-            scheduled = await round_scheduler.begin(
+        for round_idx in range(rs.max_rounds):
+            scheduled = await rs.scheduler.begin(
                 state,
                 messages,
                 round_index=round_idx,
@@ -1313,10 +607,10 @@ async def _run_agent_graph_core(
                 break
 
             # ── Advisor: consult after initial orientation (first tool results in transcript)
-            if advisor_llm and round_idx == 1 and _advisor_call_count == 0:
-                await _consult_advisor(messages, "planning")
+            if advisor.available and round_idx == 1 and advisor.call_count == 0:
+                await advisor.consult(messages, "planning")
 
-            dispatched = await round_dispatcher.dispatch(
+            dispatched = await rs.dispatcher.dispatch(
                 state,
                 messages,
                 round_index=round_idx,
@@ -1340,7 +634,7 @@ async def _run_agent_graph_core(
                 break
 
         else:
-            emit("warn", {"message": f"reached max {effective_max_rounds} tool rounds"})
+            emit("warn", {"message": f"reached max {rs.max_rounds} tool rounds"})
             # Act-invariant reconciliation gate: if state remains uncertain
             # even though the round budget is exhausted, report max_iterations
             # instead of done so the caller knows the run didn't finish cleanly.
@@ -1355,7 +649,7 @@ async def _run_agent_graph_core(
                 state.result = _block
             else:
                 state.status = "done"
-                state.result = state.result or f"Reached maximum of {effective_max_rounds} tool rounds."
+                state.result = state.result or f"Reached maximum of {rs.max_rounds} tool rounds."
 
     except KeyboardInterrupt:
         emit("warn", {"message": "interrupted"})
@@ -1378,4 +672,5 @@ async def _run_agent_graph_core(
     if not _handoff_transcript_set:
         state.messages = messages
 
-    return await run_finalizer.finalize(state, messages, elapsed=elapsed)
+    return await rs.finalizer.finalize(state, messages, elapsed=elapsed)
+
