@@ -3360,9 +3360,14 @@ def mantle_anthropic_base_url(url: str) -> str:
 
 
 def mantle_openai_base_url(url: str) -> str:
-    """Mantle OpenAI Responses root (client appends ``/v1/responses``)."""
+    """Mantle OpenAI frontier root (SDK appends ``/responses`` → ``…/openai/v1/responses``).
+
+    AWS docs require ``https://bedrock-mantle.{region}.api.aws/openai/v1``.
+    Passing only ``…/openai`` makes the OpenAI client call ``…/openai/responses``
+    (missing ``/v1``) and Mantle returns HTTP 404.
+    """
     origin = _mantle_origin(url)
-    return f"{origin}/openai" if origin else ""
+    return f"{origin}/openai/v1" if origin else ""
 
 
 def is_mantle_anthropic_model(model: str) -> bool:
