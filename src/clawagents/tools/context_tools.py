@@ -396,9 +396,12 @@ class WritePlanTool:
     description = (
         "Write/update .clawagents/plan.md for Plan→Act handoff "
         "(goals, invariants, steps, risks, files). Before a publish/deploy-style "
-        "side effect, add exact shell commands as backticked bullets under a "
-        "'Verification gates' heading; Act mode will require every command to "
-        "succeed after the latest edit."
+        "side effect, add exact pre-action shell commands as backticked bullets "
+        "under 'Verification gates' and exact remote-state/count/marker checks "
+        "under 'Post-action reconciliation'. Act mode requires both phases. "
+        "For production pipelines, cover retry/rollback and partial-failure "
+        "behavior, observable evidence of resulting external state, and any "
+        "domain-specific safety constraints discovered from the task."
     )
     parameters = {
         "content": {

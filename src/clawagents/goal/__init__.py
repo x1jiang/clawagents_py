@@ -223,8 +223,31 @@ class GoalTracker:
 LLMComplete = Callable[[str], Awaitable[str]]
 
 
+def is_production_workflow(text: str) -> bool:
+    return bool(re.search(
+        r"\b(?:publish|deploy|release|production|watch(?:er|[- ]dir)?|"
+        r"quarantine|intake|remote share|smb)\b",
+        str(text or ""),
+        re.IGNORECASE,
+    ))
+
+
+_PRODUCTION_CONTRACT = """
+For an external/production workflow, the success contract must also cover:
+- retry, rollback, and partial-failure behavior
+- observable evidence of the resulting external state
+- any domain-specific safety constraints discovered from the task
+- exact pre-action verification and post-action reconciliation commands
+""".strip()
+
+
 async def run_planner(llm: LLMComplete, goal: str, *, workspace: str) -> str:
     """Fail-closed planner: empty/short plan raises."""
+    production_contract = (
+        f"\n\n{_PRODUCTION_CONTRACT}\n"
+        if is_production_workflow(goal)
+        else ""
+    )
     prompt = (
         "You are the GOAL PLANNER. Produce a concrete verifier contract as markdown.\n"
         f"Workspace: {workspace}\n"
@@ -234,6 +257,8 @@ async def run_planner(llm: LLMComplete, goal: str, *, workspace: str) -> str:
         "2. Ordered steps\n"
         "3. Out of scope\n"
         "4. Verification commands or checks\n"
+        "5. Post-action reconciliation commands for external side effects\n"
+        f"{production_contract}"
         "Reply with ONLY the markdown plan body."
     )
     text = (await llm(prompt)).strip()
@@ -311,12 +336,21 @@ async def run_verifier(
     votes: list[str] = []
     yes = 0
     for i in range(n):
+        production_check = ""
+        if is_production_workflow(goal + "\n" + plan_text):
+            production_check = (
+                "\nTreat the external result as unmet unless the evidence "
+                "demonstrates it directly. A passing unit test or process exit code "
+                "alone does not prove remote reconciliation, the intended external "
+                "state, rollback safety, or task-specific constraints.\n"
+            )
         prompt = (
             f"You are GOAL VERIFIER skeptic #{i + 1}/{n}.\n"
             "Decide if the goal success criteria are met based on evidence.\n"
             'Reply with JSON only: {"achieved": true|false, "reason": "..."}\n\n'
             f"Goal:\n{goal}\n\nSuccess contract (plan):\n{plan_text[:5000]}\n\n"
             f"Evidence:\n{evidence[:6000]}\n"
+            f"{production_check}"
         )
         try:
             raw = (await llm(prompt)).strip()

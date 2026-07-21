@@ -146,7 +146,11 @@ class LLMProvider(ABC):
         on_chunk: OnChunkCallback = None,
         cancel_event: asyncio.Event | None = None,
         tools: list[NativeToolSchema] | None = None,
+        *,
+        session_id: str | None = None,
+        on_first_token: Any | None = None,
     ) -> LLMResponse:
+        _ = session_id
         pass
 
     async def complete(
@@ -561,6 +565,42 @@ def _to_gemini_tools(schemas: list[NativeToolSchema]) -> list[dict[str, Any]]:
             decl["parameters"]["required"] = required
         declarations.append(decl)
     return [{"function_declarations": declarations}]
+
+
+def _hashed_session_key(session_id: str) -> str:
+    """Stable opaque key derived from a logical session identity."""
+    import hashlib
+
+    digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:32]
+    return f"claw-{digest}"
+
+
+def _openai_affinity(base_url: str | None, session_id: str | None) -> dict[str, Any]:
+    """OpenAI prompt_cache_key + sticky headers; OpenRouter session header."""
+    if not session_id:
+        return {}
+    key = _hashed_session_key(session_id)
+    lower = (base_url or "https://api.openai.com/v1").lower()
+    if "api.openai.com" in lower:
+        return {
+            "prompt_cache_key": key,
+            "extra_headers": {
+                "session_id": key,
+                "x-client-request-id": key,
+            },
+        }
+    if "openrouter.ai" in lower:
+        return {"extra_headers": {"x-session-id": key}}
+    return {}
+
+
+def _fire_first_token(cb: Any) -> None:
+    if cb is None:
+        return
+    try:
+        cb()
+    except Exception:
+        pass
 
 
 def _openai_cached_tokens(usage: Any) -> int:
@@ -1183,6 +1223,9 @@ class OpenAIProvider(LLMProvider):
         on_chunk: OnChunkCallback = None,
         cancel_event: asyncio.Event | None = None,
         tools: list[NativeToolSchema] | None = None,
+        *,
+        session_id: str | None = None,
+        on_first_token: Any | None = None,
     ) -> LLMResponse:
         formatted = _sanitize_openai_tool_pairs(_openai_chat_messages(messages))
         oai_tools = _to_openai_tools(tools) if tools else None
@@ -1196,13 +1239,41 @@ class OpenAIProvider(LLMProvider):
             _bkey = "openai"
             _bkey_resp = "openai-responses"
 
+        return await self._chat_dispatch(
+            formatted,
+            on_chunk,
+            cancel_event,
+            oai_tools,
+            _bkey,
+            _bkey_resp,
+            session_id=session_id,
+            on_first_token=on_first_token,
+        )
+
+    async def _chat_dispatch(
+        self,
+        formatted: list[dict[str, Any]],
+        on_chunk: OnChunkCallback,
+        cancel_event: asyncio.Event | None,
+        oai_tools: list[dict[str, Any]] | None,
+        _bkey: str,
+        _bkey_resp: str,
+        *,
+        session_id: str | None = None,
+        on_first_token: Any | None = None,
+    ) -> LLMResponse:
         if self._should_use_responses(bool(oai_tools)):
             try:
                 # Always use the streaming collector — including non-stream
                 # callers. ``_request_once_responses`` already delegates there;
                 # wrapping it in ``_with_retry`` multiplied attempts (4×4=16).
                 return await self._stream_with_retry_responses(
-                    formatted, on_chunk, cancel_event, oai_tools,
+                    formatted,
+                    on_chunk,
+                    cancel_event,
+                    oai_tools,
+                    session_id=session_id,
+                    on_first_token=on_first_token,
                 )
             except Exception as exc:
                 if (
@@ -1221,15 +1292,24 @@ class OpenAIProvider(LLMProvider):
         if not on_chunk:
             return await _with_retry(
                 "openai",
-                lambda: self._request_once(formatted, oai_tools),
+                lambda: self._request_once(formatted, oai_tools, session_id=session_id),
                 policy=getattr(self, "retry_policy", None),
                 breaker_tag=_bkey,
             )
-        return await self._stream_with_retry(formatted, on_chunk, cancel_event, oai_tools)
+        return await self._stream_with_retry(
+            formatted,
+            on_chunk,
+            cancel_event,
+            oai_tools,
+            session_id=session_id,
+            on_first_token=on_first_token,
+        )
 
     async def _request_once(
         self, messages: list[dict[str, Any]],
         oai_tools: list[dict[str, Any]] | None = None,
+        *,
+        session_id: str | None = None,
     ) -> LLMResponse:
         kwargs: dict[str, Any] = {
             "model": self.model,
@@ -1253,7 +1333,13 @@ class OpenAIProvider(LLMProvider):
             has_tools=bool(oai_tools),
             preferred=self._reasoning_effort,
         )
-        resp = await self.client.chat.completions.create(**kwargs)
+        affinity = _openai_affinity(self._base_url, session_id)
+        if affinity.get("prompt_cache_key"):
+            kwargs["prompt_cache_key"] = affinity["prompt_cache_key"]
+        create_kwargs: dict[str, Any] = dict(kwargs)
+        if affinity.get("extra_headers"):
+            create_kwargs["extra_headers"] = affinity["extra_headers"]
+        resp = await self.client.chat.completions.create(**create_kwargs)
         _prompt_tokens = (resp.usage.prompt_tokens or 0) if resp.usage else 0
         _cached_tokens = _openai_cached_tokens(resp.usage)
         if not resp.choices:
@@ -1281,6 +1367,7 @@ class OpenAIProvider(LLMProvider):
         oai_tools: list[dict[str, Any]] | None,
         *,
         stream: bool = False,
+        session_id: str | None = None,
     ) -> dict[str, Any]:
         instructions, input_items = _messages_to_responses_input(messages)
         kwargs: dict[str, Any] = {
@@ -1306,12 +1393,20 @@ class OpenAIProvider(LLMProvider):
         _apply_responses_reasoning(kwargs, preferred=self._reasoning_effort)
         if stream:
             kwargs["stream"] = True
+        affinity = _openai_affinity(self._base_url, session_id)
+        if affinity.get("prompt_cache_key"):
+            kwargs["prompt_cache_key"] = affinity["prompt_cache_key"]
+        if affinity.get("extra_headers"):
+            kwargs["extra_headers"] = affinity["extra_headers"]
         return kwargs
 
     async def _request_once_responses(
         self,
         messages: list[dict[str, Any]],
         oai_tools: list[dict[str, Any]] | None = None,
+        *,
+        session_id: str | None = None,
+        on_first_token: Any | None = None,
     ) -> LLMResponse:
         # Some OpenAI-compatible gateways (Codex Responses proxies) ignore
         # stream=false and return raw SSE text the SDK cannot parse. Always
@@ -1321,6 +1416,8 @@ class OpenAIProvider(LLMProvider):
             on_chunk=None,
             cancel_event=None,
             oai_tools=oai_tools,
+            session_id=session_id,
+            on_first_token=on_first_token,
         )
 
     async def _stream_with_retry_responses(
@@ -1329,6 +1426,9 @@ class OpenAIProvider(LLMProvider):
         on_chunk: OnChunkCallback = None,
         cancel_event: asyncio.Event | None = None,
         oai_tools: list[dict[str, Any]] | None = None,
+        *,
+        session_id: str | None = None,
+        on_first_token: Any | None = None,
     ) -> LLMResponse:
         last_error: BaseException | None = None
         breaker = _get_stream_breaker(
@@ -1363,6 +1463,7 @@ class OpenAIProvider(LLMProvider):
             final_tokens = 0
             final_prompt_tokens = 0
             final_cached_tokens = 0
+            first_token_fired = False
             # Key by call_id when present so a duplicated/colliding output_index
             # cannot merge two tool calls' arguments. Fall back to idx:* keys.
             tools_accumulation: dict[str, dict[str, Any]] = {}
@@ -1420,7 +1521,9 @@ class OpenAIProvider(LLMProvider):
                 return calls or None
 
             try:
-                kwargs = self._responses_kwargs(messages, oai_tools, stream=True)
+                kwargs = self._responses_kwargs(
+                    messages, oai_tools, stream=True, session_id=session_id
+                )
                 stream = await self.client.responses.create(**kwargs)
 
                 async for event in _stall_guarded_stream(stream, _CHUNK_STALL_S):
@@ -1445,12 +1548,18 @@ class OpenAIProvider(LLMProvider):
                         if etype == "response.output_text.delta":
                             text = getattr(event, "delta", None) or ""
                             if text:
+                                if not first_token_fired:
+                                    first_token_fired = True
+                                    _fire_first_token(on_first_token)
                                 chunks.append(text)
                                 await _invoke_callback(on_chunk, text)
                         elif etype == "response.output_item.added":
                             item = getattr(event, "item", None)
                             idx = int(getattr(event, "output_index", 0) or 0)
                             if item is not None and getattr(item, "type", None) == "function_call":
+                                if not first_token_fired:
+                                    first_token_fired = True
+                                    _fire_first_token(on_first_token)
                                 _remember_tool(
                                     idx,
                                     call_id=getattr(item, "call_id", "")
@@ -1463,6 +1572,9 @@ class OpenAIProvider(LLMProvider):
                         elif etype == "response.function_call_arguments.delta":
                             idx = int(getattr(event, "output_index", 0) or 0)
                             delta = getattr(event, "delta", None) or ""
+                            if delta and not first_token_fired:
+                                first_token_fired = True
+                                _fire_first_token(on_first_token)
                             _remember_tool(idx, arguments=delta, replace_args=False)
                         elif etype == "response.output_item.done":
                             item = getattr(event, "item", None)
@@ -1485,9 +1597,15 @@ class OpenAIProvider(LLMProvider):
                                 final_prompt_tokens = prompt
                                 final_cached_tokens = cached
                                 if _t and not chunks:
+                                    if not first_token_fired:
+                                        first_token_fired = True
+                                        _fire_first_token(on_first_token)
                                     chunks.append(_t)
                                     await _invoke_callback(on_chunk, _t)
                                 if _c and not tools_accumulation:
+                                    if not first_token_fired:
+                                        first_token_fired = True
+                                        _fire_first_token(on_first_token)
                                     for i, call in enumerate(_c):
                                         _remember_tool(
                                             i,
@@ -1551,6 +1669,9 @@ class OpenAIProvider(LLMProvider):
         on_chunk: OnChunkCallback,
         cancel_event: asyncio.Event | None,
         oai_tools: list[dict[str, Any]] | None = None,
+        *,
+        session_id: str | None = None,
+        on_first_token: Any | None = None,
     ) -> LLMResponse:
         last_error: BaseException | None = None
         breaker = _get_stream_breaker(
@@ -1617,7 +1738,16 @@ class OpenAIProvider(LLMProvider):
                     has_tools=bool(oai_tools),
                     preferred=self._reasoning_effort,
                 )
-                stream = await self.client.chat.completions.create(**kwargs)
+                affinity = _openai_affinity(
+                    self._base_url, session_id
+                )
+                if affinity.get("prompt_cache_key"):
+                    kwargs["prompt_cache_key"] = affinity["prompt_cache_key"]
+                create_kwargs = dict(kwargs)
+                if affinity.get("extra_headers"):
+                    create_kwargs["extra_headers"] = affinity["extra_headers"]
+                stream = await self.client.chat.completions.create(**create_kwargs)
+                first_token_fired = False
 
                 async for chunk in _stall_guarded_stream(stream, _CHUNK_STALL_S):
                     if cancel_event and cancel_event.is_set():
@@ -1627,6 +1757,7 @@ class OpenAIProvider(LLMProvider):
                             model=self.model,
                             tokens_used=final_tokens,
                             prompt_tokens=final_prompt_tokens,
+                            cache_read_tokens=final_cached_tokens,
                             partial=True,
                             tool_calls=_accumulated_calls(),
                         )
@@ -1636,10 +1767,16 @@ class OpenAIProvider(LLMProvider):
                             delta = chunk.choices[0].delta
                             if delta.content:
                                 text = delta.content
+                                if not first_token_fired:
+                                    first_token_fired = True
+                                    _fire_first_token(on_first_token)
                                 chunks.append(text)
                                 await _invoke_callback(on_chunk, text)
                             
                             if getattr(delta, "tool_calls", None):
+                                if not first_token_fired:
+                                    first_token_fired = True
+                                    _fire_first_token(on_first_token)
                                 for tc in delta.tool_calls:
                                     idx = tc.index
                                     if idx not in tools_accumulation:
@@ -2076,7 +2213,11 @@ class GeminiProvider(LLMProvider):
         on_chunk: OnChunkCallback = None,
         cancel_event: asyncio.Event | None = None,
         tools: list[NativeToolSchema] | None = None,
+        *,
+        session_id: str | None = None,
+        on_first_token: Any | None = None,
     ) -> LLMResponse:
+        _ = session_id  # Gemini has no OpenAI-style prompt_cache_key header.
         # Build a toolCallId → toolName lookup from all assistant messages
         tc_id_to_name: dict[str, str] = {}
         for m in messages:
@@ -2166,7 +2307,11 @@ class GeminiProvider(LLMProvider):
                     breaker_tag=_bk("gemini", model=self.model),
                 )
             return await self._stream_with_retry(
-                contents, gemini_config, on_chunk, cancel_event,
+                contents,
+                gemini_config,
+                on_chunk,
+                cancel_event,
+                on_first_token=on_first_token,
             )
 
         try:
@@ -2241,6 +2386,9 @@ class GeminiProvider(LLMProvider):
         _um = resp.usage_metadata
         _prompt_tokens = (getattr(_um, "prompt_token_count", 0) or 0) if _um else 0
         _output_tokens = (getattr(_um, "candidates_token_count", 0) or 0) if _um else 0
+        _cache_read = (
+            int(getattr(_um, "cached_content_token_count", 0) or 0) if _um else 0
+        )
         return LLMResponse(
             content=extracted_text,
             model=self.model,
@@ -2248,6 +2396,7 @@ class GeminiProvider(LLMProvider):
             # record output-only (and no prompt), garbling usage accounting.
             tokens_used=_prompt_tokens + _output_tokens,
             prompt_tokens=_prompt_tokens,
+            cache_read_tokens=_cache_read,
             tool_calls=fn_calls,
             gemini_parts=raw_parts,
         )
@@ -2258,6 +2407,8 @@ class GeminiProvider(LLMProvider):
         gemini_config: types.GenerateContentConfig,
         on_chunk: OnChunkCallback,
         cancel_event: asyncio.Event | None,
+        *,
+        on_first_token: Any | None = None,
     ) -> LLMResponse:
         last_error: BaseException | None = None
         breaker = _get_stream_breaker("gemini", model=self.model)
@@ -2289,9 +2440,11 @@ class GeminiProvider(LLMProvider):
             chunks: list[str] = []
             final_tokens = 0
             final_prompt_tokens = 0
+            final_cache_read = 0
             fn_calls: list[NativeToolCall] = []
             all_stream_parts: list[Any] = []
             last_finish_reason: Any = None
+            first_token_fired = False
 
             try:
                 stream = await self.client.aio.models.generate_content_stream(
@@ -2307,6 +2460,7 @@ class GeminiProvider(LLMProvider):
                             model=self.model,
                             tokens_used=final_tokens,
                             prompt_tokens=final_prompt_tokens,
+                            cache_read_tokens=final_cache_read,
                             partial=True,
                             tool_calls=fn_calls if fn_calls else None,
                             gemini_parts=_stamp_function_call_ids(
@@ -2327,6 +2481,9 @@ class GeminiProvider(LLMProvider):
                                             _chunk_text_parts.append(_text)
                         if _chunk_text_parts:
                             _joined = "".join(_chunk_text_parts)
+                            if not first_token_fired:
+                                first_token_fired = True
+                                _fire_first_token(on_first_token)
                             chunks.append(_joined)
                             await _invoke_callback(on_chunk, _joined)
                         if hasattr(chunk, "candidates") and chunk.candidates:
@@ -2341,6 +2498,9 @@ class GeminiProvider(LLMProvider):
                                         fc = getattr(p, "function_call", None)
                                         if fc:
                                             import uuid
+                                            if not first_token_fired:
+                                                first_token_fired = True
+                                                _fire_first_token(on_first_token)
                                             fc_id = getattr(fc, "id", None) or f"gemini_{uuid.uuid4().hex[:8]}"
                                             fn_calls.append(NativeToolCall(
                                                 tool_name=fc.name,
@@ -2352,6 +2512,9 @@ class GeminiProvider(LLMProvider):
                             final_prompt_tokens = getattr(_um, "prompt_token_count", 0) or 0
                             final_tokens = final_prompt_tokens + (
                                 getattr(_um, "candidates_token_count", 0) or 0
+                            )
+                            final_cache_read = int(
+                                getattr(_um, "cached_content_token_count", 0) or 0
                             )
                     except Exception:
                         pass  # malformed chunk — skip
@@ -2374,6 +2537,7 @@ class GeminiProvider(LLMProvider):
                     model=self.model,
                     tokens_used=final_tokens,
                     prompt_tokens=final_prompt_tokens,
+                    cache_read_tokens=final_cache_read,
                     tool_calls=fn_calls if fn_calls else None,
                     gemini_parts=_stamp_function_call_ids(
                         _serialize_gemini_parts(all_stream_parts),
@@ -2533,7 +2697,11 @@ class AnthropicProvider(LLMProvider):
         on_chunk: OnChunkCallback = None,
         cancel_event: asyncio.Event | None = None,
         tools: list[NativeToolSchema] | None = None,
+        *,
+        session_id: str | None = None,
+        on_first_token: Any | None = None,
     ) -> LLMResponse:
+        _ = session_id
         system_parts = []
         api_messages = []
 
@@ -2655,7 +2823,12 @@ class AnthropicProvider(LLMProvider):
                 policy=getattr(self, "retry_policy", None),
                 breaker_tag=_bk("anthropic", model=self.model),
             )
-        return await self._stream_with_retry(kwargs, on_chunk, cancel_event)
+        return await self._stream_with_retry(
+            kwargs,
+            on_chunk,
+            cancel_event,
+            on_first_token=on_first_token,
+        )
 
     async def _request_once(self, kwargs: dict[str, Any]) -> LLMResponse:
         resp = await self.client.messages.create(**kwargs)
@@ -2672,14 +2845,18 @@ class AnthropicProvider(LLMProvider):
                 ))
 
         usage = resp.usage
+        uncached = getattr(usage, "input_tokens", 0) or 0
+        cache_creation = getattr(usage, "cache_creation_input_tokens", 0) or 0
+        cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+        prompt_total = uncached + cache_creation + cache_read
         return LLMResponse(
             content="".join(text_parts),
             model=self.model,
-            tokens_used=(usage.input_tokens + usage.output_tokens) if usage else 0,
+            tokens_used=(prompt_total + usage.output_tokens) if usage else 0,
             tool_calls=tool_calls if tool_calls else None,
-            cache_creation_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0,
-            cache_read_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
-            prompt_tokens=getattr(usage, "input_tokens", 0) or 0,
+            cache_creation_tokens=cache_creation,
+            cache_read_tokens=cache_read,
+            prompt_tokens=prompt_total,
         )
 
     async def _stream_with_retry(
@@ -2687,6 +2864,8 @@ class AnthropicProvider(LLMProvider):
         kwargs: dict[str, Any],
         on_chunk: OnChunkCallback,
         cancel_event: asyncio.Event | None,
+        *,
+        on_first_token: Any | None = None,
     ) -> LLMResponse:
         last_error: BaseException | None = None
         breaker = _get_stream_breaker(
@@ -2722,6 +2901,7 @@ class AnthropicProvider(LLMProvider):
             cache_creation = 0
             cache_read = 0
             prompt_tokens = 0
+            first_token_fired = False
 
             try:
                 async with self.client.messages.stream(**kwargs) as stream:
@@ -2729,8 +2909,8 @@ class AnthropicProvider(LLMProvider):
                         if cancel_event and cancel_event.is_set():
                             return LLMResponse(
                                 content="".join(chunks), model=self.model,
-                                tokens_used=prompt_tokens + output_tokens,
-                                prompt_tokens=prompt_tokens,
+                                tokens_used=prompt_tokens + cache_creation + cache_read + output_tokens,
+                                prompt_tokens=prompt_tokens + cache_creation + cache_read,
                                 partial=True,
                                 tool_calls=tool_calls if tool_calls else None,
                                 cache_creation_tokens=cache_creation,
@@ -2746,6 +2926,9 @@ class AnthropicProvider(LLMProvider):
                         elif event.type == "content_block_start":
                             if hasattr(event.content_block, "type"):
                                 if event.content_block.type == "tool_use":
+                                    if not first_token_fired:
+                                        first_token_fired = True
+                                        _fire_first_token(on_first_token)
                                     current_tool = {
                                         "id": event.content_block.id,
                                         "name": event.content_block.name,
@@ -2753,9 +2936,15 @@ class AnthropicProvider(LLMProvider):
                                     }
                         elif event.type == "content_block_delta":
                             if hasattr(event.delta, "text"):
+                                if not first_token_fired:
+                                    first_token_fired = True
+                                    _fire_first_token(on_first_token)
                                 chunks.append(event.delta.text)
                                 await _invoke_callback(on_chunk, event.delta.text)
                             elif hasattr(event.delta, "partial_json") and current_tool:
+                                if not first_token_fired:
+                                    first_token_fired = True
+                                    _fire_first_token(on_first_token)
                                 current_tool["input_json"] += event.delta.partial_json
                         elif event.type == "content_block_stop":
                             if current_tool:
@@ -2775,11 +2964,11 @@ class AnthropicProvider(LLMProvider):
                     model=self.model,
                     # input+output, matching the non-streaming path (it used to
                     # report output-only, understating usage by the prompt size).
-                    tokens_used=prompt_tokens + output_tokens,
+                    tokens_used=prompt_tokens + cache_creation + cache_read + output_tokens,
                     tool_calls=tool_calls if tool_calls else None,
                     cache_creation_tokens=cache_creation,
                     cache_read_tokens=cache_read,
-                    prompt_tokens=prompt_tokens,
+                    prompt_tokens=prompt_tokens + cache_creation + cache_read,
                 )
 
             except Exception as exc:
@@ -2798,8 +2987,8 @@ class AnthropicProvider(LLMProvider):
                 if chunks or tool_calls:
                     return LLMResponse(
                         content="".join(chunks), model=self.model,
-                        tokens_used=prompt_tokens + output_tokens,
-                        prompt_tokens=prompt_tokens,
+                        tokens_used=prompt_tokens + cache_creation + cache_read + output_tokens,
+                        prompt_tokens=prompt_tokens + cache_creation + cache_read,
                         partial=True,
                         tool_calls=tool_calls if tool_calls else None,
                         cache_creation_tokens=cache_creation,
@@ -2903,6 +3092,47 @@ class BedrockProvider(AnthropicProvider):
             or (config.anthropic_model or "").strip()
             or "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
         )
+        self._max_tokens = config.max_tokens
+        self._temperature = config.temperature
+
+
+class MantleAnthropicProvider(AnthropicProvider):
+    """Claude on Bedrock Mantle via ``AsyncAnthropicBedrockMantle``.
+
+    Plain ``AsyncAnthropic`` sends ``X-Api-Key``; Mantle expects
+    ``Authorization: Bearer <Bedrock API key>`` (same as OpenAI Mantle chat).
+    Official AWS samples use ``AnthropicBedrockMantle`` / async twin.
+    """
+
+    name = "anthropic"
+
+    def __init__(self, config: EngineConfig):
+        if not _HAS_ANTHROPIC:
+            raise ImportError(
+                "anthropic package not installed. Install with: pip install clawagents[anthropic]"
+            )
+        key = (config.anthropic_api_key or config.openai_api_key or "").strip()
+        base = (getattr(config, "anthropic_base_url", None) or "").strip().rstrip("/")
+        if not base and config.openai_base_url:
+            base = mantle_anthropic_base_url(config.openai_base_url)
+        region = _mantle_region_from_url(base or config.openai_base_url)
+        mantle_cls = getattr(_anthropic_mod, "AsyncAnthropicBedrockMantle", None)
+        if mantle_cls is not None:
+            client_kwargs: dict[str, Any] = {"aws_region": region}
+            if key:
+                client_kwargs["api_key"] = key
+            if base:
+                client_kwargs["base_url"] = base
+            self.client = mantle_cls(**client_kwargs)
+        else:
+            # Older anthropic: Bearer via auth_token (avoid X-Api-Key).
+            client_kwargs = {}
+            if key:
+                client_kwargs["auth_token"] = key
+            if base:
+                client_kwargs["base_url"] = base
+            self.client = _anthropic_mod.AsyncAnthropic(**client_kwargs)
+        self.model = (config.anthropic_model or "").strip()
         self._max_tokens = config.max_tokens
         self._temperature = config.temperature
 
@@ -3025,7 +3255,11 @@ class BedrockConverseProvider(LLMProvider):
         on_chunk: OnChunkCallback = None,
         cancel_event: asyncio.Event | None = None,
         tools: list[NativeToolSchema] | None = None,
+        *,
+        session_id: str | None = None,
+        on_first_token: Any | None = None,
     ) -> LLMResponse:
+        _ = session_id
         system_parts: list[str] = []
         converse_messages: list[dict[str, Any]] = []
         for m in messages:
@@ -3108,16 +3342,24 @@ class BedrockConverseProvider(LLMProvider):
                     )
                 )
         content = "".join(texts)
+        if content or tool_calls:
+            _fire_first_token(on_first_token)
         if on_chunk and content:
             await on_chunk(content)
         usage = (raw or {}).get("usage") or {}
+        prompt_tokens = int(usage.get("inputTokens") or 0)
+        cache_read = int(usage.get("cacheReadInputTokens") or 0)
+        cache_creation = int(usage.get("cacheWriteInputTokens") or 0)
         tokens = int(usage.get("totalTokens") or 0) or (
-            int(usage.get("inputTokens") or 0) + int(usage.get("outputTokens") or 0)
+            prompt_tokens + int(usage.get("outputTokens") or 0)
         )
         return LLMResponse(
             content=content,
             model=self.model,
             tokens_used=tokens,
+            prompt_tokens=prompt_tokens,
+            cache_read_tokens=cache_read,
+            cache_creation_tokens=cache_creation,
             tool_calls=tool_calls or None,
         )
 
@@ -3158,10 +3400,26 @@ def mantle_anthropic_base_url(url: str) -> str:
     return f"{origin}/anthropic" if origin else ""
 
 
+def _mantle_region_from_url(url: str | None) -> str:
+    """Extract ``us-east-1`` from ``https://bedrock-mantle.us-east-1.api.aws/…``."""
+    from urllib.parse import urlparse
+
+    host = (urlparse((url or "").strip()).hostname or "").lower()
+    parts = host.split(".")
+    if len(parts) >= 4 and parts[0] == "bedrock-mantle":
+        return parts[1]
+    return "us-east-1"
+
+
 def mantle_openai_base_url(url: str) -> str:
-    """Mantle OpenAI Responses root (client appends ``/v1/responses``)."""
+    """Mantle OpenAI frontier root (SDK appends ``/responses`` → ``…/openai/v1/responses``).
+
+    AWS docs require ``https://bedrock-mantle.{region}.api.aws/openai/v1``.
+    Passing only ``…/openai`` makes the OpenAI client call ``…/openai/responses``
+    (missing ``/v1``) and Mantle returns HTTP 404.
+    """
     origin = _mantle_origin(url)
-    return f"{origin}/openai" if origin else ""
+    return f"{origin}/openai/v1" if origin else ""
 
 
 def is_mantle_anthropic_model(model: str) -> bool:
@@ -3190,12 +3448,37 @@ def is_mantle_openai_responses_model(model: str) -> bool:
     return any(token in m for token in ("gpt-5.3", "gpt-5.4", "gpt-5.5", "gpt-5.6"))
 
 
+def is_mantle_xai_model(model: str) -> bool:
+    """xAI Grok IDs on Mantle that must use the ``/openai/v1`` frontier path.
+
+    Hitting plain ``…/v1/chat/completions`` returns
+    ``Berm is not enabled for this account`` (access_denied). Keep the catalog
+    id as ``xai.grok-*`` (do not rewrite to ``openai.xai.*``).
+    """
+    from clawagents.providers.model_classify import (
+        parse_model_ref,
+        strip_bedrock_geo_prefix,
+    )
+
+    m = parse_model_ref(model or "").bare_id.strip().lower()
+    m = strip_bedrock_geo_prefix(m).lower()
+    return m.startswith("xai.") or m.startswith("grok-")
+
+
+def needs_mantle_openai_base(model: str) -> bool:
+    """True when Mantle must rewrite ``…/v1`` → ``…/openai`` for this model."""
+    return is_mantle_openai_responses_model(model) or is_mantle_xai_model(model)
+
+
 def _mantle_openai_model_id(model: str) -> str:
-    """Ensure Mantle Responses models use the ``openai.`` catalog prefix."""
+    """Ensure Mantle OpenAI-catalog Responses models use the ``openai.`` prefix.
+
+    xAI frontier models keep their ``xai.`` catalog ids.
+    """
     m = (model or "").strip()
     if not m:
         return m
-    if m.lower().startswith("openai."):
+    if m.lower().startswith("openai.") or is_mantle_xai_model(m):
         return m
     if is_mantle_openai_responses_model(m):
         return f"openai.{m}"
@@ -3258,7 +3541,8 @@ def create_provider(
         return BedrockConverseProvider(config)
 
     # ── Mantle (OneHUB): multi-path host, not one OpenAI /v1 for all ───
-    # anthropic.* → /anthropic/v1/messages; openai.gpt-5.* → /openai/v1/responses;
+    # anthropic.* → /anthropic/v1/messages;
+    # openai.gpt-5.* / xai.grok-* → /openai/v1 (responses);
     # chat-ok catalog (gpt-oss, deepseek, qwen, …) → /v1/chat/completions.
     if config.openai_base_url and _is_mantle_url(config.openai_base_url):
         mantle_key = config.openai_api_key or config.anthropic_api_key
@@ -3267,8 +3551,9 @@ def create_provider(
                 config.anthropic_api_key = mantle_key
             config.anthropic_model = model_name
             config.anthropic_base_url = mantle_anthropic_base_url(config.openai_base_url)
-            return AnthropicProvider(config)
-        if is_mantle_openai_responses_model(model_name):
+            # Must use Mantle client (Bearer), not plain AsyncAnthropic (X-Api-Key).
+            return MantleAnthropicProvider(config)
+        if needs_mantle_openai_base(model_name):
             rewritten = mantle_openai_base_url(config.openai_base_url)
             if rewritten:
                 config.openai_base_url = rewritten
@@ -3276,10 +3561,11 @@ def create_provider(
                 config.openai_api_key = mantle_key
             if not config.openai_api_key:
                 config.openai_api_key = "bedrock"
-            # These models reject /v1/chat/completions even when wire_api was
-            # saved as chat_completions from an older Mantle default.
+            # Frontier Mantle models reject plain …/v1 (Berm access_denied for
+            # xAI; 404/validation for GPT-5.x) even when wire_api was saved as
+            # chat_completions from an older Mantle default.
             config.openai_wire_api = "responses"
-            # Mantle catalog requires ``openai.gpt-5.6-*`` (bare ids 404 /v1).
+            # GPT-5.x needs ``openai.`` prefix; xAI keeps ``xai.grok-*``.
             config.openai_model = _mantle_openai_model_id(model_name)
             return OpenAIProvider(config)
         # Chat-completions catalog: keep …/v1 (or normalize to it).

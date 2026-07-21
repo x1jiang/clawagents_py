@@ -216,6 +216,7 @@ class InMemoryBackend:
         timeout: int | None = None,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
+        **_kwargs: Any,
     ) -> ExecResult:
         result = self._exec_stub(command, timeout=timeout, cwd=cwd, env=env)
         if hasattr(result, "__await__"):

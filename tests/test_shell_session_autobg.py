@@ -193,6 +193,49 @@ async def test_execute_auto_background_on_timeout(tmp_path, monkeypatch: pytest.
     assert "DONE_AUTO_BG" in out.output
 
 
+@pytest.mark.asyncio
+async def test_execute_profile_backend_auto_backgrounds_on_timeout(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("CLAW_FEATURE_EXECUTE_SHELL_SESSION", "0")
+    monkeypatch.setenv("CLAW_FEATURE_EXECUTE_AUTO_BACKGROUND", "1")
+    monkeypatch.setenv("CLAW_FEATURE_EXECUTE_BACKGROUND", "1")
+    monkeypatch.setenv("CLAW_FEATURE_RTK_WRAP", "0")
+    from clawagents.config import features as feat
+
+    feat._resolved = None  # type: ignore[attr-defined]
+
+    from clawagents.sandbox.local import LocalBackend
+    from clawagents.tools.exec import ExecTool
+
+    class ProfileStub:
+        kind = "profile:workspace:local"
+
+        def __init__(self):
+            self._inner = LocalBackend(root=str(tmp_path))
+            self.cwd = str(tmp_path)
+            self.profile_warnings = []
+            self.wrapped = False
+
+        def wrap_command(self, command, cwd=None):
+            self.wrapped = True
+            return command
+
+    class Ctx:
+        pass
+
+    backend = ProfileStub()
+    result = await ExecTool(backend).execute(
+        {"command": "sleep 1", "timeout": 100},
+        run_context=Ctx(),
+    )
+
+    assert result.success, result.error
+    payload = json.loads(result.output[result.output.find("{") :])
+    assert payload["auto_background_on_timeout"] is True
+    assert backend.wrapped is True
+
+
 def test_edit_file_unicode_hint():
     from clawagents.tools.filesystem import _nearest_edit_hint
 
@@ -317,3 +360,100 @@ async def test_pty_start_uses_shell_session_cwd(tmp_path, monkeypatch: pytest.Mo
     )
     assert r.success, r.error
     assert str(tmp_path) in (r.output or "") or "session_id=" in (r.output or "")
+
+
+@pytest.mark.asyncio
+async def test_pty_retains_screen_when_command_exits_during_startup(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("CLAW_FEATURE_PTY_SESSIONS", "1")
+    from clawagents.config import features as feat
+
+    feat._resolved = None  # type: ignore[attr-defined]
+
+    from clawagents.tools.pty_session import create_pty_tools
+
+    try:
+        import pexpect  # noqa: F401
+        import pyte  # noqa: F401
+    except ImportError:
+        pytest.skip("clawagents[pty] not installed")
+
+    tools = create_pty_tools()
+    start = next(t for t in tools if t.name == "pty_start")
+    screen = next(t for t in tools if t.name == "pty_screen")
+    started = await start.execute(
+        {"command": "sh -c 'echo PTY_BOOT_FAILED; exit 7'", "cwd": str(tmp_path)}
+    )
+
+    assert started.success is False
+    assert "PTY command exited during startup" in (started.error or "")
+    assert "PTY_BOOT_FAILED" in (started.output or "")
+    session_id = str(started.output).split("session_id=", 1)[1].splitlines()[0]
+
+    retained = await screen.execute({"session_id": session_id})
+    assert retained.success is True
+    assert "alive=False" in retained.output
+    assert "exit_code=7" in retained.output
+    assert "PTY_BOOT_FAILED" in retained.output
+
+
+@pytest.mark.asyncio
+async def test_pty_completed_session_retention_without_optional_runtime(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("CLAW_FEATURE_PTY_SESSIONS", "1")
+    from clawagents.config import features as feat
+    from clawagents.tools import pty_session as module
+
+    feat._resolved = None  # type: ignore[attr-defined]
+
+    class Child:
+        exitstatus = 7
+        signalstatus = None
+
+        @staticmethod
+        def isalive():
+            return False
+
+    class CompletedSession:
+        def __init__(self, *args, **kwargs):
+            self.session_id = "pty_completed_test"
+            self._last_used = module.time.time()
+            self._ended = True
+            self._child = Child()
+
+        @staticmethod
+        def screen_text(include_empty=False):
+            return "PTY_BOOT_FAILED"
+
+        @staticmethod
+        def cursor():
+            return (1, 1)
+
+        def status(self):
+            return {
+                "alive": False,
+                "exit_code": 7,
+                "signal": None,
+            }
+
+        def stop(self):
+            self._ended = True
+
+    monkeypatch.setattr(module, "_pty_available", lambda: True)
+    monkeypatch.setattr(module, "PtySession", CompletedSession)
+    module._SESSIONS.clear()
+    tools = module.create_pty_tools()
+    start = next(t for t in tools if t.name == "pty_start")
+    screen = next(t for t in tools if t.name == "pty_screen")
+
+    started = await start.execute({"command": "ignored", "cwd": str(tmp_path)})
+    assert started.success is False
+    assert "PTY_BOOT_FAILED" in started.output
+
+    retained = await screen.execute({"session_id": "pty_completed_test"})
+    assert retained.success is True
+    assert "alive=False" in retained.output
+    assert "exit_code=7" in retained.output
+    module._SESSIONS.clear()

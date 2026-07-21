@@ -17,6 +17,19 @@ if TYPE_CHECKING:
     from clawagents.mcp.server import MCPServer, MCPToolDescriptor
 
 
+_BINARY_FILE_SUFFIXES = (
+    ".docx",
+    ".gif",
+    ".jpeg",
+    ".jpg",
+    ".pdf",
+    ".png",
+    ".webp",
+    ".xlsx",
+    ".zip",
+)
+
+
 def _normalize_input_schema(input_schema: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     """Convert an MCP-tool JSON-Schema ``inputSchema`` into clawagents' parameter dict.
 
@@ -74,7 +87,11 @@ def _stringify_call_result(result: Any) -> tuple[bool, str, Optional[str]]:
         parts.append(f"[{block_type} block]")
     output = "\n".join(parts)
     if is_error:
-        return False, output, output or "MCP tool reported isError=True"
+        return (
+            False,
+            output,
+            "MCP tool reported isError=True; see output for details",
+        )
     return True, output, None
 
 
@@ -101,8 +118,32 @@ class MCPBridgedTool:
         self.parameters: Dict[str, Dict[str, Any]] = _normalize_input_schema(descriptor.input_schema)
         self.server_name = server.name
         self.original_tool_name = descriptor.name
+        self.tool_group = "mcp"
+        normalized_server = str(server.name).strip().lower().replace("_", "-")
+        self.context_protection = (
+            normalized_server == "context-mode"
+            or descriptor.name.startswith("ctx_")
+        )
+        if self.context_protection and descriptor.name == "ctx_execute_file":
+            self.description += (
+                " Text files only: do not pass binary PDF, DOCX, images, or ZIP files. "
+                "For binary files, use ctx_execute and open the path inside the program, "
+                "or use the dedicated document/PDF tooling."
+            )
 
     async def execute(self, args: Dict[str, Any]) -> ToolResult:
+        if self.context_protection and self.original_tool_name == "ctx_execute_file":
+            path = args.get("path")
+            if isinstance(path, str) and path.lower().endswith(_BINARY_FILE_SUFFIXES):
+                return ToolResult(
+                    success=False,
+                    output="",
+                    error=(
+                        "ctx_execute_file accepts text files only. Use ctx_execute to open "
+                        "this binary file inside the program, or use the dedicated "
+                        "document/PDF tooling."
+                    ),
+                )
         try:
             raw = await self._server.invoke_tool(self.original_tool_name, args)
         except ImportError as exc:

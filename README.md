@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.20.18-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.20.45-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -21,9 +21,9 @@ This repo is the **Python framework** (`pip install clawagents`). Ready-made cli
 
 | Product | Latest | What it is | Link |
 |---------|--------|------------|------|
-| **ClawAgents Desktop** | **v0.2.4** | Native macOS app — project chats, file editor, SSH remotes, Settings (incl. AWS Bedrock), Developer ID signed + notarized | [Repo](https://github.com/x1jiang/clawagents-desktop) · [Download DMG](https://github.com/x1jiang/clawagents-desktop/releases/tag/v0.2.4) |
-| **ClawAgents for VS Code / Cursor** | **v1.0.55** | Editor extension — companion lockstep (context-mode / rtk), full caveman skill, chat, Bedrock | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Release + VSIX](https://github.com/x1jiang/clawagents-vscode/releases/tag/v1.0.55) |
-| **Python package** | **v6.20.18** | This library — seatbelt /dev/null + sandbox hints · `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/) · [Release](https://github.com/x1jiang/clawagents_py/releases) |
+| **ClawAgents Desktop** | **v0.4.25** | Native macOS app — project chats, file editor, SSH remotes, Settings (incl. AWS Bedrock), Developer ID signed + notarized | [Repo](https://github.com/x1jiang/clawagents-desktop) · [Download DMG](https://github.com/x1jiang/clawagents-desktop/releases/tag/v0.4.25) |
+| **ClawAgents for VS Code / Cursor** | **v1.0.136** | Editor extension — companion lockstep (context-mode / rtk), full caveman skill, chat, Bedrock | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Releases](https://github.com/x1jiang/clawagents-vscode/releases) |
+| **Python package** | **v6.20.45** | This library — Mantle Claude Bearer auth · `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/) · [Release](https://github.com/x1jiang/clawagents_py/releases) |
 | **TypeScript package** | **v6.12.13** | Node/TS sibling — `npm install git+https://github.com/x1jiang/clawagents.git` | [Repo](https://github.com/x1jiang/clawagents) |
 
 ## Installation
@@ -36,7 +36,21 @@ pip install -U 'clawagents[bedrock]'   # + Amazon Bedrock (Claude via IAM + Nova
 pip install -U 'clawagents[all]'       # All providers + tiktoken
 ```
 
-> **Version 6.20.18** — Seatbelt allows ``/dev/null``; clearer gcloud/home-config sandbox hints (July 2026).
+> **Version 6.20.45** — Mantle Claude via `AsyncAnthropicBedrockMantle` (Bearer) (July 2026).
+>
+> **Version 6.20.44** — Mantle frontier base is `…/openai/v1` (fixes GPT-5.x 404) (July 2026).
+>
+> **Version 6.20.43** — Mantle xAI Grok routes via `/openai/v1` (fixes Berm access_denied) (July 2026).
+>
+> **Version 6.20.42** — Lower-churn patch, sandbox, timeout, and PTY recovery (July 2026).
+>
+> **Version 6.20.41** — Resilient skill paging and actionable audit findings (July 2026).
+>
+> **Version 6.20.40** — Fail-closed external-action reconciliation contracts (July 2026).
+>
+> **Version 6.20.39** — Context Mode binary-input guard and concise MCP failures (July 2026).
+>
+> **Version 6.20.38** — Stable OpenAI prompt-cache affinity, incremental token ledger, TTFT/RSS telemetry, bounded exec head/tail (July 2026).
 >
 > **Version 6.20.8** — Artifact path containment + preserve raw tool output for retrieval (July 2026).
 
@@ -45,6 +59,48 @@ pip install -U 'clawagents[all]'       # All providers + tiktoken
 > **Version 6.19.0** — Companion lockstep (July 2026).
 
 > **Version 6.18.0** — Grok-inspired edit/execute harness (July 2026).
+
+### New In v6.20.45
+- Mantle Claude uses `AsyncAnthropicBedrockMantle` (Bearer token) instead of plain `AsyncAnthropic` (`X-Api-Key`)
+- Catalog routing matrix tests for chat / openai/v1 / anthropic messages families
+
+### New In v6.20.44
+- Mantle frontier rewrite uses `…/openai/v1` (not bare `…/openai`) so the OpenAI SDK hits `…/openai/v1/responses`
+- Clearer HTTP 404 recovery hint (wrong Mantle path or GPT-5.6 Sol region: us-east-1 / us-east-2 only)
+
+### New In v6.20.43
+- Route Mantle `xai.grok-*` through `…/openai` + Responses (plain `…/v1` chat returned Berm `access_denied`)
+- Keep catalog id `xai.grok-4.3` (do not rewrite to `openai.xai.*`)
+- Clearer recovery hint when Berm mis-route is detected
+
+### New In v6.20.42
+- Route ambiguous/stale patch failures toward refreshed single-hunk or hashline edits
+- Refuse unauthorized `unsandboxed=true` before execution and explain temporary private gcloud config
+- Auto-background timed-out local commands through default OS-sandbox profiles
+- Retain completed PTY screens and exit diagnostics instead of returning `unknown session_id`
+
+### New In v6.20.41
+- Treat repeated same-name `use_skill` calls as continuation pages instead of restarting the load
+- Explain when a tool is outside a skill boundary and will remain unavailable after loading
+- Classify nonzero `npm audit` reports as security findings without weakening their failed status
+- Keep deploy safeguards framework-generic and require reconciliation commands to be read-only
+
+### New In v6.20.40
+- Require approved pre-action verification and post-action reconciliation for external publish/deploy actions
+- Consume authorization before execution so failures, crashes, and timeouts cannot hide partial remote state
+- Block retries, mutations, and final completion until reconciliation succeeds
+- Keep external-action safeguards framework-generic while requiring exact verification and read-only reconciliation
+
+### New In v6.20.39
+- Reject binary PDF/DOCX/image/ZIP inputs to `ctx_execute_file` before UTF-8 decoding
+- Route binary analysis toward `ctx_execute` or dedicated document/PDF tooling
+- Keep MCP failure details in output without duplicating them in the error field
+
+### New In v6.20.38
+- Stable hashed OpenAI `prompt_cache_key` + session affinity; incremental context token ledger
+- TTFT / input-cache / peak RSS usage telemetry; Gemini cache-read accounting
+- Bounded streaming exec output (head+tail) with spill-to-artifact adoption
+- Context-protection MCP tools remain active under Luna's reduced tool profile
 
 ### New In v6.20.3
 - Execute harden: background seatbelt wrap + scrubbed env; bwrap missing-`.env` touch; killpg cancel; profile warnings visible; AST guard against unbound local imports

@@ -96,6 +96,50 @@ def test_stale_anchor_returns_recovery():
     assert "context" in result
 
 
+def test_stringified_edit_item_is_leniently_coerced():
+    content = "alpha\nbeta\ngamma\n"
+    scheme = ChunkFingerprint()
+    anchor = scheme.generate_anchors(split_lines(content))[1].render()
+    new_content, result = apply_edits(
+        content,
+        [json.dumps({"op": "replace", "anchor": anchor, "content": "BETA"})],
+        path="t.txt",
+        scheme=scheme,
+    )
+    assert result["status"] == "ok"
+    assert new_content == "alpha\nBETA\ngamma\n"
+
+
+def test_partial_replace_anchors_return_both_fresh_endpoints():
+    content = "\n".join(f"line {i}" for i in range(1, 25)) + "\n"
+    scheme = ChunkFingerprint()
+    anchors = scheme.generate_anchors(split_lines(content))
+    start = anchors[6]
+    end = anchors[19]
+
+    new_content, result = apply_edits(
+        content,
+        [{
+            "op": "replace",
+            # Mimic the observed model mistake: LINE:context instead of the
+            # required LINE:local:context anchor.
+            "anchor": f"{start.line}:{start.context}",
+            "end_anchor": f"{end.line}:{end.context}",
+            "content": "replacement",
+        }],
+        path="t.txt",
+        scheme=scheme,
+    )
+
+    assert new_content is None
+    assert result["error"] == "anchor_stale"
+    assert result["fresh_anchors"] == {
+        "anchor": start.render(),
+        "end_anchor": end.render(),
+    }
+    assert "Retry with these exact anchors" in result["message"]
+
+
 def test_malformed_anchor_suggests_valid_samples():
     content = "alpha\nbeta\ngamma\n"
     new_content, result = apply_edits(

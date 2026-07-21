@@ -249,6 +249,14 @@ print({ENV_MARKER!r} + json.dumps(o, separators=(",", ":")))
         """
         if not stdout:
             return stdout
+        # The bookkeeping trailer follows the command directly. If the command
+        # did not print a newline, peel the marker suffix as its own block.
+        marker_at = stdout.rfind(PWD_MARKER)
+        prefix = ""
+        if marker_at > 0 and "\n" not in stdout[marker_at:marker_at + len(PWD_MARKER)]:
+            prefix = stdout[:marker_at]
+            stdout = stdout[marker_at:]
+
         lines = stdout.splitlines(keepends=True)
         if not lines:
             return stdout
@@ -283,7 +291,28 @@ print({ENV_MARKER!r} + json.dumps(o, separators=(",", ":")))
                 pass
         if sticky_env and env_raw is not None:
             _apply_env_payload(self, env_raw)
-        return "".join(lines[:keep_end])
+        return prefix + "".join(lines[:keep_end])
+
+    def consume_stdout_file(self, path: str | Path, *, sticky_env: bool = True) -> bool:
+        """Strip a trailing shell-session block from a full-output spill file."""
+        target = Path(path)
+        try:
+            size = target.stat().st_size
+            tail_size = min(size, 384 * 1024)
+            with target.open("rb+") as handle:
+                handle.seek(size - tail_size)
+                tail = handle.read(tail_size)
+                marker = PWD_MARKER.encode("utf-8")
+                offset = tail.rfind(marker)
+                if offset < 0:
+                    return False
+                trailer = tail[offset:].decode("utf-8", errors="replace")
+                if self.consume_stdout(trailer, sticky_env=sticky_env):
+                    return False
+                handle.truncate(size - tail_size + offset)
+                return True
+        except OSError:
+            return False
 
 
 def session_for(
