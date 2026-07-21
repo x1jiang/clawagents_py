@@ -3391,12 +3391,37 @@ def is_mantle_openai_responses_model(model: str) -> bool:
     return any(token in m for token in ("gpt-5.3", "gpt-5.4", "gpt-5.5", "gpt-5.6"))
 
 
+def is_mantle_xai_model(model: str) -> bool:
+    """xAI Grok IDs on Mantle that must use the ``/openai/v1`` frontier path.
+
+    Hitting plain ``…/v1/chat/completions`` returns
+    ``Berm is not enabled for this account`` (access_denied). Keep the catalog
+    id as ``xai.grok-*`` (do not rewrite to ``openai.xai.*``).
+    """
+    from clawagents.providers.model_classify import (
+        parse_model_ref,
+        strip_bedrock_geo_prefix,
+    )
+
+    m = parse_model_ref(model or "").bare_id.strip().lower()
+    m = strip_bedrock_geo_prefix(m).lower()
+    return m.startswith("xai.") or m.startswith("grok-")
+
+
+def needs_mantle_openai_base(model: str) -> bool:
+    """True when Mantle must rewrite ``…/v1`` → ``…/openai`` for this model."""
+    return is_mantle_openai_responses_model(model) or is_mantle_xai_model(model)
+
+
 def _mantle_openai_model_id(model: str) -> str:
-    """Ensure Mantle Responses models use the ``openai.`` catalog prefix."""
+    """Ensure Mantle OpenAI-catalog Responses models use the ``openai.`` prefix.
+
+    xAI frontier models keep their ``xai.`` catalog ids.
+    """
     m = (model or "").strip()
     if not m:
         return m
-    if m.lower().startswith("openai."):
+    if m.lower().startswith("openai.") or is_mantle_xai_model(m):
         return m
     if is_mantle_openai_responses_model(m):
         return f"openai.{m}"
@@ -3459,7 +3484,8 @@ def create_provider(
         return BedrockConverseProvider(config)
 
     # ── Mantle (OneHUB): multi-path host, not one OpenAI /v1 for all ───
-    # anthropic.* → /anthropic/v1/messages; openai.gpt-5.* → /openai/v1/responses;
+    # anthropic.* → /anthropic/v1/messages;
+    # openai.gpt-5.* / xai.grok-* → /openai/v1 (responses);
     # chat-ok catalog (gpt-oss, deepseek, qwen, …) → /v1/chat/completions.
     if config.openai_base_url and _is_mantle_url(config.openai_base_url):
         mantle_key = config.openai_api_key or config.anthropic_api_key
@@ -3469,7 +3495,7 @@ def create_provider(
             config.anthropic_model = model_name
             config.anthropic_base_url = mantle_anthropic_base_url(config.openai_base_url)
             return AnthropicProvider(config)
-        if is_mantle_openai_responses_model(model_name):
+        if needs_mantle_openai_base(model_name):
             rewritten = mantle_openai_base_url(config.openai_base_url)
             if rewritten:
                 config.openai_base_url = rewritten
@@ -3477,10 +3503,11 @@ def create_provider(
                 config.openai_api_key = mantle_key
             if not config.openai_api_key:
                 config.openai_api_key = "bedrock"
-            # These models reject /v1/chat/completions even when wire_api was
-            # saved as chat_completions from an older Mantle default.
+            # Frontier Mantle models reject plain …/v1 (Berm access_denied for
+            # xAI; 404/validation for GPT-5.x) even when wire_api was saved as
+            # chat_completions from an older Mantle default.
             config.openai_wire_api = "responses"
-            # Mantle catalog requires ``openai.gpt-5.6-*`` (bare ids 404 /v1).
+            # GPT-5.x needs ``openai.`` prefix; xAI keeps ``xai.grok-*``.
             config.openai_model = _mantle_openai_model_id(model_name)
             return OpenAIProvider(config)
         # Chat-completions catalog: keep …/v1 (or normalize to it).

@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.20.42-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.20.43-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -21,9 +21,9 @@ This repo is the **Python framework** (`pip install clawagents`). Ready-made cli
 
 | Product | Latest | What it is | Link |
 |---------|--------|------------|------|
-| **ClawAgents Desktop** | **v0.4.21** | Native macOS app — project chats, file editor, SSH remotes, Settings (incl. AWS Bedrock), Developer ID signed + notarized | [Repo](https://github.com/x1jiang/clawagents-desktop) · [Download DMG](https://github.com/x1jiang/clawagents-desktop/releases/tag/v0.4.21) |
-| **ClawAgents for VS Code / Cursor** | **v1.0.132** | Editor extension — companion lockstep (context-mode / rtk), full caveman skill, chat, Bedrock | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Releases](https://github.com/x1jiang/clawagents-vscode/releases) |
-| **Python package** | **v6.20.42** | This library — seatbelt /dev/null + sandbox hints · `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/) · [Release](https://github.com/x1jiang/clawagents_py/releases) |
+| **ClawAgents Desktop** | **v0.4.22** | Native macOS app — project chats, file editor, SSH remotes, Settings (incl. AWS Bedrock), Developer ID signed + notarized | [Repo](https://github.com/x1jiang/clawagents-desktop) · [Download DMG](https://github.com/x1jiang/clawagents-desktop/releases/tag/v0.4.22) |
+| **ClawAgents for VS Code / Cursor** | **v1.0.133** | Editor extension — companion lockstep (context-mode / rtk), full caveman skill, chat, Bedrock | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Releases](https://github.com/x1jiang/clawagents-vscode/releases) |
+| **Python package** | **v6.20.43** | This library — Mantle xAI Grok `/openai/v1` routing · `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/) · [Release](https://github.com/x1jiang/clawagents_py/releases) |
 | **TypeScript package** | **v6.12.13** | Node/TS sibling — `npm install git+https://github.com/x1jiang/clawagents.git` | [Repo](https://github.com/x1jiang/clawagents) |
 
 ## Installation
@@ -36,6 +36,8 @@ pip install -U 'clawagents[bedrock]'   # + Amazon Bedrock (Claude via IAM + Nova
 pip install -U 'clawagents[all]'       # All providers + tiktoken
 ```
 
+> **Version 6.20.43** — Mantle xAI Grok routes via `/openai/v1` (fixes Berm access_denied) (July 2026).
+>
 > **Version 6.20.42** — Lower-churn patch, sandbox, timeout, and PTY recovery (July 2026).
 >
 > **Version 6.20.41** — Resilient skill paging and actionable audit findings (July 2026).
@@ -53,6 +55,11 @@ pip install -U 'clawagents[all]'       # All providers + tiktoken
 > **Version 6.19.0** — Companion lockstep (July 2026).
 
 > **Version 6.18.0** — Grok-inspired edit/execute harness (July 2026).
+
+### New In v6.20.43
+- Route Mantle `xai.grok-*` through `…/openai` + Responses (plain `…/v1` chat returned Berm `access_denied`)
+- Keep catalog id `xai.grok-4.3` (do not rewrite to `openai.xai.*`)
+- Clearer recovery hint when Berm mis-route is detected
 
 ### New In v6.20.42
 - Route ambiguous/stale patch failures toward refreshed single-hunk or hashline edits

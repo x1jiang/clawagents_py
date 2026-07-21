@@ -143,6 +143,22 @@ def classify_error(err: BaseException, provider: str = "") -> ErrorDescriptor:
 
     # 2. Auth errors
     status = _extract_status(err)
+    # Mantle frontier mis-route (xAI Grok on …/v1 instead of …/openai/v1).
+    if "berm is not enabled" in msg or (
+        "access_denied" in msg and "berm" in msg
+    ):
+        return ErrorDescriptor(
+            error_class=ErrorClass.PROVIDER_AUTH,
+            retryable=False,
+            recovery_hint=(
+                "Mantle frontier model used the wrong base path "
+                "(…/v1 instead of …/openai/v1). For xai.grok-4.3, ClawAgents "
+                "should rewrite the Mantle URL automatically — upgrade/restart "
+                "the sidecar if this persists."
+            ),
+            max_retries=0,
+            original=err,
+        )
     if status in (401, 403) or any(tok in msg for tok in (
         "unauthorized", "forbidden", "invalid api key", "invalid_api_key",
         "authentication", "invalid x-api-key", "permission denied",

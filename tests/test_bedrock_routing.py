@@ -170,6 +170,26 @@ def test_create_provider_mantle_gpt_oss_stays_chat():
     assert passed.openai_wire_api == "chat_completions"
 
 
+def test_create_provider_mantle_xai_grok_uses_openai_frontier_path():
+    """xai.grok-4.3 on plain …/v1 returns Berm access_denied; must use …/openai."""
+    from clawagents.providers import llm as llm_mod
+
+    cfg = EngineConfig(
+        openai_base_url="https://bedrock-mantle.us-west-2.api.aws/v1",
+        openai_api_key="mantle-key",
+        openai_wire_api="chat_completions",
+    )
+    fake = MagicMock()
+    fake.name = "openai"
+    with patch.object(llm_mod, "OpenAIProvider", return_value=fake) as ctor:
+        provider = llm_mod.create_provider("xai.grok-4.3", cfg)
+    assert provider is fake
+    passed = ctor.call_args[0][0]
+    assert passed.openai_base_url == "https://bedrock-mantle.us-west-2.api.aws/openai"
+    assert passed.openai_wire_api == "responses"
+    assert passed.openai_model == "xai.grok-4.3"
+
+
 def test_bedrock_profile_is_native():
     from clawagents.provider_profiles import resolve_provider_profile
 
