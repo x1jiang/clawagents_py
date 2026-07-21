@@ -122,7 +122,52 @@ def test_call_result_stringifier_concatenates_text_blocks():
     )
     assert success is False
     assert "boom" in output
-    assert error is not None
+    assert error == "MCP tool reported isError=True; see output for details"
+    assert "boom" not in error
+
+
+def test_context_execute_file_description_warns_against_binary_inputs():
+    from types import SimpleNamespace
+
+    from clawagents.mcp.tool_bridge import MCPBridgedTool
+
+    descriptor = SimpleNamespace(
+        name="ctx_execute_file",
+        description="Process FILE_CONTENT.",
+        input_schema={"type": "object", "properties": {}},
+    )
+    server = SimpleNamespace(name="context-mode")
+    tool = MCPBridgedTool(descriptor, server)
+
+    assert "text files only" in tool.description.lower()
+    assert "docx" in tool.description.lower()
+    assert "ctx_execute" in tool.description
+
+
+async def test_context_execute_file_rejects_binary_before_invocation():
+    from types import SimpleNamespace
+
+    from clawagents.mcp.tool_bridge import MCPBridgedTool
+
+    class _Server:
+        name = "context-mode"
+
+        async def invoke_tool(self, name, args):
+            raise AssertionError("binary input must be rejected before MCP invocation")
+
+    descriptor = SimpleNamespace(
+        name="ctx_execute_file",
+        description="Process FILE_CONTENT.",
+        input_schema={"type": "object", "properties": {}},
+    )
+    tool = MCPBridgedTool(descriptor, _Server())
+
+    result = await tool.execute({"path": "/tmp/protocol.DOCX"})
+
+    assert result.success is False
+    assert result.output == ""
+    assert "text files only" in (result.error or "")
+    assert "ctx_execute" in (result.error or "")
 
 
 def test_call_result_stringifier_summarises_non_text_blocks():

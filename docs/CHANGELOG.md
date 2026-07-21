@@ -1,6 +1,17 @@
 # ClawAgents Changelog
 
 
+### v6.20.39 — Context Mode binary guard + hashline recovery (July 2026)
+
+- **ctx_execute_file:** reject binary PDF/DOCX/image/ZIP inputs before UTF-8
+  decode; description steers agents to `ctx_execute` or document tooling.
+- **MCP errors:** keep detailed failure text in `output` without duplicating it
+  into the short `error` field.
+- **hashline_edit:** OpenAI-strict `edits.items` schema; lenient JSON-string
+  edit items; incomplete `LINE:HASH` anchors return both fresh endpoints.
+- **Test harness:** AST unbound-local scan runs in a shallow worker thread to
+  avoid CPython 3.11 recursion-depth mismatches under pytest-xdist.
+
 ### v6.20.38 — Prompt-cache affinity + streaming telemetry (July 2026)
 
 - **OpenAI prompt cache:** stable hashed `prompt_cache_key` + session affinity
