@@ -119,11 +119,13 @@ def test_create_provider_mantle_claude_uses_anthropic_messages():
     )
     fake = MagicMock()
     fake.name = "anthropic"
-    with patch.object(llm_mod, "AnthropicProvider", return_value=fake) as ctor:
-        with patch.object(llm_mod, "OpenAIProvider") as openai_ctor:
-            provider = llm_mod.create_provider("anthropic.claude-haiku-4-5", cfg)
+    with patch.object(llm_mod, "MantleAnthropicProvider", return_value=fake) as ctor:
+        with patch.object(llm_mod, "AnthropicProvider") as plain_ctor:
+            with patch.object(llm_mod, "OpenAIProvider") as openai_ctor:
+                provider = llm_mod.create_provider("anthropic.claude-haiku-4-5", cfg)
     assert provider is fake
     openai_ctor.assert_not_called()
+    plain_ctor.assert_not_called()
     passed = ctor.call_args[0][0]
     assert passed.anthropic_api_key == "mantle-key"
     assert passed.anthropic_model == "anthropic.claude-haiku-4-5"
@@ -131,6 +133,62 @@ def test_create_provider_mantle_claude_uses_anthropic_messages():
         passed.anthropic_base_url
         == "https://bedrock-mantle.us-east-1.api.aws/anthropic"
     )
+
+
+def test_mantle_anthropic_provider_uses_bearer_auth():
+    """Plain AsyncAnthropic sends X-Api-Key; Mantle requires Bearer."""
+    from clawagents.providers.llm import MantleAnthropicProvider
+
+    cfg = EngineConfig(
+        openai_base_url="https://bedrock-mantle.us-west-2.api.aws/v1",
+        anthropic_api_key="mantle-key",
+        anthropic_model="anthropic.claude-sonnet-5",
+        anthropic_base_url="https://bedrock-mantle.us-west-2.api.aws/anthropic",
+    )
+    provider = MantleAnthropicProvider(cfg)
+    headers = {k.lower(): v for k, v in provider.client.auth_headers.items()}
+    assert headers.get("authorization") == "Bearer mantle-key"
+    assert "x-api-key" not in headers
+    assert "bedrock-mantle.us-west-2.api.aws/anthropic" in str(provider.client.base_url)
+
+
+@pytest.mark.parametrize(
+    "model,kind,base_suffix,wire",
+    [
+        ("openai.gpt-oss-20b", "openai", "/v1", "chat_completions"),
+        ("deepseek.v3.2", "openai", "/v1", "chat_completions"),
+        ("moonshot.kimi-k2.5", "openai", "/v1", "chat_completions"),
+        ("zai.glm-5", "openai", "/v1", "chat_completions"),
+        ("xai.grok-4.3", "openai", "/openai/v1", "responses"),
+        ("openai.gpt-5.6-luna", "openai", "/openai/v1", "responses"),
+        ("anthropic.claude-sonnet-5", "mantle_anthropic", "/anthropic", None),
+        ("anthropic.claude-opus-4-8", "mantle_anthropic", "/anthropic", None),
+    ],
+)
+def test_mantle_catalog_routing_matrix(model, kind, base_suffix, wire):
+    """Every Mantle catalog family hits the right host path / client."""
+    from clawagents.providers import llm as llm_mod
+
+    cfg = EngineConfig(
+        openai_base_url="https://bedrock-mantle.us-east-1.api.aws/v1",
+        openai_api_key="mantle-key",
+        openai_wire_api="auto",
+    )
+    fake = MagicMock()
+    fake.name = kind
+    if kind == "mantle_anthropic":
+        with patch.object(llm_mod, "MantleAnthropicProvider", return_value=fake) as ctor:
+            llm_mod.create_provider(model, cfg)
+        passed = ctor.call_args[0][0]
+        assert str(passed.anthropic_base_url).endswith(base_suffix)
+        assert passed.anthropic_model == model
+    else:
+        with patch.object(llm_mod, "OpenAIProvider", return_value=fake) as ctor:
+            llm_mod.create_provider(model, cfg)
+        passed = ctor.call_args[0][0]
+        assert str(passed.openai_base_url).endswith(base_suffix)
+        if wire:
+            assert passed.openai_wire_api == wire
 
 
 def test_create_provider_mantle_gpt56_uses_openai_responses():
