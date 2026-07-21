@@ -7,6 +7,57 @@
 - Docs: changelog now includes a dedicated Unreleased section to track upcoming changes before formal version release.
 
 
+### v6.20.42 — Lower-churn patch, sandbox, timeout, and PTY recovery (July 2026)
+
+- **Patches:** route ambiguous/stale apply_patch failures toward refreshed
+  single-hunk or hashline edits.
+- **Sandbox:** refuse unauthorized `unsandboxed=true` before execution; explain
+  temporary private gcloud config under OS sandbox profiles.
+- **Execute:** auto-background timed-out local commands through default
+  OS-sandbox profiles without dropping the wrap.
+- **PTY:** retain completed screens and exit diagnostics instead of returning
+  `unknown session_id` after reap.
+
+### v6.20.41 — Resilient skill paging and actionable audit findings (July 2026)
+
+- Treat repeated same-name `use_skill` calls as continuation pages.
+- Explain when a tool is outside a skill boundary and stays unavailable.
+- Classify nonzero `npm audit` reports as security findings without weakening
+  failed status.
+- Keep deploy safeguards framework-generic; reconciliation must stay read-only.
+
+### v6.20.40 — Fail-closed external-action reconciliation (July 2026)
+
+- Require approved pre-action verification and post-action reconciliation for
+  external publish/deploy actions.
+- Consume authorization before execution so failures/timeouts cannot hide
+  partial remote state.
+- Block retries, mutations, and final completion until reconciliation succeeds.
+
+### v6.20.39 — Context Mode binary guard + hashline recovery (July 2026)
+
+- **ctx_execute_file:** reject binary PDF/DOCX/image/ZIP inputs before UTF-8
+  decode; description steers agents to `ctx_execute` or document tooling.
+- **MCP errors:** keep detailed failure text in `output` without duplicating it
+  into the short `error` field.
+- **hashline_edit:** OpenAI-strict `edits.items` schema; lenient JSON-string
+  edit items; incomplete `LINE:HASH` anchors return both fresh endpoints.
+- **Test harness:** AST unbound-local scan runs in a shallow worker thread to
+  avoid CPython 3.11 recursion-depth mismatches under pytest-xdist.
+
+### v6.20.38 — Prompt-cache affinity + streaming telemetry (July 2026)
+
+- **OpenAI prompt cache:** stable hashed `prompt_cache_key` + session affinity
+  headers so multi-turn runs reuse the same opaque cache identity.
+- **Incremental token ledger:** provider-reported input tokens checkpoint the
+  transcript; later rounds estimate only newly appended messages.
+- **Telemetry:** TTFT, input/cache tokens, and observed peak RSS on usage events;
+  Gemini cache-read accounting included.
+- **Bounded exec output:** command streams keep head+tail while discarding the
+  middle; complete spills can be adopted as retrievable artifacts.
+- **Luna/MCP:** context-protection MCP tools (e.g. `ctx_*`) stay visible under
+  the reduced active tool profile; dynamic MCP tools appear in `mcp` groups.
+
 ### v6.20.37 — Plan invariant enforcement (July 2026)
 
 - **Plan invariants survive Act:** approved plans can declare exact backticked

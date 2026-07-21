@@ -4,7 +4,7 @@ import asyncio
 import os
 import re
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 from clawagents.redact import is_secret_name
 from clawagents.sandbox.backend import DirEntry, ExecResult, FileStat, SandboxBackend
@@ -131,6 +131,7 @@ class DockerBackend:
         timeout: int | None = None,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
+        **_kwargs: Any,
     ) -> ExecResult:
         proc = await asyncio.create_subprocess_exec(
             self.docker_bin,

@@ -15,6 +15,7 @@ This test fails the suite if such a pattern appears under ``src/clawagents``.
 from __future__ import annotations
 
 import ast
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -159,9 +160,18 @@ def _find_use_before_bind(path: Path) -> list[str]:
 
 
 def test_no_use_before_local_import_bind() -> None:
-    all_bugs: list[str] = []
-    for path in sorted(ROOT.rglob("*.py")):
-        all_bugs.extend(_find_use_before_bind(path))
+    def scan_all() -> list[str]:
+        bugs: list[str] = []
+        for path in sorted(ROOT.rglob("*.py")):
+            bugs.extend(_find_use_before_bind(path))
+        return bugs
+
+    # CPython 3.11 can report ``AST constructor recursion depth mismatch``
+    # when this deep repository scan inherits pytest-xdist's active call stack.
+    # A dedicated worker keeps the parser stack shallow without weakening the
+    # check or changing which files it examines.
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        all_bugs = pool.submit(scan_all).result()
     if all_bugs:
         pytest.fail(
             "Local-import UnboundLocalError risks found "

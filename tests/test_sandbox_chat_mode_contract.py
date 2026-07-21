@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+
 from clawagents.sandbox.profiles import (
     _seatbelt_profile_text,
     sandbox_profile_for_chat_mode,
@@ -55,6 +58,58 @@ def test_failed_tool_output_not_crushed():
     assert "credentials.db" in out
     assert "[Crushed tool output" not in out
     assert aid is None or "Failed tool" in out or "credentials.db" in out
+
+
+def test_gcloud_sandbox_failure_offers_private_scratch_config():
+    from clawagents.tools.exec import _format_nonzero_command_output
+
+    payload = json.loads(
+        _format_nonzero_command_output(
+            "gcloud auth list",
+            1,
+            "",
+            "Unable to create private file ~/.config/gcloud/credentials.db: "
+            "Operation not permitted",
+            "",
+        )
+    )
+    interpretation = payload["interpretation"]
+    assert "CLOUDSDK_CONFIG" in interpretation
+    assert "$TMPDIR" in interpretation
+    assert "never commit" in interpretation
+    assert "Do not retry the unchanged command" in interpretation
+
+
+def test_unsandboxed_request_without_full_access_does_not_execute(tmp_path):
+    from clawagents.run_context import RunContext
+    from clawagents.tools.exec import ExecTool
+
+    class ProfileStub:
+        kind = "profile:test:local"
+        cwd = str(tmp_path)
+
+        def __init__(self):
+            self.called = False
+
+        def wrap_command(self, command, cwd=None):
+            return command
+
+        async def exec(self, *args, **kwargs):
+            self.called = True
+            raise AssertionError("command must not execute")
+
+    backend = ProfileStub()
+    result = asyncio.run(
+        ExecTool(backend).execute(
+            {"command": "gcloud auth list", "unsandboxed": True},
+            run_context=RunContext(),
+        )
+    )
+
+    assert result.success is False
+    assert "unsandboxed_not_authorized" in (result.error or "")
+    assert "command was not run" in (result.error or "")
+    assert backend.called is False
 
 
 def test_desktop_seatbelt_source_has_dev_null_allow():

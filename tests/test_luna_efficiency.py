@@ -81,6 +81,35 @@ def test_active_tool_profile_hides_web_until_activated():
     assert "web_fetch" in {t.name for t in reg.list()}
 
 
+def test_active_tool_profile_keeps_context_protection_mcp_tools():
+    class _T:
+        def __init__(self, name: str, *, context_protection: bool = False):
+            self.name = name
+            self.description = name
+            self.parameters = {}
+            self.tool_group = "mcp"
+            self.context_protection = context_protection
+
+        async def execute(self, args):
+            return ToolResult(True, "ok")
+
+    reg = ToolRegistry()
+    reg.register(_T("execute"))
+    reg.register(_T("ctx_execute", context_protection=True))
+    reg.register(_T("ordinary_mcp_tool"))
+    reg.register(_T("activate_tool_group"))
+
+    apply_core_active_profile(reg)
+    assert reg.is_tool_active("ctx_execute")
+    assert not reg.is_tool_active("ordinary_mcp_tool")
+
+    import asyncio
+
+    result = asyncio.run(ActivateToolGroupTool(reg).execute({"group": "mcp"}))
+    assert result.success
+    assert reg.is_tool_active("ordinary_mcp_tool")
+
+
 def test_execute_refuses_inactive_tool():
     class _T:
         name = "web_fetch"

@@ -526,6 +526,9 @@ class ProfileBackend:
         timeout: int | None = None,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
+        *,
+        max_output_chars: int | None = None,
+        on_output: Any | None = None,
     ):
         merged_env = self._merge_env(env)
         # Never interpolate the user command with !r — a single quote in
@@ -533,7 +536,12 @@ class ProfileBackend:
         # $()/backticks expand in the outer shell BEFORE sandbox-exec.
         wrapped = self.wrap_command(command, cwd=cwd)
         return await self._inner.exec(
-            wrapped, timeout=timeout, cwd=cwd, env=merged_env
+            wrapped,
+            timeout=timeout,
+            cwd=cwd,
+            env=merged_env,
+            max_output_chars=max_output_chars,
+            on_output=on_output,
         )
 
     def wrap_command(self, command: str, *, cwd: str | None = None) -> str:

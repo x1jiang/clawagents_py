@@ -11,7 +11,7 @@ import re
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional  # noqa: F401 — Any used by PtyStartTool
 
@@ -114,6 +114,10 @@ class PtySession:
             except Exception:
                 if not self._child.isalive():
                     self._ended = True
+                    try:
+                        self._child.close()
+                    except Exception:
+                        pass
                     break
                 continue
             if not data:
@@ -268,10 +272,22 @@ class PtySession:
         )
 
     def status(self) -> dict[str, Any]:
+        try:
+            child_alive = bool(self._child.isalive())
+        except Exception:
+            child_alive = False
+        if not child_alive:
+            self._ended = True
+            try:
+                self._child.close()
+            except Exception:
+                pass
         row, col = self.cursor()
         return {
             "session_id": self.session_id,
-            "alive": not self._ended and bool(self._child.isalive()),
+            "alive": not self._ended and child_alive,
+            "exit_code": getattr(self._child, "exitstatus", None),
+            "signal": getattr(self._child, "signalstatus", None),
             "cols": self.cols,
             "rows": self.rows,
             "cursor": {"row": row, "col": col},
@@ -289,10 +305,11 @@ class PtySession:
 _SESSIONS: Dict[str, PtySession] = {}
 _SESSIONS_LOCK = threading.Lock()
 _SESSION_TTL_S = 30 * 60  # idle reap
+_ENDED_SESSION_TTL_S = 5 * 60  # retain final screen/exit diagnostics
 
 
 def _reap_idle_sessions() -> None:
-    """Drop ended or long-idle PTY sessions so they cannot leak forever."""
+    """Reap idle sessions while briefly retaining completed diagnostics."""
     now = time.time()
     dead: list[str] = []
     with _SESSIONS_LOCK:
@@ -304,7 +321,10 @@ def _reap_idle_sessions() -> None:
                 alive = (not ended) and bool(sess._child.isalive())
             except Exception:
                 alive = False
-            if ended or not alive or idle > _SESSION_TTL_S:
+            completed = ended or not alive
+            if (completed and idle > _ENDED_SESSION_TTL_S) or (
+                not completed and idle > _SESSION_TTL_S
+            ):
                 dead.append(sid)
         for sid in dead:
             sess = _SESSIONS.pop(sid, None)
@@ -326,7 +346,7 @@ def get_session(session_id: str) -> PtySession | None:
 
 def create_pty_tools():
     """Registerable tool objects for PTY sessions."""
-    from clawagents.tools.registry import Tool, ToolResult
+    from clawagents.tools.registry import ToolResult
 
     class PtyStartTool:
         name = "pty_start"
@@ -394,9 +414,30 @@ def create_pty_tools():
                 _SESSIONS[sess.session_id] = sess
             _reap_idle_sessions()
             screen = sess.screen_text()
+            status = sess.status()
+            state_line = (
+                f"alive={status['alive']} exit_code={status['exit_code']} "
+                f"signal={status['signal']}"
+            )
+            output = (
+                f"session_id={sess.session_id}\ncwd={cwd or ''}\n"
+                f"{state_line}\n{screen[-2000:]}"
+            )
+            if not status["alive"] and (
+                status["exit_code"] not in (None, 0)
+                or status["signal"] is not None
+            ):
+                return ToolResult(
+                    success=False,
+                    output=output,
+                    error=(
+                        "PTY command exited during startup; final screen retained "
+                        f"under {sess.session_id} ({state_line})."
+                    ),
+                )
             return ToolResult(
                 success=True,
-                output=f"session_id={sess.session_id}\ncwd={cwd or ''}\n{screen[-2000:]}",
+                output=output,
             )
 
     class PtyKeysTool:
@@ -410,7 +451,11 @@ def create_pty_tools():
         async def execute(self, args: dict) -> ToolResult:
             sess = get_session(str(args.get("session_id") or ""))
             if sess is None:
-                return ToolResult(success=False, output="", error="unknown session_id")
+                return ToolResult(
+                    success=False,
+                    output="",
+                    error="unknown or expired session_id; use the id from pty_start",
+                )
             try:
                 sess.send_keys(str(args.get("keys") or ""))
             except Exception as exc:  # noqa: BLE001
@@ -427,12 +472,20 @@ def create_pty_tools():
         async def execute(self, args: dict) -> ToolResult:
             sess = get_session(str(args.get("session_id") or ""))
             if sess is None:
-                return ToolResult(success=False, output="", error="unknown session_id")
+                return ToolResult(
+                    success=False,
+                    output="",
+                    error="unknown or expired session_id; use the id from pty_start",
+                )
             row, col = sess.cursor()
             st = sess.status()
             return ToolResult(
                 success=True,
-                output=f"cursor=({row},{col}) alive={st['alive']}\n{sess.screen_text(include_empty=True)}",
+                output=(
+                    f"cursor=({row},{col}) alive={st['alive']} "
+                    f"exit_code={st['exit_code']} signal={st['signal']}\n"
+                    f"{sess.screen_text(include_empty=True)}"
+                ),
             )
 
     class PtyWaitTool:
@@ -456,7 +509,11 @@ def create_pty_tools():
             _reap_idle_sessions()
             sess = get_session(str(args.get("session_id") or ""))
             if sess is None:
-                return ToolResult(success=False, output="", error="unknown session_id")
+                return ToolResult(
+                    success=False,
+                    output="",
+                    error="unknown or expired session_id; use the id from pty_start",
+                )
             try:
                 sess._last_used = time.time()
                 outcome = await asyncio.to_thread(

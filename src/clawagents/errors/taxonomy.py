@@ -143,6 +143,42 @@ def classify_error(err: BaseException, provider: str = "") -> ErrorDescriptor:
 
     # 2. Auth errors
     status = _extract_status(err)
+    # Mantle frontier mis-route (xAI Grok on …/v1 instead of …/openai/v1).
+    if "berm is not enabled" in msg or (
+        "access_denied" in msg and "berm" in msg
+    ):
+        return ErrorDescriptor(
+            error_class=ErrorClass.PROVIDER_AUTH,
+            retryable=False,
+            recovery_hint=(
+                "Mantle frontier model used the wrong base path "
+                "(…/v1 instead of …/openai/v1). For xai.grok-4.3, ClawAgents "
+                "should rewrite the Mantle URL automatically — upgrade/restart "
+                "the sidecar if this persists."
+            ),
+            max_retries=0,
+            original=err,
+        )
+    # Mantle Claude with plain Anthropic client (X-Api-Key) instead of Bearer.
+    if "bedrock-mantle" in msg and any(
+        tok in msg
+        for tok in (
+            "invalid x-api-key",
+            "x-api-key",
+            "authentication_error",
+            "invalid api key",
+        )
+    ):
+        return ErrorDescriptor(
+            error_class=ErrorClass.PROVIDER_AUTH,
+            retryable=False,
+            recovery_hint=(
+                "Mantle Claude needs Authorization Bearer (AsyncAnthropicBedrockMantle), "
+                "not X-Api-Key. Upgrade clawagents>=6.20.45 and restart the sidecar."
+            ),
+            max_retries=0,
+            original=err,
+        )
     if status in (401, 403) or any(tok in msg for tok in (
         "unauthorized", "forbidden", "invalid api key", "invalid_api_key",
         "authentication", "invalid x-api-key", "permission denied",
@@ -173,7 +209,22 @@ def classify_error(err: BaseException, provider: str = "") -> ErrorDescriptor:
             original=err,
         )
 
-    # 4. Provider internal (5xx)
+    # 4. Mantle / Bedrock model or path 404 (often region or wrong …/openai vs …/openai/v1)
+    if status == 404 or "does not exist" in msg or "error code: 404" in msg:
+        return ErrorDescriptor(
+            error_class=ErrorClass.UNKNOWN,
+            retryable=False,
+            recovery_hint=(
+                "HTTP 404 from the model host. For Mantle GPT-5.x / Grok, the "
+                "base must be …/openai/v1 (Responses). GPT-5.6 Sol is only in "
+                "us-east-1 and us-east-2 — switch AWS region if you are on "
+                "us-west-2. Chat-only Mantle models (gpt-oss, DeepSeek) stay on …/v1."
+            ),
+            max_retries=0,
+            original=err,
+        )
+
+    # 5. Provider internal (5xx)
     if status and 500 <= status <= 504:
         recipe = RECOVERY_RECIPES[ErrorClass.PROVIDER_INTERNAL]
         return ErrorDescriptor(
@@ -184,7 +235,7 @@ def classify_error(err: BaseException, provider: str = "") -> ErrorDescriptor:
             original=err,
         )
 
-    # 5. Transport / network
+    # 6. Transport / network
     if any(tok in msg for tok in (
         "econnreset", "connection", "timeout", "network",
         "socket hang up", "fetch failed", "stream stalled",
@@ -201,7 +252,7 @@ def classify_error(err: BaseException, provider: str = "") -> ErrorDescriptor:
             original=err,
         )
 
-    # 6. Runtime I/O
+    # 7. Runtime I/O
     if isinstance(err, (FileNotFoundError, PermissionError, IsADirectoryError, OSError)):
         recipe = RECOVERY_RECIPES[ErrorClass.RUNTIME_IO]
         return ErrorDescriptor(
@@ -221,7 +272,7 @@ def classify_error(err: BaseException, provider: str = "") -> ErrorDescriptor:
             original=err,
         )
 
-    # 7. Unknown
+    # 8. Unknown
     recipe = RECOVERY_RECIPES[ErrorClass.UNKNOWN]
     return ErrorDescriptor(
         error_class=ErrorClass.UNKNOWN,

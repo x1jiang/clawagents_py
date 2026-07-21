@@ -37,6 +37,9 @@ _ENTER_REMINDER = (
     "Do:\n"
     "  - Read the codebase, search, gather context.\n"
     "  - Design a concrete plan with steps and impacted files.\n"
+    "  - For external publish/deploy workflows, specify exact pre-action "
+    "verification and post-action reconciliation commands; address partial "
+    "failure recovery, observability, and task-specific safety constraints.\n"
     "  - Write the plan via write_plan, then call exit_plan_mode when ready.\n"
     "Don't:\n"
     "  - Write or edit files.\n"
@@ -49,7 +52,8 @@ _EXIT_REMINDER = (
     "You have exited plan mode. Permission mode is back to DEFAULT. "
     "Write-class tools are unblocked. If the approved plan has verification "
     "gates, high-impact publish/deploy commands remain blocked until every "
-    "gate succeeds after the latest mutation.\n"
+    "gate succeeds after the latest mutation. Every attempted external action "
+    "then requires approved post-action reconciliation before completion or retry.\n"
     "</system-reminder>"
 )
 

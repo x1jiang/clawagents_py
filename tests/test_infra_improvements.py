@@ -167,6 +167,62 @@ def test_execute_classifies_external_authentication_failure():
     assert "user" in interpretation.lower()
 
 
+def test_execute_classifies_npm_audit_findings_without_retrying():
+    payload = json.loads(
+        _format_nonzero_command_output(
+            "bash -n deploy.sh; npm audit --omit=dev --audit-level=high",
+            1,
+            "# npm audit report\n10 vulnerabilities (4 high, 2 critical)",
+            "",
+            "",
+        )
+    )
+
+    assert payload["success"] is False
+    interpretation = payload["interpretation"].lower()
+    assert "completed" in interpretation
+    assert "failed security check" in interpretation
+    assert "do not retry" in interpretation
+    assert "lockfile" in interpretation
+    assert "no fix available" in interpretation
+    assert "earlier checks may have succeeded" in interpretation
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "npm --prefix web audit --omit=dev",
+        "npm --workspace app audit --json",
+        "cd frontend && npm -w app audit",
+        "env CI=1 /usr/local/bin/npm --prefix=web audit",
+    ],
+)
+def test_execute_recognizes_npm_audit_after_global_options(command):
+    payload = json.loads(
+        _format_nonzero_command_output(
+            command,
+            1,
+            '{"auditReportVersion": 2, "vulnerabilities": {}}',
+            "",
+            "",
+        )
+    )
+    assert "npm audit completed" in payload["interpretation"]
+
+
+def test_execute_does_not_misclassify_unrelated_npm_command():
+    payload = json.loads(
+        _format_nonzero_command_output(
+            "npm run audit",
+            1,
+            "vulnerabilities found by custom script",
+            "",
+            "",
+        )
+    )
+    assert "npm audit completed" not in payload["interpretation"]
+
+
 def test_execute_classifies_missing_package_without_suggesting_tool_churn():
     payload = json.loads(
         _format_nonzero_command_output(

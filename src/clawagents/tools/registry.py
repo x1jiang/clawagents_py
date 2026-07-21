@@ -687,6 +687,19 @@ class ToolRegistry:
             same_skill = _skill_key(args.get("name") or pending_name) == _skill_key(
                 pending_name
             )
+            # A repeated plain call for the same pending skill means "next page".
+            # Without this normalization the registry auto-drained the skill and
+            # then invoked use_skill at offset zero, restarting the load.
+            if (
+                tool_name == "use_skill"
+                and same_skill
+                and not want_continue
+                and not args.get("abort")
+                and supplied_offset == 0
+                and not args.get("expected_hash")
+            ):
+                args = {**args, "continue": True}
+                want_continue = True
             continuing = (
                 tool_name == "use_skill"
                 and same_skill
@@ -718,9 +731,12 @@ class ToolRegistry:
                         success=False,
                         output="",
                         error=(
-                            f"Refused: skill '{skill_label}' (pending load) allows "
-                            f"only: {', '.join(sorted(projected)) or 'no data-plane tools'}. "
-                            "Finish or abort the skill load before calling other tools."
+                            f"Refused: tool '{tool_name}' is outside skill "
+                            f"'{skill_label}' allowed-tools: "
+                            f"{', '.join(sorted(projected)) or 'no data-plane tools'}. "
+                            "Finishing the pending load will not unlock this tool. "
+                            "Use an allowed tool, or abort the skill only if you intend "
+                            "to discard its remaining instructions."
                         ),
                     )
                 drain_text, drain_err = await self._auto_drain_pending_skill(
@@ -837,6 +853,22 @@ class ToolRegistry:
                 return cached
 
         try:
+            # Persist uncertainty before an external side effect begins. A
+            # timeout, process crash, or nonzero exit can still leave partial
+            # remote state, so post-result bookkeeping is too late.
+            if run_context is not None:
+                from clawagents.config.features import is_enabled
+
+                if is_enabled("act_invariant_gate"):
+                    from clawagents.permissions.act_invariants import (
+                        observe_tool_attempt,
+                    )
+
+                    observe_tool_attempt(
+                        tool_name,
+                        effective_args,
+                        run_context=run_context,
+                    )
             # File snapshot before write tools (Claude Code pattern: fileHistoryMakeSnapshot)
             _snapshot_before_write(tool_name, effective_args)
 

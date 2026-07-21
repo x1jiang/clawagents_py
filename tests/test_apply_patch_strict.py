@@ -110,8 +110,26 @@ def test_multi_hunk_failure_reports_index_and_preserves_atomicity(tmp_path: Path
     assert "hunk 2/2" in result.error.lower()
     assert "1 earlier hunk" in result.error.lower()
     assert "no changes written" in result.error.lower()
+    assert "do not resend this patch unchanged" in result.error.lower()
+    assert "one localized hunk per call" in result.error.lower()
     assert '"missing": false' in result.error
     assert f.read_text(encoding="utf-8") == original
+
+
+def test_ambiguous_search_routes_to_hashline_without_retry(tmp_path: Path):
+    f = tmp_path / "routes.js"
+    f.write_text("close();\nkeep();\nclose();\n", encoding="utf-8")
+    tool = ApplyPatchTool(LocalBackend(root=str(tmp_path)))
+    patch = (
+        "<<<<<<< SEARCH\nclose();\n=======\ndone();\n>>>>>>> REPLACE\n"
+    )
+
+    result = asyncio.run(tool.execute({"path": "routes.js", "patch": patch}))
+
+    assert result.success is False
+    assert "matches 2 locations" in result.error
+    assert "Do not retry the same patch" in result.error
+    assert "hashline_grep" in result.error
 
 
 def test_apply_patch_refuses_invalid_json_before_write(tmp_path: Path):

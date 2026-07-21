@@ -10,6 +10,7 @@ from clawagents.goal import (
     GoalOrchestrator,
     GoalPauseReason,
     GoalTracker,
+    is_production_workflow,
     attach_goal_to_run_context,
     get_goal_tracker,
 )
@@ -93,6 +94,31 @@ class StartGoalTool:
                 output="",
                 error=f"Planner fail-closed: {exc}",
             )
+        if is_production_workflow(goal):
+            from clawagents.permissions.act_invariants import approve_plan_contract
+
+            plan_text = tracker.state.plan_text if tracker.state else ""
+            contract = approve_plan_contract(
+                plan_text,
+                run_context,
+                workspace=_workspace(run_context),
+            )
+            if (
+                contract is None
+                or not contract.get("verification_commands")
+                or not contract.get("reconciliation_commands")
+            ):
+                reason = (
+                    "production goal plan must contain exact backticked commands "
+                    "under both 'Verification gates' and "
+                    "'Post-action reconciliation'"
+                )
+                tracker.pause(GoalPauseReason.PLANNER_FAILED, reason)
+                return ToolResult(
+                    success=False,
+                    output="",
+                    error=f"Planner fail-closed: {reason}",
+                )
         plan_preview = (tracker.state.plan_text if tracker.state else "")[:2000]
         return ToolResult(
             success=True,
