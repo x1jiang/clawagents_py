@@ -55,7 +55,6 @@ from clawagents.stream_events import (
     StreamEvent,
     stream_event_from_kind,
 )
-from clawagents.context.carryover import get_compaction_carryover
 from clawagents.handoffs import Handoff, HandoffInputData
 from clawagents.prompts import append_model_identity, build_system_prompt
 from clawagents.tokenizer import (
@@ -300,7 +299,7 @@ def _run_context_workspace(run_context: Any) -> str | None:
     return None
 
 
-from clawagents.graph.model_profiles import (
+from clawagents.graph.model_profiles import (  # noqa: E402
     resolve_context_budget as _resolve_context_budget,
     resolve_long_context_threshold as _resolve_long_context_threshold,
 )
@@ -3885,6 +3884,23 @@ async def _run_agent_graph_core(
                             "output": obs[:2000],
                         })
                         if result.get("done"):
+                            from clawagents.permissions.act_invariants import (
+                                completion_block_reason,
+                            )
+
+                            reconciliation_block = completion_block_reason(run_context)
+                            if reconciliation_block:
+                                messages.append(LLMMessage(
+                                    role="user",
+                                    content=(
+                                        f"[CodeAct Observation]\n{obs}\n\n"
+                                        f"{reconciliation_block}"
+                                    ),
+                                ))
+                                emit("context", {
+                                    "message": "production reconciliation blocked completion"
+                                })
+                                continue
                             state.result = obs
                             state.status = "done"
                             emit("final_content", {"content": state.result})
@@ -3912,6 +3928,31 @@ async def _run_agent_graph_core(
                     last_msg = messages[-1] if messages else None
                     if last_msg and isinstance(last_msg.content, str) and last_msg.content.startswith("[Advisor Guidance]"):
                         continue
+
+                # ── Deterministic production-action final gate ──
+                # A failed/timeout external command can still have partial remote
+                # effects. Never let a prose final answer bypass reconciliation.
+                from clawagents.permissions.act_invariants import (
+                    completion_block_reason,
+                )
+
+                reconciliation_block = completion_block_reason(run_context)
+                if reconciliation_block:
+                    if not _final_assistant_appended:
+                        messages.append(LLMMessage(
+                            role="assistant",
+                            content=response.content,
+                            thinking=_thinking_content,
+                        ))
+                        _final_assistant_appended = True
+                    messages.append(LLMMessage(
+                        role="user",
+                        content=reconciliation_block,
+                    ))
+                    emit("context", {
+                        "message": "production reconciliation blocked completion"
+                    })
+                    continue
 
 
                 # ── Goal autopilot final gate ──
@@ -5207,8 +5248,20 @@ async def _run_agent_graph_core(
 
         else:
             emit("warn", {"message": f"reached max {effective_max_rounds} tool rounds"})
-            state.status = "done"
-            state.result = state.result or f"Reached maximum of {effective_max_rounds} tool rounds."
+            from clawagents.permissions.act_invariants import (
+                completion_block_reason,
+            )
+
+            reconciliation_block = completion_block_reason(run_context)
+            if reconciliation_block:
+                state.status = "max_iterations"
+                state.result = reconciliation_block
+            else:
+                state.status = "done"
+                state.result = (
+                    state.result
+                    or f"Reached maximum of {effective_max_rounds} tool rounds."
+                )
 
     except KeyboardInterrupt:
         emit("warn", {"message": "interrupted"})

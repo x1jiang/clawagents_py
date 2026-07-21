@@ -218,8 +218,15 @@ def _apply_search_replace(content: str, search: str, replace: str) -> tuple[bool
                 + hint,
             )
 
-    if content.count(matched) > 1:
-        return False, content, "SEARCH block matches multiple locations — make it unique"
+    occurrences = content.count(matched)
+    if occurrences > 1:
+        return (
+            False,
+            content,
+            f"SEARCH block matches {occurrences} locations. Do not retry the same "
+            "patch. Add unique neighboring context, or use "
+            "hashline_grep → hashline_edit for an anchored edit.",
+        )
 
     if replace == "":
         new_content = content.replace(matched, "", 1)
@@ -252,9 +259,16 @@ def _hunk_failure_message(
             "do not copy JSON-escaped tool arguments into patch text unless those "
             "backslashes belong in the file."
         )
+    recovery = (
+        " Do not resend this patch unchanged. Refresh the target and retry only "
+        "the failed logical edit with unique context; for large or repetitive "
+        "files prefer hashline_grep → hashline_edit."
+    )
+    if total > 1:
+        recovery += " Split the retry into one localized hunk per call."
     return (
         f"Hunk {index}/{total} failed{staged}. No changes written (atomic). "
-        f"SEARCH starts with {excerpt!r}. {message}{escape_hint}"
+        f"SEARCH starts with {excerpt!r}. {message}{escape_hint}{recovery}"
     )
 
 
@@ -460,7 +474,10 @@ class ApplyPatchTool:
         "or a single-file Codex *** Begin Patch / *** Update File envelope "
         "(path must match; multi-file envelopes are rejected). "
         "Empty REPLACE deletes the SEARCH block. Prefer this over write_file for "
-        "localized changes. Returns a unified diff of what changed."
+        "localized changes. Use unique surrounding context and keep each call to "
+        "one logical region when possible. After a failure, refresh the file or "
+        "switch to hashline_grep/hashline_edit; never resend the same patch "
+        "unchanged. Returns a unified diff of what changed."
     )
     parameters = {
         "path": {"type": "string", "description": "File to patch", "required": True},

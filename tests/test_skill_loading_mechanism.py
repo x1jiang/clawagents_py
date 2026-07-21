@@ -540,11 +540,92 @@ def test_disallowed_tool_refuses_before_auto_drain(tmp_path):
         registry.execute_tool("execute", {}, run_context=context)
     )
     assert not refused.success
-    assert "allows only" in (refused.error or "")
+    assert "allowed-tools" in (refused.error or "")
+    assert "Finishing the pending load will not unlock" in (refused.error or "")
     # Pending load must survive — drain must not have run.
     assert context.pending_skill_next_offset == pending_before
     assert "long-restricted" not in context.active_skills
     assert "Harness auto-continued" not in (refused.output or "")
+
+
+def test_repeated_plain_use_skill_call_continues_pending_page(tmp_path):
+    """A repeated same-name call advances rather than draining and restarting."""
+    root = tmp_path / "skills"
+    _write_skill(
+        root,
+        "long-manual",
+        body="A" * 12_000,
+        frontmatter="name: long-manual\ndescription: long\nallowed-tools: read_file",
+    )
+    store = SkillStore()
+    store.add_directory(root)
+    _load(store)
+    use_tool = [tool for tool in create_skill_tools(store) if tool.name == "use_skill"][0]
+    registry = ToolRegistry()
+    registry.register(use_tool)
+    context = RunContext()
+
+    first = asyncio.run(
+        registry.execute_tool(
+            "use_skill",
+            {"name": "long-manual", "max_chars": 4_000},
+            run_context=context,
+        )
+    )
+    first_offset = context.pending_skill_next_offset
+    assert first.success
+    assert first_offset is not None
+
+    second = asyncio.run(
+        registry.execute_tool(
+            "use_skill",
+            {"name": "long-manual", "max_chars": 4_000},
+            run_context=context,
+        )
+    )
+
+    assert second.success
+    assert "Harness auto-continued" not in (second.output or "")
+    assert context.pending_skill_next_offset is not None
+    assert context.pending_skill_next_offset > first_offset
+
+
+def test_repeated_plain_use_skill_with_changed_arguments_fails_closed(tmp_path):
+    root = tmp_path / "skills"
+    _write_skill(
+        root,
+        "argument-skill",
+        body=("Selected: $ARGUMENTS\n" + "A" * 12_000),
+    )
+    store = SkillStore()
+    store.add_directory(root)
+    _load(store)
+    use_tool = [tool for tool in create_skill_tools(store) if tool.name == "use_skill"][0]
+    registry = ToolRegistry()
+    registry.register(use_tool)
+    context = RunContext()
+
+    first = asyncio.run(
+        registry.execute_tool(
+            "use_skill",
+            {"name": "argument-skill", "arguments": "alpha", "max_chars": 4_000},
+            run_context=context,
+        )
+    )
+    assert first.success
+    assert context.pending_skill_name == "argument-skill"
+
+    changed = asyncio.run(
+        registry.execute_tool(
+            "use_skill",
+            {"name": "argument-skill", "arguments": "beta", "max_chars": 4_000},
+            run_context=context,
+        )
+    )
+    assert not changed.success
+    assert "content changed" in (changed.error or "")
+    assert "Pending cleared" in (changed.error or "")
+    assert context.pending_skill_name is None
 
 
 def test_use_skill_manual_continuation_still_works(tmp_path):

@@ -123,13 +123,22 @@ def _sandbox_write_hint(stdout: str, stderr: str) -> str | None:
         or "credentials.db" in blob
     )
     if home_config:
+        gcloud_route = ""
+        if "gcloud" in blob.lower() or "credentials.db" in blob:
+            gcloud_route = (
+                " For gcloud, a sandbox-compatible alternative is a private, "
+                "temporary config directory: set CLOUDSDK_CONFIG under $TMPDIR "
+                "or /tmp, chmod it 700, and use that same path for auth and later "
+                "commands. Treat it as credential material and never commit it."
+            )
         return (
             "OS sandbox blocked a write outside the workspace (home config / "
             f"credentials). Workspace + {scratch} + /tmp are allowed by default. "
             "gcloud/aws/docker need ~/.config — enable Full access (chat_mode="
             "full_access with Allow Full Access; disables OS sandbox), retry "
             "with execute(unsandboxed=true) under that mode, or run in a "
-            "normal macOS Terminal."
+            f"normal macOS Terminal.{gcloud_route} Do not retry the unchanged "
+            "command while the same sandbox policy is active."
         )
     return (
         f"Sandbox write denied. Prefer the workspace or session scratch "
@@ -310,6 +319,88 @@ def _failure_diagnostic_hint(stdout: str, stderr: str) -> str:
     return ""
 
 
+def _contains_npm_audit_command(command: str) -> bool:
+    """Recognize npm audit after common global options and shell chaining."""
+    try:
+        lexer = shlex.shlex(
+            command,
+            posix=True,
+            punctuation_chars=";&|",
+        )
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return False
+
+    segments: list[list[str]] = [[]]
+    for token in tokens:
+        if token and all(char in ";&|" for char in token):
+            segments.append([])
+        else:
+            segments[-1].append(token)
+
+    value_options = {
+        "--prefix",
+        "--workspace",
+        "-w",
+        "--location",
+        "--registry",
+        "--userconfig",
+    }
+    for segment in segments:
+        index = 0
+        while index < len(segment) and re.fullmatch(
+            r"[A-Za-z_][A-Za-z0-9_]*=.*", segment[index]
+        ):
+            index += 1
+        if index < len(segment) and segment[index] == "env":
+            index += 1
+            while index < len(segment) and re.fullmatch(
+                r"[A-Za-z_][A-Za-z0-9_]*=.*", segment[index]
+            ):
+                index += 1
+        if index >= len(segment) or os.path.basename(segment[index]) != "npm":
+            continue
+        index += 1
+        while index < len(segment):
+            token = segment[index]
+            if token == "audit":
+                return True
+            if token in value_options:
+                index += 2
+                continue
+            if token == "--" or token.startswith("-"):
+                index += 1
+                continue
+            break
+    return False
+
+
+def _npm_audit_hint(
+    command: str, exit_code: int, stdout: str, stderr: str
+) -> str:
+    """Explain npm audit's findings exit without weakening its failure status."""
+    if exit_code == 0 or not _contains_npm_audit_command(command):
+        return ""
+    report = f"{stdout}\n{stderr}"
+    if not re.search(
+        r"# npm audit report|\"auditReportVersion\"|\bvulnerabilit(?:y|ies)\b",
+        report,
+        re.IGNORECASE,
+    ):
+        return ""
+    return (
+        "npm audit completed and returned nonzero because its report found "
+        "vulnerabilities at the configured threshold. Keep this as a failed "
+        "security check, but do not retry it unchanged as an execution failure. "
+        "Triage direct versus transitive and production versus development "
+        "dependencies; review lockfile changes before applying `npm audit fix`. "
+        "Packages marked 'No fix available' need an upstream upgrade, replacement, "
+        "or explicit risk decision. In a chained shell command, earlier checks may "
+        "have succeeded even though the final audit set the overall exit status."
+    )
+
+
 def _redirect_targets(command: str) -> list[str]:
     """Extract explicit shell redirection targets without reading them."""
     try:
@@ -395,6 +486,9 @@ def _format_nonzero_command_output(
     diagnostic = _failure_diagnostic_hint(stdout, stderr)
     if diagnostic:
         interpretation = f"{interpretation} {diagnostic}"
+    audit_hint = _npm_audit_hint(command, exit_code, stdout, stderr)
+    if audit_hint:
+        interpretation = f"{interpretation} {audit_hint}"
     command_hint = _command_failure_hint(
         command, stdout, stderr, warning_prefix
     )
@@ -862,6 +956,24 @@ class ExecTool:
         is_background = _truthy(args.get("is_background")) or immediate_bg
         desc = str(args.get("description") or "").strip()
 
+        if (
+            _truthy(args.get("unsandboxed"))
+            and not _may_run_unsandboxed(run_context, args)
+            and callable(getattr(sb, "wrap_command", None))
+        ):
+            return ToolResult(
+                success=False,
+                output="",
+                error=(
+                    "unsandboxed_not_authorized: command was not run. "
+                    "unsandboxed=true is honored only when chat_mode=full_access "
+                    "and Allow Full Access authorized this run. Enable that mode, "
+                    "or remove unsandboxed=true and move required config/state into "
+                    "an allowed private scratch directory. Retrying unchanged will "
+                    "remain unauthorized."
+                ),
+            )
+
         with tool_span("exec.validate", command=command):
             err, warning_prefix = _preflight_command(
                 command, permission_mode=permission_mode
@@ -885,6 +997,9 @@ class ExecTool:
         # Session + auto-bg adopt need a real local shell. Other backends
         # (in-memory / docker / test doubles) keep the classic sb.exec path.
         is_local_sb = getattr(sb, "kind", None) == "local"
+        is_local_execution = (
+            getattr(_unsandboxed_backend(sb), "kind", None) == "local"
+        )
         sticky_env = is_enabled("execute_shell_env")
         if is_enabled("execute_shell_session") and is_local_sb:
             session = session_for(run_context, sb)
@@ -950,7 +1065,7 @@ class ExecTool:
 
         # Grok-style auto-background on FG timeout (adopt live process).
         use_autobg = (
-            is_local_sb
+            is_local_execution
             and is_enabled("execute_auto_background")
             and is_enabled("execute_background")
         )
@@ -965,10 +1080,30 @@ class ExecTool:
                     _ = total_bytes
                     progress.feed("combined", delta)
 
-            with tool_span("exec.run", command=command, timeout_ms=timeout_ms):
+            try:
+                if _may_run_unsandboxed(run_context, args):
+                    foreground_command = command
+                    warning_prefix += (
+                        "[sandbox: off for this command (unsandboxed)]\n"
+                    )
+                else:
+                    foreground_command = _maybe_wrap_for_profile(
+                        sb, command, cwd=run_cwd
+                    )
+            except Exception as exc:
+                return ToolResult(
+                    success=False,
+                    output="",
+                    error=f"Foreground sandbox wrap failed: {exc}",
+                )
+            warning_prefix += _drain_profile_warnings(sb)
+
+            with tool_span(
+                "exec.run", command=foreground_command, timeout_ms=timeout_ms
+            ):
                 try:
                     result, bgd, job_id = await _exec_foreground_with_autobg(
-                        command,
+                        foreground_command,
                         cwd=run_cwd,
                         timeout_ms=timeout_ms,
                         mgr=mgr,

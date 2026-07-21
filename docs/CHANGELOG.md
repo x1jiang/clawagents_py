@@ -1,6 +1,33 @@
 # ClawAgents Changelog
 
 
+### v6.20.42 — Lower-churn patch, sandbox, timeout, and PTY recovery (July 2026)
+
+- **Patches:** route ambiguous/stale apply_patch failures toward refreshed
+  single-hunk or hashline edits.
+- **Sandbox:** refuse unauthorized `unsandboxed=true` before execution; explain
+  temporary private gcloud config under OS sandbox profiles.
+- **Execute:** auto-background timed-out local commands through default
+  OS-sandbox profiles without dropping the wrap.
+- **PTY:** retain completed screens and exit diagnostics instead of returning
+  `unknown session_id` after reap.
+
+### v6.20.41 — Resilient skill paging and actionable audit findings (July 2026)
+
+- Treat repeated same-name `use_skill` calls as continuation pages.
+- Explain when a tool is outside a skill boundary and stays unavailable.
+- Classify nonzero `npm audit` reports as security findings without weakening
+  failed status.
+- Keep deploy safeguards framework-generic; reconciliation must stay read-only.
+
+### v6.20.40 — Fail-closed external-action reconciliation (July 2026)
+
+- Require approved pre-action verification and post-action reconciliation for
+  external publish/deploy actions.
+- Consume authorization before execution so failures/timeouts cannot hide
+  partial remote state.
+- Block retries, mutations, and final completion until reconciliation succeeds.
+
 ### v6.20.39 — Context Mode binary guard + hashline recovery (July 2026)
 
 - **ctx_execute_file:** reject binary PDF/DOCX/image/ZIP inputs before UTF-8
