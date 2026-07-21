@@ -101,6 +101,12 @@ class MCPBridgedTool:
         self.parameters: Dict[str, Dict[str, Any]] = _normalize_input_schema(descriptor.input_schema)
         self.server_name = server.name
         self.original_tool_name = descriptor.name
+        self.tool_group = "mcp"
+        normalized_server = str(server.name).strip().lower().replace("_", "-")
+        self.context_protection = (
+            normalized_server == "context-mode"
+            or descriptor.name.startswith("ctx_")
+        )
 
     async def execute(self, args: Dict[str, Any]) -> ToolResult:
         try:

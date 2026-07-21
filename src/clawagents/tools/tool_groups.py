@@ -121,6 +121,16 @@ def tools_in_group(group: str) -> frozenset[str]:
     return TOOL_GROUPS.get(group.strip().lower(), frozenset())
 
 
+def _registered_tools_in_group(registry: Any, group: str) -> set[str]:
+    """Combine static group declarations with dynamically bridged tools."""
+    normalized = group.strip().lower()
+    members = set(tools_in_group(normalized))
+    for tool in registry.list_registered():
+        if str(getattr(tool, "tool_group", "")).strip().lower() == normalized:
+            members.add(tool.name)
+    return members
+
+
 def _profile_for_mode(chat_mode: str | None, *, goal_mode: bool = False) -> frozenset[str]:
     mode = (chat_mode or "").strip().lower()
     if goal_mode or mode == "goal":
@@ -144,7 +154,14 @@ def apply_mode_active_profile(
     """Restrict schemas/execution to a mode profile ∩ registered tools."""
     registered = {t.name for t in registry.list_registered()}
     wanted = _profile_for_mode(chat_mode, goal_mode=goal_mode)
-    active = (wanted & registered) | ({"activate_tool_group"} & registered)
+    active = set((wanted & registered) | ({"activate_tool_group"} & registered))
+    # Context-protection MCP tools are the bounded-output route, not optional
+    # feature surface. Keep them visible even under the reduced Luna profile.
+    active.update(
+        tool.name
+        for tool in registry.list_registered()
+        if bool(getattr(tool, "context_protection", False))
+    )
     for name in ("tool_discover", "tool_describe", "tool_profile"):
         if name in registered:
             active.add(name)
@@ -183,7 +200,7 @@ class ActivateToolGroupTool:
             registered = {t.name for t in self._registry.list_registered()}
             rows = []
             for g in group_names():
-                members = sorted(tools_in_group(g) & registered)
+                members = sorted(_registered_tools_in_group(self._registry, g) & registered)
                 if not members:
                     continue
                 rows.append({"group": g, "tools": members, "count": len(members)})
@@ -192,7 +209,7 @@ class ActivateToolGroupTool:
                 True,
                 json.dumps({"groups": rows, "active_count": len(active), "active": active}),
             )
-        members = tools_in_group(group)
+        members = _registered_tools_in_group(self._registry, group)
         if not members:
             return ToolResult(
                 False,

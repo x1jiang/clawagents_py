@@ -70,6 +70,15 @@ class ToolResultEvent(StreamEvent):
 
 
 @dataclass
+class ToolProgressEvent(StreamEvent):
+    tool_name: str = ""
+    stream: str = "stdout"
+    delta: str = ""
+    total_bytes: int = 0
+    kind: str = "tool_progress"
+
+
+@dataclass
 class ApprovalRequiredEvent(StreamEvent):
     tool_name: str = ""
     call_id: str = ""
@@ -79,6 +88,7 @@ class ApprovalRequiredEvent(StreamEvent):
 
 @dataclass
 class UsageEvent(StreamEvent):
+    prompt_tokens: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
@@ -87,6 +97,8 @@ class UsageEvent(StreamEvent):
     # only present in ``data`` and never promoted to typed fields.
     cached_input_tokens: int = 0
     cache_creation_tokens: int = 0
+    time_to_first_token_ms: float | None = None
+    peak_memory_bytes: int = 0
     model: str = ""
     kind: str = "usage"
 
@@ -150,6 +162,7 @@ AnyStreamEvent = Union[
     ToolCallPlannedEvent,
     ToolStartedEvent,
     ToolResultEvent,
+    ToolProgressEvent,
     ApprovalRequiredEvent,
     UsageEvent,
     GuardrailTrippedEvent,
@@ -168,6 +181,7 @@ _KIND_TO_CLS: dict[str, type[StreamEvent]] = {
     "tool_call": ToolCallPlannedEvent,
     "tool_started": ToolStartedEvent,
     "tool_result": ToolResultEvent,
+    "tool_progress": ToolProgressEvent,
     "approval_required": ApprovalRequiredEvent,
     "usage": UsageEvent,
     "guardrail_tripped": GuardrailTrippedEvent,

@@ -11,6 +11,7 @@ for reads outside that directory.
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 import uuid
@@ -111,6 +112,80 @@ def store_tool_artifact(
         json.dumps(meta, indent=2), encoding="utf-8"
     )
     return artifact_id, body
+
+
+def store_exec_artifact_from_spills(
+    *,
+    tool_use_id: str,
+    stdout: str,
+    stderr: str,
+    stdout_path: str | Path | None = None,
+    stderr_path: str | Path | None = None,
+    workspace: str | Path | None = None,
+    extra_meta: dict[str, Any] | None = None,
+) -> tuple[str, Path, int]:
+    """Adopt complete command streams into a retrievable artifact.
+
+    Spilled streams are copied incrementally, never loaded wholesale. Source
+    spill files are removed after adoption. In-memory strings are used only
+    for streams small enough not to have spilled.
+    """
+    directory = tool_artifact_dir(workspace)
+    artifact_id = _safe_id(tool_use_id)
+    body = _body_path(directory, artifact_id)
+    if body.exists():
+        artifact_id = f"{artifact_id}-{uuid.uuid4().hex[:8]}"
+        body = _body_path(directory, artifact_id)
+
+    chars = 0
+
+    def _copy(source: str | Path | None, fallback: str, target: Any) -> int:
+        written = 0
+        if source is None:
+            target.write(fallback)
+            return len(fallback)
+        with Path(source).open("r", encoding="utf-8", errors="replace") as handle:
+            while True:
+                chunk = handle.read(64 * 1024)
+                if not chunk:
+                    break
+                target.write(chunk)
+                written += len(chunk)
+        return written
+
+    try:
+        with body.open("w", encoding="utf-8", errors="replace") as target:
+            chars += _copy(stdout_path, stdout, target)
+            if stderr_path is not None or stderr:
+                separator = "\n" if chars else ""
+                marker = f"{separator}[stderr] "
+                target.write(marker)
+                chars += len(marker)
+                chars += _copy(stderr_path, stderr, target)
+    finally:
+        for source in (stdout_path, stderr_path):
+            if source is not None:
+                try:
+                    os.unlink(source)
+                except FileNotFoundError:
+                    pass
+
+    meta = {
+        "id": artifact_id,
+        "tool_name": "execute",
+        "tool_use_id": tool_use_id,
+        "kind": "log",
+        "chars": chars,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "path": body.name,
+        "complete_command_output": True,
+    }
+    if extra_meta:
+        meta.update({k: v for k, v in extra_meta.items() if k != "path"})
+    _meta_path(directory, artifact_id).write_text(
+        json.dumps(meta, indent=2), encoding="utf-8"
+    )
+    return artifact_id, body, chars
 
 
 def load_tool_artifact(

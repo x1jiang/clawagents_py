@@ -9,7 +9,7 @@ Implementations:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 
 @dataclass(frozen=True)
@@ -33,6 +33,10 @@ class ExecResult:
     stderr: str
     exit_code: int
     killed: bool = False
+    # Full stream spill files. Present only when the corresponding bounded
+    # in-memory preview was truncated; callers own cleanup/adoption.
+    stdout_path: str | None = None
+    stderr_path: str | None = None
 
 
 @runtime_checkable
@@ -81,4 +85,7 @@ class SandboxBackend(Protocol):
         timeout: int | None = None,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
+        *,
+        max_output_chars: int | None = None,
+        on_output: Any | None = None,
     ) -> ExecResult: ...

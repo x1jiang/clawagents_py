@@ -590,6 +590,83 @@ def _estimate_messages_tokens(
     )
 
 
+class IncrementalTokenLedger:
+    """Provider-reported usage with incremental estimation between checkpoints.
+
+    After an exact provider input-token count (or a full re-estimate), only
+    newly appended messages are re-estimated — avoiding O(n) recounts every
+    turn when the prefix is unchanged by identity.
+    """
+
+    def __init__(self, estimate_messages: Callable[[list[LLMMessage]], int]) -> None:
+        self._estimate_messages = estimate_messages
+        self._checkpoint: list[LLMMessage] = []
+        self._checkpoint_tokens = 0
+
+    def rebase(
+        self, messages: list[LLMMessage], exact_tokens: int | None = None
+    ) -> int:
+        self._checkpoint = list(messages)
+        self._checkpoint_tokens = (
+            int(exact_tokens)
+            if exact_tokens is not None
+            else int(self._estimate_messages(messages))
+        )
+        return self._checkpoint_tokens
+
+    def record_provider_usage(
+        self, messages: list[LLMMessage], input_tokens: int
+    ) -> int:
+        return self.rebase(
+            messages, input_tokens if input_tokens > 0 else None
+        )
+
+    def estimate(self, messages: list[LLMMessage]) -> int:
+        has_prefix = len(self._checkpoint) <= len(messages) and all(
+            messages[i] is self._checkpoint[i] for i in range(len(self._checkpoint))
+        )
+        if not has_prefix:
+            return self.rebase(messages)
+        if len(messages) == len(self._checkpoint):
+            return self._checkpoint_tokens
+        return self._checkpoint_tokens + int(
+            self._estimate_messages(messages[len(self._checkpoint) :])
+        )
+
+
+async def _llm_chat(
+    llm: LLMProvider,
+    messages: list[LLMMessage],
+    *,
+    on_chunk: Any = None,
+    cancel_event: Any = None,
+    tools: Any = None,
+    session_id: str | None = None,
+    on_first_token: Any = None,
+) -> LLMResponse:
+    """Call ``llm.chat``, forwarding session/TTFT kwargs when supported."""
+    import inspect
+
+    kwargs: dict[str, Any] = {
+        "on_chunk": on_chunk,
+        "cancel_event": cancel_event,
+        "tools": tools,
+    }
+    try:
+        params = inspect.signature(llm.chat).parameters
+        accepts_extra = any(
+            param.kind is inspect.Parameter.VAR_KEYWORD
+            for param in params.values()
+        )
+        if "session_id" in params or accepts_extra:
+            kwargs["session_id"] = session_id
+        if "on_first_token" in params or accepts_extra:
+            kwargs["on_first_token"] = on_first_token
+    except (TypeError, ValueError):
+        pass
+    return await llm.chat(messages, **kwargs)
+
+
 # ─── Tool Argument Truncation in Old Messages (learned from deepagents) ───
 
 _MAX_ARG_LENGTH = 2000
@@ -1248,7 +1325,7 @@ def _micro_compact_tool_results(
 
         result.append(msg)
 
-    return result
+    return messages if cleared == 0 else result
 
 
 # ─── Soft-Trim: prune stale/low-value content before compaction ───────────
@@ -1267,6 +1344,7 @@ def _soft_trim_messages(
     token_multiplier: float,
     emit: OnEvent,
     model_name: Optional[str] = None,
+    current_tokens: int | None = None,
 ) -> list[LLMMessage]:
     """Remove stale/low-value content from context before hitting compaction threshold."""
     effective_window, budget_ratio = (
@@ -1280,7 +1358,8 @@ def _soft_trim_messages(
     long_ctx = _resolve_long_context_threshold(model_name)
     if long_ctx:
         soft_budget = min(soft_budget, max(8_000, int(long_ctx * 0.95)))
-    current_tokens = _estimate_messages_tokens(messages, token_multiplier)
+    if current_tokens is None:
+        current_tokens = _estimate_messages_tokens(messages, token_multiplier)
 
     if current_tokens <= soft_budget:
         return messages
@@ -1346,8 +1425,9 @@ def _soft_trim_messages(
 
         result.append(m)
 
-    if trim_count > 0:
-        emit("context", {"message": f"soft-trim: trimmed {trim_count} old tool results"})
+    if trim_count == 0:
+        return messages
+    emit("context", {"message": f"soft-trim: trimmed {trim_count} old tool results"})
     return result
 
 
@@ -2319,13 +2399,6 @@ def _wal_write(messages: list[LLMMessage]) -> None:
 # ─── Helpers ──────────────────────────────────────────────────────────────
 
 
-def _make_buffer():
-    buf: list[str] = []
-    def on_chunk(chunk: str) -> None:
-        buf.append(chunk)
-    return buf, on_chunk
-
-
 # ─── Truncated JSON Detection ─────────────────────────────────────────────
 
 _TRUNCATED_JSON_RE = re.compile(r'\{\s*"tool"\s*:', re.DOTALL)
@@ -2623,15 +2696,24 @@ async def _run_agent_graph_core(
         run_context = RunContext(context=user_context)
     elif user_context is not None and run_context.context is None:
         run_context.context = user_context
-    # Tools (execute streaming, skills) read callbacks/metadata from run_context.
-    run_context.on_event = emit
     # Ephemeral id for ${SESSION_ID} skill substitutions when persistence is off.
-    if not getattr(run_context, "session_id", None):
-        import uuid as _uuid
+    # Also used as the OpenAI prompt_cache_key / session affinity identity.
+    import uuid as _uuid
 
-        _ephemeral_sid = f"run-{_uuid.uuid4().hex[:12]}"
-        run_context.session_id = _ephemeral_sid
-        run_context._metadata["session_id"] = _ephemeral_sid
+    _meta_sid = run_context._metadata.get("session_id") or run_context._metadata.get(
+        "sessionId"
+    )
+    if getattr(session, "session_id", None):
+        provider_session_id = str(session.session_id)
+    elif getattr(run_context, "session_id", None):
+        provider_session_id = str(run_context.session_id)
+    elif isinstance(_meta_sid, str) and _meta_sid:
+        provider_session_id = _meta_sid
+    else:
+        provider_session_id = f"run-{_uuid.uuid4().hex[:12]}"
+    run_context.session_id = provider_session_id
+    run_context._metadata["session_id"] = provider_session_id
+    run_context._metadata["sessionId"] = provider_session_id
     usage = run_context.usage
 
     # Per-agent iteration budget (Hermes parity). If the caller has not
@@ -2654,24 +2736,49 @@ async def _run_agent_graph_core(
         except Exception as err:
             emit("warn", {"message": f"on_stream_event error: {err}"})
 
-    def _accumulate_usage(resp: LLMResponse) -> RequestUsage:
+    # Tools (execute streaming, skills) read callbacks/metadata from run_context.
+    run_context.on_event = emit
+    run_context._metadata["_emit_typed_event"] = _emit_typed
+
+    def _accumulate_usage(
+        resp: LLMResponse,
+        *,
+        time_to_first_token_ms: float | None = None,
+        peak_memory_bytes: int = 0,
+    ) -> RequestUsage:
         prompt_t = int(getattr(resp, "prompt_tokens", 0) or 0)
         total_t = int(getattr(resp, "tokens_used", 0) or 0)
         output_t = int(getattr(resp, "completion_tokens", max(total_t - prompt_t, 0)) or 0)
+        cache_read_t = int(getattr(resp, "cache_read_tokens", 0) or 0)
+        cache_write_t = int(getattr(resp, "cache_creation_tokens", 0) or 0)
+        uncached_input_t = int(
+            getattr(
+                resp,
+                "uncached_input_tokens",
+                max(prompt_t - cache_read_t - cache_write_t, 0),
+            )
+            or 0
+        )
         req = usage.add_response(
             model=getattr(resp, "model", None) or "",
-            input_tokens=prompt_t,
+            prompt_tokens=prompt_t,
+            input_tokens=uncached_input_t,
             output_tokens=output_t,
             total_tokens=total_t,
-            cached_input_tokens=int(getattr(resp, "cache_read_tokens", 0) or 0),
-            cache_creation_tokens=int(getattr(resp, "cache_creation_tokens", 0) or 0),
+            cached_input_tokens=cache_read_t,
+            cache_creation_tokens=cache_write_t,
+            time_to_first_token_ms=time_to_first_token_ms,
+            peak_memory_bytes=peak_memory_bytes,
         )
         _emit_typed("usage", {
+            "prompt_tokens": req.prompt_tokens,
             "input_tokens": req.input_tokens,
             "output_tokens": req.output_tokens,
             "total_tokens": req.total_tokens,
             "cached_input_tokens": req.cached_input_tokens,
             "cache_creation_tokens": req.cache_creation_tokens,
+            "time_to_first_token_ms": req.time_to_first_token_ms,
+            "peak_memory_bytes": usage.peak_memory_bytes,
             "model": req.model,
         })
         return req
@@ -3034,6 +3141,11 @@ async def _run_agent_graph_core(
             cached_system_tokens=_cached_sys_tokens or None,
         )
 
+    # One full tokenization here; later rounds count only appended messages.
+    token_ledger = IncrementalTokenLedger(_budget_tokens)
+    token_ledger.rebase(messages, _budget_tokens(messages))
+    usage.sample_memory()
+
     state = AgentState(
         messages=messages,
         current_task=task,
@@ -3308,6 +3420,7 @@ async def _run_agent_graph_core(
 
             # Patch dangling tool calls before sending to LLM
             messages = _patch_dangling_tool_calls(messages)
+            current_context_tokens = token_ledger.estimate(messages)
             # Claude Code pattern: clear old tool results — but only when the
             # transcript is actually filling up (see _MICRO_COMPACT_MIN_USAGE_RATIO).
             from clawagents.harness_profiles import resolve_harness_profile as _rhp
@@ -3322,23 +3435,45 @@ async def _run_agent_graph_core(
                 if _mc_profile and _mc_profile.clear_tool_trigger_ratio is not None
                 else _MICRO_COMPACT_MIN_USAGE_RATIO
             )
-            _mc_tokens = _budget_tokens(messages)
-            _mc_safety = context_window * _mc_ratio
+            context_budget_window, context_budget_ratio = (
+                _resolve_context_budget(resolved_model_name, context_window)
+                if resolved_model_name
+                else (context_window, _CONTEXT_BUDGET_RATIO)
+            )
+            compaction_budget = int(context_budget_window * context_budget_ratio)
+            soft_trim_budget = int(compaction_budget * _SOFT_TRIM_BUDGET_FRACTION)
+            _mc_safety = context_budget_window * _mc_ratio
             # Economic trigger: start clearing old tool results before the
             # model's long-context pricing cliff (Luna 272K → ~245K).
             _long_ctx = _resolve_long_context_threshold(resolved_model_name)
             _mc_econ = int(_long_ctx * 0.90) if _long_ctx else None
-            if _mc_tokens > _mc_safety or (
-                _mc_econ is not None and _mc_tokens > _mc_econ
+            if current_context_tokens > _mc_safety or (
+                _mc_econ is not None and current_context_tokens > _mc_econ
             ):
-                messages = _micro_compact_tool_results(messages, keep_recent=_mc_keep)
-            messages = _soft_trim_messages(messages, context_window, token_multiplier, emit, resolved_model_name)
-            messages = await _compact_if_needed(
-                messages, context_window, llm, emit, token_multiplier, resolved_model_name, run_context,
-                fire_hook=_fire_hook,
-                savings_history=_compaction_savings,
-                taxonomy_dispatcher=taxonomy_dispatcher,
-            )
+                compacted = _micro_compact_tool_results(messages, keep_recent=_mc_keep)
+                if compacted is not messages:
+                    messages = compacted
+                    current_context_tokens = token_ledger.rebase(messages)
+            if current_context_tokens > soft_trim_budget:
+                trimmed = _soft_trim_messages(
+                    messages,
+                    context_window,
+                    token_multiplier,
+                    emit,
+                    resolved_model_name,
+                    current_context_tokens,
+                )
+                if trimmed is not messages:
+                    messages = trimmed
+                    current_context_tokens = token_ledger.rebase(messages)
+            if current_context_tokens > compaction_budget:
+                messages = await _compact_if_needed(
+                    messages, context_window, llm, emit, token_multiplier, resolved_model_name, run_context,
+                    fire_hook=_fire_hook,
+                    savings_history=_compaction_savings,
+                    taxonomy_dispatcher=taxonomy_dispatcher,
+                )
+                current_context_tokens = token_ledger.rebase(messages)
             # Compaction / trim can still leave pairs inconsistent — sanitize again.
             messages = _patch_dangling_tool_calls(messages)
 
@@ -3385,10 +3520,17 @@ async def _run_agent_graph_core(
             # run — mark them seen so they are never persisted to the session.
             _session_note_messages(track=False)
 
-            buf, _buffer_chunk = _make_buffer()
+            request_token_estimate = token_ledger.estimate(messages)
+            request_started_at = time.perf_counter()
+            time_to_first_token_ms: float | None = None
+
+            def _record_first_token(*_args: Any) -> None:
+                nonlocal time_to_first_token_ms
+                if time_to_first_token_ms is None:
+                    time_to_first_token_ms = (time.perf_counter() - request_started_at) * 1000.0
 
             def on_chunk(chunk: str) -> None:
-                _buffer_chunk(chunk)
+                _record_first_token()
                 _emit_typed("assistant_delta", {"delta": chunk})
 
             if active_hooks:
@@ -3465,15 +3607,31 @@ async def _run_agent_graph_core(
                             for s in turn_tools
                             if s.name in allowed or s.name in control
                         ]
-                response = await llm.chat(
+                usage.sample_memory()
+                response = await _llm_chat(
+                    llm,
                     chat_messages,
                     on_chunk=on_chunk if streaming else None,
                     cancel_event=cancel_event,
                     tools=turn_tools,
+                    session_id=provider_session_id,
+                    on_first_token=_record_first_token if streaming else None,
                 )
+                # If a provider produced no observable text/tool delta, leave
+                # TTFT unknown instead of mislabeling total request latency.
                 if not resolved_model_name and response.model:
                     resolved_model_name = response.model
-                _last_request_usage = _accumulate_usage(response)
+                input_tokens = int(getattr(response, "prompt_tokens", 0) or 0)
+                token_ledger.record_provider_usage(
+                    messages,
+                    input_tokens or request_token_estimate,
+                )
+                peak_memory_bytes = usage.sample_memory()
+                _last_request_usage = _accumulate_usage(
+                    response,
+                    time_to_first_token_ms=time_to_first_token_ms,
+                    peak_memory_bytes=peak_memory_bytes,
+                )
                 if active_hooks:
                     await _fire_hook(
                         "on_llm_end",
@@ -3556,6 +3714,7 @@ async def _run_agent_graph_core(
                         savings_history=_compaction_savings,
                         taxonomy_dispatcher=taxonomy_dispatcher,
                     )
+                    token_ledger.rebase(messages)
                     # Don't persist recovery-compaction artifacts to the session.
                     _session_note_messages(track=False)
                     continue

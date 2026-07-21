@@ -21,9 +21,12 @@ import os
 import re
 import shlex
 import sys
+import time
+import uuid
 from typing import Any, Dict, List, Optional
 
 from clawagents.permissions.mode import PermissionMode
+from clawagents.sandbox.backend import ExecResult
 from clawagents.tools.bash_validator import (
     BashDecision,
     CommandCategory,
@@ -515,6 +518,53 @@ def _drain_profile_warnings(sb: Any) -> str:
     return "".join(f"[sandbox_profile: {w}]\n" for w in batch)
 
 
+def _discard_exec_spills(result: Any) -> None:
+    for value in (
+        getattr(result, "stdout_path", None),
+        getattr(result, "stderr_path", None),
+    ):
+        if value:
+            try:
+                os.unlink(value)
+            except FileNotFoundError:
+                pass
+
+
+def _archive_exec_spills(
+    result: Any,
+    *,
+    stdout: str,
+    stderr: str,
+    workspace: str,
+    command: str,
+) -> str:
+    """Adopt complete spilled streams and return a compact retrieval header."""
+    stdout_path = getattr(result, "stdout_path", None)
+    stderr_path = getattr(result, "stderr_path", None)
+    if not stdout_path and not stderr_path:
+        return ""
+    from clawagents.tool_output_artifacts import store_exec_artifact_from_spills
+
+    tool_use_id = f"execute-{uuid.uuid4().hex[:16]}"
+    try:
+        artifact_id, _path, chars = store_exec_artifact_from_spills(
+            tool_use_id=tool_use_id,
+            stdout=stdout,
+            stderr=stderr,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            workspace=workspace,
+            extra_meta={"command": command[:1_000]},
+        )
+    except Exception as exc:
+        _discard_exec_spills(result)
+        return f"[warning: failed to archive complete command output: {exc}]\n"
+    return (
+        f"[Complete command output archived id={artifact_id}; {chars} chars. "
+        f"Retrieve with retrieve_tool_result(id=\"{artifact_id}\").]\n"
+    )
+
+
 def _maybe_wrap_for_profile(sb: Any, command: str, *, cwd: str | None) -> str:
     """Apply seatbelt/bwrap wrap when ``sb`` is a ProfileBackend."""
     wrap = getattr(sb, "wrap_command", None)
@@ -562,10 +612,10 @@ async def _exec_foreground_with_autobg(
     mgr: Any,
     on_chunk: Any | None = None,
     streaming: bool = False,
-) -> tuple[str, str, int, bool, Optional[str]]:
+) -> tuple[ExecResult, bool, Optional[str]]:
     """Run shell; on timeout adopt the process into ``mgr``.
 
-    Returns ``(stdout, stderr, exit_code, timed_out_backgrounded, job_id|None)``.
+    Returns ``(result, timed_out_backgrounded, job_id|None)``.
     """
     import signal
 
@@ -580,68 +630,33 @@ async def _exec_foreground_with_autobg(
         start_new_session=True,
     )
 
-    if not streaming:
-        comm = asyncio.create_task(proc.communicate())
-        try:
-            out_b, err_b = await asyncio.wait_for(asyncio.shield(comm), timeout=timeout_s)
-            return (
-                (out_b or b"").decode("utf-8", errors="replace"),
-                (err_b or b"").decode("utf-8", errors="replace"),
-                proc.returncode or 0,
-                False,
-                None,
-            )
-        except asyncio.TimeoutError:
-            argv = _shell_argv(command)
-            job = await mgr.adopt(proc, argv, cwd=cwd, communicate_task=comm)
-            return ("", "", 0, True, job.id)
-        except (asyncio.CancelledError, Exception):
-            # CancelledError is BaseException — must kill the shielded child too.
-            if not comm.done():
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError, OSError):
-                    try:
-                        proc.kill()
-                    except ProcessLookupError:
-                        pass
-                try:
-                    await comm
-                except Exception:
-                    pass
-            raise
+    # Always pump incrementally, even when live events are disabled. This keeps
+    # memory bounded for the non-streaming configuration too.
+    from clawagents.utils.bounded_output import SpoolingTextAccumulator
 
-    # Streaming path: pump pipes; emit on_chunk; adopt with drain task on timeout.
-    # Cap retained output so a runaway process cannot blow memory; still drain pipes.
-    out_parts: list[str] = []
-    err_parts: list[str] = []
     total = 0
-    retained = 0
-    retain_cap = MAX_OUTPUT_CHARS * 4
+    out_acc = SpoolingTextAccumulator(MAX_OUTPUT_CHARS)
+    err_acc = SpoolingTextAccumulator(MAX_OUTPUT_CHARS)
 
-    async def _pump(stream: Any, parts: list[str]) -> str:
-        nonlocal total, retained
+    async def _pump(stream: Any, acc: SpoolingTextAccumulator) -> str:
+        nonlocal total
         while True:
             chunk = await stream.read(4096)
             if not chunk:
                 break
             text = chunk.decode("utf-8", errors="replace")
             total += len(text)
-            if retained < retain_cap:
-                take = text[: max(0, retain_cap - retained)]
-                if take:
-                    parts.append(take)
-                    retained += len(take)
-            if on_chunk is not None:
+            acc.append(text)
+            if streaming and on_chunk is not None:
                 try:
                     # Bound event payload size for hosts that forward progress live.
                     on_chunk(text[:2000], total)
                 except Exception:
                     pass
-        return "".join(parts)
+        return str(acc)
 
-    out_t = asyncio.create_task(_pump(proc.stdout, out_parts))
-    err_t = asyncio.create_task(_pump(proc.stderr, err_parts))
+    out_t = asyncio.create_task(_pump(proc.stdout, out_acc))
+    err_t = asyncio.create_task(_pump(proc.stderr, err_acc))
     wait_t = asyncio.create_task(proc.wait())
 
     async def _finish_comm() -> tuple[bytes, bytes]:
@@ -649,6 +664,12 @@ async def _exec_foreground_with_autobg(
         err_s = await err_t
         if not wait_t.done():
             await wait_t
+        for path in (out_acc.close(), err_acc.close()):
+            if path:
+                try:
+                    os.unlink(path)
+                except FileNotFoundError:
+                    pass
         return out_s.encode("utf-8", errors="replace"), err_s.encode(
             "utf-8", errors="replace"
         )
@@ -657,12 +678,22 @@ async def _exec_foreground_with_autobg(
         await asyncio.wait_for(asyncio.shield(wait_t), timeout=timeout_s)
         stdout = await out_t
         stderr = await err_t
-        return stdout, stderr, proc.returncode or 0, False, None
+        return (
+            ExecResult(
+                stdout=stdout,
+                stderr=stderr,
+                exit_code=proc.returncode or 0,
+                stdout_path=out_acc.close(),
+                stderr_path=err_acc.close(),
+            ),
+            False,
+            None,
+        )
     except asyncio.TimeoutError:
         argv = _shell_argv(command)
         comm = asyncio.create_task(_finish_comm())
         job = await mgr.adopt(proc, argv, cwd=cwd, communicate_task=comm)
-        return ("", "", 0, True, job.id)
+        return (ExecResult(stdout="", stderr="", exit_code=0), True, job.id)
     except (asyncio.CancelledError, Exception):
         try:
             os.killpg(proc.pid, signal.SIGKILL)
@@ -674,7 +705,86 @@ async def _exec_foreground_with_autobg(
         for t in (out_t, err_t, wait_t):
             if not t.done():
                 t.cancel()
+        for path in (out_acc.close(), err_acc.close()):
+            if path:
+                try:
+                    os.unlink(path)
+                except FileNotFoundError:
+                    pass
         raise
+
+
+class _ToolProgressEmitter:
+    """Coalesce command deltas into bounded updates emitted at most every 100ms."""
+
+    def __init__(self, run_context: Any, interval_s: float = 0.1) -> None:
+        try:
+            from clawagents.config.features import is_enabled
+
+            enabled = is_enabled("execute_streaming")
+        except Exception:
+            enabled = False
+        callback = getattr(run_context, "on_event", None) if run_context else None
+        self._callback = callback if enabled and callable(callback) else None
+        metadata = getattr(run_context, "_metadata", None) if run_context else None
+        typed_callback = (
+            metadata.get("_emit_typed_event") if isinstance(metadata, dict) else None
+        )
+        self._typed_callback = typed_callback if callable(typed_callback) else None
+        self._interval_s = interval_s
+        self._last_emit = 0.0
+        self._pending = ""
+        self._total = 0
+        self._stream = "stdout"
+        self._handle: Any | None = None
+
+    def feed(self, stream: str, delta: str) -> None:
+        if self._callback is None or not delta:
+            return
+        self._total += len(delta)
+        self._stream = stream
+        self._pending = (self._pending + delta)[-4_000:]
+        elapsed = time.monotonic() - self._last_emit
+        if elapsed >= self._interval_s:
+            self.flush()
+            return
+        if self._handle is None:
+            try:
+                loop = asyncio.get_running_loop()
+                self._handle = loop.call_later(
+                    self._interval_s - elapsed, self._scheduled_flush
+                )
+            except RuntimeError:
+                pass
+
+    def _scheduled_flush(self) -> None:
+        self._handle = None
+        self.flush()
+
+    def flush(self) -> None:
+        if self._handle is not None:
+            self._handle.cancel()
+            self._handle = None
+        if self._callback is None or not self._pending:
+            return
+        delta = self._pending[-2_000:]
+        self._pending = ""
+        self._last_emit = time.monotonic()
+        data = {
+            "tool_name": "execute",
+            "stream": self._stream,
+            "delta": delta,
+            "total_bytes": self._total,
+        }
+        try:
+            self._callback("tool_progress", data)
+        except Exception:
+            pass
+        if self._typed_callback is not None:
+            try:
+                self._typed_callback("tool_progress", data)
+            except Exception:
+                pass
 
 
 class ExecTool:
@@ -682,6 +792,9 @@ class ExecTool:
     keywords = ["shell", "bash", "command", "run script", "terminal"]
     description = (
         "Execute a non-interactive shell command and return its output. "
+        "When ctx_execute or ctx_batch_execute is available, prefer those for "
+        "broad reads or output that needs filtering; use execute for bounded "
+        "commands, mutations, builds, and tests. "
         "Working directory and (when enabled) env exports persist across calls "
         "in this session. Noisy commands (pytest, git status/log/diff, ls, rg, …) "
         "may be auto-wrapped with rtk when installed. "
@@ -845,25 +958,16 @@ class ExecTool:
             mgr = _bg_manager(run_context)
             on_chunk = None
             streaming = is_enabled("execute_streaming")
-            on_event = getattr(run_context, "on_event", None) if run_context else None
-            if streaming and callable(on_event):
+            progress = _ToolProgressEmitter(run_context)
+            if streaming:
 
                 def on_chunk(delta: str, total_bytes: int) -> None:
-                    try:
-                        on_event(
-                            "tool_progress",
-                            {
-                                "tool_name": "execute",
-                                "delta": delta[-2000:],
-                                "total_bytes": total_bytes,
-                            },
-                        )
-                    except Exception:
-                        pass
+                    _ = total_bytes
+                    progress.feed("combined", delta)
 
             with tool_span("exec.run", command=command, timeout_ms=timeout_ms):
                 try:
-                    stdout, stderr, exit_code, bgd, job_id = await _exec_foreground_with_autobg(
+                    result, bgd, job_id = await _exec_foreground_with_autobg(
                         command,
                         cwd=run_cwd,
                         timeout_ms=timeout_ms,
@@ -872,11 +976,13 @@ class ExecTool:
                         streaming=streaming,
                     )
                 except Exception as e:
+                    progress.flush()
                     return ToolResult(
                         success=False, output="", error=f"Command failed: {str(e)}"
                     )
 
             if bgd and job_id:
+                progress.flush()
                 # Trailers were already injected via session.wrap — sync cwd/env
                 # when the adopted job finishes so later FG execute is not stale.
                 if session is not None:
@@ -925,8 +1031,24 @@ class ExecTool:
                     output=warning_prefix + json.dumps(payload, indent=2),
                 )
 
+            stdout = result.stdout
+            stderr = result.stderr
+            exit_code = result.exit_code
+
             if session is not None:
+                stdout_path = getattr(result, "stdout_path", None)
+                if stdout_path:
+                    session.consume_stdout_file(stdout_path, sticky_env=sticky_env)
                 stdout = session.consume_stdout(stdout, sticky_env=sticky_env)
+
+            progress.flush()
+            archive_header = _archive_exec_spills(
+                result,
+                stdout=stdout,
+                stderr=stderr,
+                workspace=run_cwd,
+                command=str(args.get("command", command)),
+            )
 
             success = exit_code == 0
             if not success:
@@ -938,11 +1060,11 @@ class ExecTool:
                 ):
                     return ToolResult(
                         success=True,
-                        output=warning_prefix + "Search completed: no matches found.",
+                        output=warning_prefix + archive_header + "Search completed: no matches found.",
                     )
                 return ToolResult(
                     success=False,
-                    output=_format_nonzero_command_output(
+                    output=archive_header + _format_nonzero_command_output(
                         str(args.get("command", command)),
                         exit_code,
                         stdout or "",
@@ -959,7 +1081,8 @@ class ExecTool:
             if session is not None:
                 warning_prefix += f"[shell_session: cwd now {session.cwd}]\n"
             return ToolResult(
-                success=True, output=warning_prefix + (output or "(no output)")
+                success=True,
+                output=warning_prefix + archive_header + (output or "(no output)"),
             )
 
         # Legacy sandbox path (kill-on-timeout). Profile backends land here
@@ -969,14 +1092,29 @@ class ExecTool:
             exec_sb = _unsandboxed_backend(sb)
             warning_prefix += "[sandbox: off for this command (unsandboxed)]\n"
 
+        progress = _ToolProgressEmitter(run_context)
+
         async def _run_once(target: Any):
             try:
-                return await target.exec(command, timeout=timeout_ms, cwd=run_cwd)
+                return await target.exec(
+                    command,
+                    timeout=timeout_ms,
+                    cwd=run_cwd,
+                    max_output_chars=MAX_OUTPUT_CHARS,
+                    on_output=progress.feed,
+                )
             except TypeError as e:
                 msg = str(e).lower()
-                if "cwd" not in msg and "unexpected keyword" not in msg:
+                if "unexpected keyword" not in msg and "cwd" not in msg and "max_output" not in msg:
                     raise
-                return await target.exec(command, timeout=timeout_ms)
+                try:
+                    return await target.exec(
+                        command,
+                        timeout=timeout_ms,
+                        cwd=run_cwd,
+                    )
+                except TypeError:
+                    return await target.exec(command, timeout=timeout_ms)
 
         with tool_span("exec.run", command=command, timeout_ms=timeout_ms):
             try:
@@ -990,9 +1128,24 @@ class ExecTool:
             warning_prefix += _drain_profile_warnings(sb)
 
             if result.killed:
+                stdout = result.stdout or ""
+                stderr = getattr(result, "stderr", None) or ""
+                if session is not None:
+                    stdout_path = getattr(result, "stdout_path", None)
+                    if stdout_path:
+                        session.consume_stdout_file(stdout_path, sticky_env=sticky_env)
+                    stdout = session.consume_stdout(stdout, sticky_env=sticky_env)
+                archive_header = _archive_exec_spills(
+                    result,
+                    stdout=stdout,
+                    stderr=stderr,
+                    workspace=run_cwd,
+                    command=str(args.get("command", command)),
+                )
+                progress.flush()
                 return ToolResult(
                     success=False,
-                    output="",
+                    output=archive_header + _truncate_exec_output(stdout + stderr),
                     error=(
                         f"Command timed out after {timeout_ms}ms: "
                         f"{args.get('command', command)}"
@@ -1015,6 +1168,7 @@ class ExecTool:
                 warning_prefix += (
                     "[sandbox: EPERM — auto-retrying once without OS sandbox]\n"
                 )
+                _discard_exec_spills(result)
                 try:
                     result = await _run_once(_unsandboxed_backend(sb))
                     stdout = result.stdout or ""
@@ -1027,7 +1181,19 @@ class ExecTool:
                     )
 
             if session is not None:
+                stdout_path = getattr(result, "stdout_path", None)
+                if stdout_path:
+                    session.consume_stdout_file(stdout_path, sticky_env=sticky_env)
                 stdout = session.consume_stdout(stdout, sticky_env=sticky_env)
+
+            archive_header = _archive_exec_spills(
+                result,
+                stdout=stdout,
+                stderr=stderr,
+                workspace=run_cwd,
+                command=str(args.get("command", command)),
+            )
+            progress.flush()
 
             success = result.exit_code == 0
             if not success:
@@ -1039,11 +1205,11 @@ class ExecTool:
                 ):
                     return ToolResult(
                         success=True,
-                        output=warning_prefix + "Search completed: no matches found.",
+                        output=warning_prefix + archive_header + "Search completed: no matches found.",
                     )
                 return ToolResult(
                     success=False,
-                    output=_format_nonzero_command_output(
+                    output=archive_header + _format_nonzero_command_output(
                         str(args.get("command", command)),
                         result.exit_code,
                         stdout,
@@ -1060,7 +1226,8 @@ class ExecTool:
             if session is not None:
                 warning_prefix += f"[shell_session: cwd now {session.cwd}]\n"
             return ToolResult(
-                success=True, output=warning_prefix + (output or "(no output)")
+                success=True,
+                output=warning_prefix + archive_header + (output or "(no output)"),
             )
 
 

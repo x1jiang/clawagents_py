@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.20.18-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.20.38-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -21,9 +21,9 @@ This repo is the **Python framework** (`pip install clawagents`). Ready-made cli
 
 | Product | Latest | What it is | Link |
 |---------|--------|------------|------|
-| **ClawAgents Desktop** | **v0.2.4** | Native macOS app — project chats, file editor, SSH remotes, Settings (incl. AWS Bedrock), Developer ID signed + notarized | [Repo](https://github.com/x1jiang/clawagents-desktop) · [Download DMG](https://github.com/x1jiang/clawagents-desktop/releases/tag/v0.2.4) |
-| **ClawAgents for VS Code / Cursor** | **v1.0.55** | Editor extension — companion lockstep (context-mode / rtk), full caveman skill, chat, Bedrock | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Release + VSIX](https://github.com/x1jiang/clawagents-vscode/releases/tag/v1.0.55) |
-| **Python package** | **v6.20.18** | This library — seatbelt /dev/null + sandbox hints · `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/) · [Release](https://github.com/x1jiang/clawagents_py/releases) |
+| **ClawAgents Desktop** | **v0.4.19** | Native macOS app — project chats, file editor, SSH remotes, Settings (incl. AWS Bedrock), Developer ID signed + notarized | [Repo](https://github.com/x1jiang/clawagents-desktop) · [Download DMG](https://github.com/x1jiang/clawagents-desktop/releases/tag/v0.4.19) |
+| **ClawAgents for VS Code / Cursor** | **v1.0.128** | Editor extension — companion lockstep (context-mode / rtk), full caveman skill, chat, Bedrock | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Release + VSIX](https://github.com/x1jiang/clawagents-vscode/releases/tag/v1.0.128) |
+| **Python package** | **v6.20.38** | This library — seatbelt /dev/null + sandbox hints · `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/) · [Release](https://github.com/x1jiang/clawagents_py/releases) |
 | **TypeScript package** | **v6.12.13** | Node/TS sibling — `npm install git+https://github.com/x1jiang/clawagents.git` | [Repo](https://github.com/x1jiang/clawagents) |
 
 ## Installation
@@ -36,7 +36,7 @@ pip install -U 'clawagents[bedrock]'   # + Amazon Bedrock (Claude via IAM + Nova
 pip install -U 'clawagents[all]'       # All providers + tiktoken
 ```
 
-> **Version 6.20.18** — Seatbelt allows ``/dev/null``; clearer gcloud/home-config sandbox hints (July 2026).
+> **Version 6.20.38** — Stable OpenAI prompt-cache affinity, incremental token ledger, TTFT/RSS telemetry, bounded exec head/tail (July 2026).
 >
 > **Version 6.20.8** — Artifact path containment + preserve raw tool output for retrieval (July 2026).
 
@@ -45,6 +45,12 @@ pip install -U 'clawagents[all]'       # All providers + tiktoken
 > **Version 6.19.0** — Companion lockstep (July 2026).
 
 > **Version 6.18.0** — Grok-inspired edit/execute harness (July 2026).
+
+### New In v6.20.38
+- Stable hashed OpenAI `prompt_cache_key` + session affinity; incremental context token ledger
+- TTFT / input-cache / peak RSS usage telemetry; Gemini cache-read accounting
+- Bounded streaming exec output (head+tail) with spill-to-artifact adoption
+- Context-protection MCP tools remain active under Luna's reduced tool profile
 
 ### New In v6.20.3
 - Execute harden: background seatbelt wrap + scrubbed env; bwrap missing-`.env` touch; killpg cancel; profile warnings visible; AST guard against unbound local imports

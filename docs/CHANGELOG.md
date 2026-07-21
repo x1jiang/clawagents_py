@@ -1,6 +1,19 @@
 # ClawAgents Changelog
 
 
+### v6.20.38 — Prompt-cache affinity + streaming telemetry (July 2026)
+
+- **OpenAI prompt cache:** stable hashed `prompt_cache_key` + session affinity
+  headers so multi-turn runs reuse the same opaque cache identity.
+- **Incremental token ledger:** provider-reported input tokens checkpoint the
+  transcript; later rounds estimate only newly appended messages.
+- **Telemetry:** TTFT, input/cache tokens, and observed peak RSS on usage events;
+  Gemini cache-read accounting included.
+- **Bounded exec output:** command streams keep head+tail while discarding the
+  middle; complete spills can be adopted as retrievable artifacts.
+- **Luna/MCP:** context-protection MCP tools (e.g. `ctx_*`) stay visible under
+  the reduced active tool profile; dynamic MCP tools appear in `mcp` groups.
+
 ### v6.20.37 — Plan invariant enforcement (July 2026)
 
 - **Plan invariants survive Act:** approved plans can declare exact backticked

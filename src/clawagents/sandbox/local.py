@@ -6,6 +6,7 @@ import asyncio
 import os
 import signal
 from pathlib import Path
+from typing import Any
 
 from clawagents.sandbox.backend import DirEntry, ExecResult, FileStat
 
@@ -121,12 +122,21 @@ class LocalBackend:
         timeout: int | None = None,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
+        *,
+        max_output_chars: int | None = None,
+        on_output: Any | None = None,
     ) -> ExecResult:
+        from clawagents.utils.bounded_output import SpoolingTextAccumulator
+
         merged_env = {**self._sanitized_env(), "PAGER": "cat"}
         if env:
             merged_env.update(env)
 
         timeout_s = (timeout or 30_000) / 1000.0
+        # Default matches TS bounded-process / tool exec retain budget.
+        retain = int(max_output_chars) if max_output_chars and max_output_chars > 0 else 40_000
+        stdout_acc = SpoolingTextAccumulator(retain)
+        stderr_acc = SpoolingTextAccumulator(retain)
 
         # ``start_new_session`` puts the shell + every child it spawns
         # into a new process group. On timeout we send SIGKILL to the
@@ -142,16 +152,43 @@ class LocalBackend:
             start_new_session=True,
         )
 
-        try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout_s,
+        def _feed(stream: str, data: bytes) -> None:
+            text = data.decode("utf-8", errors="replace")
+            if not text:
+                return
+            (stdout_acc if stream == "stdout" else stderr_acc).append(text)
+            if on_output is not None:
+                try:
+                    on_output(stream, text)
+                except Exception:
+                    pass
+
+        async def _pump(stream_name: str, reader: asyncio.StreamReader | None) -> None:
+            if reader is None:
+                return
+            while True:
+                chunk = await reader.read(65_536)
+                if not chunk:
+                    break
+                _feed(stream_name, chunk)
+
+        async def _run() -> int:
+            await asyncio.gather(
+                _pump("stdout", proc.stdout),
+                _pump("stderr", proc.stderr),
+                proc.wait(),
             )
+            return proc.returncode or 0
+
+        killed = False
+        try:
+            exit_code = await asyncio.wait_for(_run(), timeout=timeout_s)
         except asyncio.TimeoutError:
+            killed = True
+            exit_code = 1
             try:
                 os.killpg(proc.pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError, OSError):
-                # Either the process group is already gone, or we don't
-                # own it — fall back to killing just the parent.
                 try:
                     proc.kill()
                 except ProcessLookupError:
@@ -160,10 +197,13 @@ class LocalBackend:
                 await proc.wait()
             except ProcessLookupError:
                 pass
-            return ExecResult(stdout="", stderr="", exit_code=1, killed=True)
-
+        stdout_path = stdout_acc.close()
+        stderr_path = stderr_acc.close()
         return ExecResult(
-            stdout=stdout_bytes.decode("utf-8", errors="replace"),
-            stderr=stderr_bytes.decode("utf-8", errors="replace"),
-            exit_code=proc.returncode or 0,
+            stdout=str(stdout_acc),
+            stderr=str(stderr_acc),
+            exit_code=exit_code,
+            killed=killed,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
         )
