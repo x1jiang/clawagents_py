@@ -90,7 +90,7 @@ from clawagents.graph.handoff_router import HandoffRouter
 from clawagents.graph.run_finalizer import RunFinalizer
 from clawagents.graph.tool_turn import ToolTurnExecutor
 from clawagents.graph.completion_handler import CompletionHandler
-from clawagents.graph.turn_driver import TurnDriver
+from clawagents.graph.turn_driver import IncrementalTokenLedger, TurnDriver
 from clawagents.graph.round_dispatcher import RoundDispatcher
 from clawagents.graph.round_scheduler import RoundScheduler
 from clawagents.graph.tool_batch import (
@@ -571,15 +571,24 @@ async def _run_agent_graph_core(
         run_context = RunContext(context=user_context)
     elif user_context is not None and run_context.context is None:
         run_context.context = user_context
-    # Tools (execute streaming, skills) read callbacks/metadata from run_context.
-    run_context.on_event = emit
     # Ephemeral id for ${SESSION_ID} skill substitutions when persistence is off.
-    if not getattr(run_context, "session_id", None):
-        import uuid as _uuid
+    # Also used as the OpenAI prompt_cache_key / session affinity identity.
+    import uuid as _uuid
 
-        _ephemeral_sid = f"run-{_uuid.uuid4().hex[:12]}"
-        run_context.session_id = _ephemeral_sid
-        run_context._metadata["session_id"] = _ephemeral_sid
+    _meta_sid = run_context._metadata.get("session_id") or run_context._metadata.get(
+        "sessionId"
+    )
+    if getattr(session, "session_id", None):
+        provider_session_id = str(session.session_id)
+    elif getattr(run_context, "session_id", None):
+        provider_session_id = str(run_context.session_id)
+    elif isinstance(_meta_sid, str) and _meta_sid:
+        provider_session_id = _meta_sid
+    else:
+        provider_session_id = f"run-{_uuid.uuid4().hex[:12]}"
+    run_context.session_id = provider_session_id
+    run_context._metadata["session_id"] = provider_session_id
+    run_context._metadata["sessionId"] = provider_session_id
     usage = run_context.usage
 
     # Per-agent iteration budget (Hermes parity). If the caller has not
@@ -593,24 +602,48 @@ async def _run_agent_graph_core(
     _budget_size = max_iterations if max_iterations > 0 else MAX_TOOL_ROUNDS
     await run_context.ensure_iteration_budget(_budget_size)
 
-    def _accumulate_usage(resp: LLMResponse) -> RequestUsage:
+    # Tools (execute streaming, skills) read callbacks/metadata from run_context.
+    run_context.on_event = emit
+
+    def _accumulate_usage(
+        resp: LLMResponse,
+        *,
+        time_to_first_token_ms: float | None = None,
+        peak_memory_bytes: int = 0,
+    ) -> RequestUsage:
         prompt_t = int(getattr(resp, "prompt_tokens", 0) or 0)
         total_t = int(getattr(resp, "tokens_used", 0) or 0)
         output_t = int(getattr(resp, "completion_tokens", max(total_t - prompt_t, 0)) or 0)
+        cache_read_t = int(getattr(resp, "cache_read_tokens", 0) or 0)
+        cache_write_t = int(getattr(resp, "cache_creation_tokens", 0) or 0)
+        uncached_input_t = int(
+            getattr(
+                resp,
+                "uncached_input_tokens",
+                max(prompt_t - cache_read_t - cache_write_t, 0),
+            )
+            or 0
+        )
         req = usage.add_response(
             model=getattr(resp, "model", None) or "",
-            input_tokens=prompt_t,
+            prompt_tokens=prompt_t,
+            input_tokens=uncached_input_t,
             output_tokens=output_t,
             total_tokens=total_t,
-            cached_input_tokens=int(getattr(resp, "cache_read_tokens", 0) or 0),
-            cache_creation_tokens=int(getattr(resp, "cache_creation_tokens", 0) or 0),
+            cached_input_tokens=cache_read_t,
+            cache_creation_tokens=cache_write_t,
+            time_to_first_token_ms=time_to_first_token_ms,
+            peak_memory_bytes=peak_memory_bytes,
         )
         _emit_typed("usage", {
+            "prompt_tokens": req.prompt_tokens,
             "input_tokens": req.input_tokens,
             "output_tokens": req.output_tokens,
             "total_tokens": req.total_tokens,
             "cached_input_tokens": req.cached_input_tokens,
             "cache_creation_tokens": req.cache_creation_tokens,
+            "time_to_first_token_ms": req.time_to_first_token_ms,
+            "peak_memory_bytes": usage.peak_memory_bytes,
             "model": req.model,
         })
         return req
@@ -766,6 +799,7 @@ async def _run_agent_graph_core(
     # move callers to these collaborators directly.
     events = RunEvents(emit, on_stream_event)
     _emit_typed = events.typed
+    run_context._metadata["_emit_typed_event"] = _emit_typed
     hook_dispatcher = HookDispatcher(active_hooks, run_context, events)
     _fire_hook = hook_dispatcher.fire
     llm_caller = TurnLLMCaller(
@@ -776,6 +810,7 @@ async def _run_agent_graph_core(
         session_writer=session_writer,
         external_hooks=ext_hook_runner,
         accumulate_usage=_accumulate_usage,
+        provider_session_id=provider_session_id,
     )
     response_interpreter = TurnResponseInterpreter(
         llm=llm,
@@ -1022,6 +1057,14 @@ async def _run_agent_graph_core(
         _cached_sys_tokens = _estimate_tokens(messages[0].content)
         emit("context", {"message": f"system prompt: ~{_cached_sys_tokens} tokens (cached for budget calc)"})
 
+    # IncrementalTokenLedger: O(1) prefix-aware token estimation
+    from functools import partial as _partial
+    from .tool_observation import _estimate_messages_tokens as _est_msgs
+    _token_ledger = IncrementalTokenLedger(
+        _partial(_est_msgs, model=None, cached_system_tokens=_cached_sys_tokens)
+    )
+    _token_ledger.rebase(messages)
+
     state = AgentState(
         messages=messages,
         current_task=task,
@@ -1162,6 +1205,7 @@ async def _run_agent_graph_core(
         resolved_model_name=None,
         cached_system_tokens=_cached_sys_tokens,
         compaction_savings=_compaction_savings,
+        token_ledger=_token_ledger,
     )
 
     def _should_run_final_advisor_check(current_state: AgentState) -> bool:
@@ -1297,8 +1341,21 @@ async def _run_agent_graph_core(
 
         else:
             emit("warn", {"message": f"reached max {effective_max_rounds} tool rounds"})
-            state.status = "done"
-            state.result = state.result or f"Reached maximum of {effective_max_rounds} tool rounds."
+            # Act-invariant reconciliation gate: if state remains uncertain
+            # even though the round budget is exhausted, report max_iterations
+            # instead of done so the caller knows the run didn't finish cleanly.
+            try:
+                from clawagents.permissions.act_invariants import completion_block_reason
+
+                _block = completion_block_reason(run_context)
+            except Exception:
+                _block = None
+            if _block:
+                state.status = "max_iterations"
+                state.result = _block
+            else:
+                state.status = "done"
+                state.result = state.result or f"Reached maximum of {effective_max_rounds} tool rounds."
 
     except KeyboardInterrupt:
         emit("warn", {"message": "interrupted"})

@@ -311,6 +311,7 @@ def _soft_trim_messages(
     token_multiplier: float,
     emit: OnEvent,
     model_name: Optional[str] = None,
+    current_tokens: Optional[int] = None,
 ) -> list[LLMMessage]:
     """Remove stale/low-value content from context before hitting compaction threshold."""
     effective_window, budget_ratio = (
@@ -324,7 +325,8 @@ def _soft_trim_messages(
     long_ctx = _resolve_long_context_threshold(model_name)
     if long_ctx:
         soft_budget = min(soft_budget, max(8_000, int(long_ctx * 0.95)))
-    current_tokens = _estimate_messages_tokens(messages, token_multiplier)
+    if current_tokens is None:
+        current_tokens = _estimate_messages_tokens(messages, token_multiplier)
 
     if current_tokens <= soft_budget:
         return messages
@@ -390,8 +392,9 @@ def _soft_trim_messages(
 
         result.append(m)
 
-    if trim_count > 0:
-        emit("context", {"message": f"soft-trim: trimmed {trim_count} old tool results"})
+    if trim_count == 0:
+        return messages
+    emit("context", {"message": f"soft-trim: trimmed {trim_count} old tool results"})
     return result
 
 
