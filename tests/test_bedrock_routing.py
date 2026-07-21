@@ -147,7 +147,7 @@ def test_create_provider_mantle_gpt56_uses_openai_responses():
         provider = llm_mod.create_provider("openai.gpt-5.6-sol", cfg)
     assert provider is fake
     passed = ctor.call_args[0][0]
-    assert passed.openai_base_url == "https://bedrock-mantle.us-east-1.api.aws/openai"
+    assert passed.openai_base_url == "https://bedrock-mantle.us-east-1.api.aws/openai/v1"
     assert passed.openai_wire_api == "responses"
     assert passed.openai_model == "openai.gpt-5.6-sol"
 
@@ -185,7 +185,7 @@ def test_create_provider_mantle_xai_grok_uses_openai_frontier_path():
         provider = llm_mod.create_provider("xai.grok-4.3", cfg)
     assert provider is fake
     passed = ctor.call_args[0][0]
-    assert passed.openai_base_url == "https://bedrock-mantle.us-west-2.api.aws/openai"
+    assert passed.openai_base_url == "https://bedrock-mantle.us-west-2.api.aws/openai/v1"
     assert passed.openai_wire_api == "responses"
     assert passed.openai_model == "xai.grok-4.3"
 
