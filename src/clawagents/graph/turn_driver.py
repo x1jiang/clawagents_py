@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 
 from clawagents.providers.llm import LLMMessage
 
 from .context_management import (
+    _CONTEXT_BUDGET_RATIO,
     _MAX_OVERFLOW_RETRIES,
     _MICRO_COMPACT_KEEP_RECENT,
     _MICRO_COMPACT_MIN_USAGE_RATIO,
@@ -18,11 +20,62 @@ from .context_management import (
     _wal_write,
 )
 from .message_repair import _patch_dangling_tool_calls
-from .model_profiles import resolve_long_context_threshold
+from .model_profiles import resolve_context_budget, resolve_long_context_threshold
 from .run_runtime import RunEvents, SessionMessageJournal
 from .turn_llm import TurnLLMCaller
 
 logger = logging.getLogger(__name__)
+
+# Soft-trim fires at 75% of the full compaction budget so the cheaper
+# operation gets a chance before the expensive LLM compaction.
+_SOFT_TRIM_BUDGET_FRACTION = 0.75
+
+
+# ── Incremental token estimation ──────────────────────────────────────────
+
+
+class IncrementalTokenLedger:
+    """Provider-reported usage with incremental estimation between checkpoints.
+
+    After an exact provider input-token count (or a full re-estimate), only
+    newly appended messages are re-estimated — avoiding O(n) recounts every
+    turn when the prefix is unchanged by identity.
+    """
+
+    def __init__(self, estimate_messages: Callable[[list[LLMMessage]], int]) -> None:
+        self._estimate_messages = estimate_messages
+        self._checkpoint: list[LLMMessage] = []
+        self._checkpoint_tokens = 0
+
+    def rebase(
+        self, messages: list[LLMMessage], exact_tokens: int | None = None
+    ) -> int:
+        self._checkpoint = list(messages)
+        self._checkpoint_tokens = (
+            int(exact_tokens)
+            if exact_tokens is not None
+            else int(self._estimate_messages(messages))
+        )
+        return self._checkpoint_tokens
+
+    def record_provider_usage(
+        self, messages: list[LLMMessage], input_tokens: int
+    ) -> int:
+        return self.rebase(
+            messages, input_tokens if input_tokens > 0 else None
+        )
+
+    def estimate(self, messages: list[LLMMessage]) -> int:
+        has_prefix = len(self._checkpoint) <= len(messages) and all(
+            messages[i] is self._checkpoint[i] for i in range(len(self._checkpoint))
+        )
+        if not has_prefix:
+            return self.rebase(messages)
+        if len(messages) == len(self._checkpoint):
+            return self._checkpoint_tokens
+        return self._checkpoint_tokens + int(
+            self._estimate_messages(messages[len(self._checkpoint):])
+        )
 
 
 @dataclass(frozen=True)
@@ -59,6 +112,7 @@ class TurnDriver:
         resolved_model_name: str | None,
         cached_system_tokens: int,
         compaction_savings: list[float],
+        token_ledger: IncrementalTokenLedger | None = None,
     ) -> None:
         self._llm = llm
         self._caller = caller
@@ -79,6 +133,7 @@ class TurnDriver:
         self._resolved_model_name = resolved_model_name
         self._cached_system_tokens = cached_system_tokens
         self._compaction_savings = compaction_savings
+        self._token_ledger = token_ledger
         self._token_multiplier = 1.0
         self._overflow_retries = 0
 
@@ -122,20 +177,53 @@ class TurnDriver:
 
     async def _prepare_messages(self, messages: list[LLMMessage]) -> list[LLMMessage]:
         messages = _patch_dangling_tool_calls(messages)
-        messages = self._micro_compact(messages)
-        messages = _soft_trim_messages(
-            messages,
-            self._context_window,
-            self._token_multiplier,
-            self._events.emit,
-            self._resolved_model_name,
+        # Use ledger for incremental estimation when available.
+        current_tokens = (
+            self._token_ledger.estimate(messages)
+            if self._token_ledger is not None
+            else self._budget_tokens(messages)
         )
-        messages = await self._compact(messages)
+        # Model-aware budget thresholds.
+        context_budget_window, context_budget_ratio = (
+            resolve_context_budget(self._resolved_model_name, self._context_window)
+            if self._resolved_model_name
+            else (self._context_window, _CONTEXT_BUDGET_RATIO)
+        )
+        compaction_budget = int(context_budget_window * context_budget_ratio)
+        soft_trim_budget = int(compaction_budget * _SOFT_TRIM_BUDGET_FRACTION)
+
+        messages, current_tokens = self._micro_compact(
+            messages, current_tokens
+        )
+        if current_tokens > soft_trim_budget:
+            trimmed = _soft_trim_messages(
+                messages,
+                self._context_window,
+                self._token_multiplier,
+                self._events.emit,
+                self._resolved_model_name,
+                current_tokens,
+            )
+            if trimmed is not messages:
+                messages = trimmed
+                current_tokens = self._rebase_ledger(messages)
+        if current_tokens > compaction_budget:
+            messages = await self._compact(messages)
+            self._rebase_ledger(messages)
+        # Compaction / trim can still leave pairs inconsistent — sanitize again.
         messages = _patch_dangling_tool_calls(messages)
         await self._apply_external_pre_llm(messages)
         return self._apply_before_llm(messages)
 
-    def _micro_compact(self, messages: list[LLMMessage]) -> list[LLMMessage]:
+    def _rebase_ledger(self, messages: list[LLMMessage]) -> int:
+        """Rebase the token ledger after a context mutation."""
+        if self._token_ledger is not None:
+            return self._token_ledger.rebase(messages)
+        return self._budget_tokens(messages)
+
+    def _micro_compact(
+        self, messages: list[LLMMessage], current_tokens: int
+    ) -> tuple[list[LLMMessage], int]:
         from clawagents.harness_profiles import resolve_harness_profile
 
         profile = resolve_harness_profile(self._resolved_model_name)
@@ -149,17 +237,19 @@ class TurnDriver:
             if profile and profile.clear_tool_trigger_ratio is not None
             else _MICRO_COMPACT_MIN_USAGE_RATIO
         )
-        budget = self._budget_tokens(messages)
         economic_limit = resolve_long_context_threshold(self._resolved_model_name)
         economic_trigger = int(economic_limit * 0.90) if economic_limit else None
-        if budget > self._context_window * ratio or (
-            economic_trigger is not None and budget > economic_trigger
+        if current_tokens > self._context_window * ratio or (
+            economic_trigger is not None and current_tokens > economic_trigger
         ):
-            return _micro_compact_tool_results(messages, keep_recent=keep_recent)
-        return messages
+            compacted = _micro_compact_tool_results(messages, keep_recent=keep_recent)
+            if compacted is not messages:
+                messages = compacted
+                current_tokens = self._rebase_ledger(messages)
+        return messages, current_tokens
 
     async def _compact(self, messages: list[LLMMessage]) -> list[LLMMessage]:
-        return await _compact_if_needed(
+        result = await _compact_if_needed(
             messages,
             self._context_window,
             self._llm,
@@ -171,6 +261,7 @@ class TurnDriver:
             savings_history=self._compaction_savings,
             taxonomy_dispatcher=self._taxonomy_dispatcher,
         )
+        return result
 
     async def _apply_external_pre_llm(self, messages: list[LLMMessage]) -> None:
         if self._external_hooks is None:
@@ -285,6 +376,7 @@ class TurnDriver:
             self._resolved_model_name,
         )
         messages = await self._compact(messages)
+        self._rebase_ledger(messages)
         self._session_journal.note(messages, durable=False)
         return TurnCallOutcome("retry", messages)
 

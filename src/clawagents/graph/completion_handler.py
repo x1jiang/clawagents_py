@@ -102,6 +102,16 @@ class CompletionHandler:
         if assistant_appended is None:
             return CompletionDecision("continue")
 
+        # Act-invariant reconciliation gate: block final answer while
+        # external state remains uncertain.
+        block_reason = self._completion_block_reason()
+        if block_reason:
+            messages.append(
+                LLMMessage(role="assistant", content=response.content, thinking=thinking)
+            )
+            messages.append(LLMMessage(role="user", content=block_reason))
+            return CompletionDecision("continue")
+
         if self._recorder:
             self._recorder.record_turn(
                 response_text=response.content or "",
@@ -157,6 +167,12 @@ class CompletionHandler:
             },
         )
         if result.get("done"):
+            # Act-invariant reconciliation gate: block done while
+            # external state remains uncertain.
+            block_reason = self._completion_block_reason()
+            if block_reason:
+                messages.append(LLMMessage(role="user", content=block_reason))
+                return CompletionDecision("continue")
             state.result = observation
             state.status = "done"
             self._events.emit("final_content", {"content": state.result})
@@ -248,3 +264,13 @@ class CompletionHandler:
         except Exception:
             logger.debug("goal final gate failed", exc_info=True)
             return assistant_appended
+
+    def _completion_block_reason(self) -> str | None:
+        """Check act-invariant reconciliation gate."""
+        try:
+            from clawagents.permissions.act_invariants import completion_block_reason
+
+            return completion_block_reason(self._run_context)
+        except Exception:
+            logger.debug("completion_block_reason check failed", exc_info=True)
+            return None
