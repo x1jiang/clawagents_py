@@ -159,6 +159,26 @@ def classify_error(err: BaseException, provider: str = "") -> ErrorDescriptor:
             max_retries=0,
             original=err,
         )
+    # Mantle Claude with plain Anthropic client (X-Api-Key) instead of Bearer.
+    if "bedrock-mantle" in msg and any(
+        tok in msg
+        for tok in (
+            "invalid x-api-key",
+            "x-api-key",
+            "authentication_error",
+            "invalid api key",
+        )
+    ):
+        return ErrorDescriptor(
+            error_class=ErrorClass.PROVIDER_AUTH,
+            retryable=False,
+            recovery_hint=(
+                "Mantle Claude needs Authorization Bearer (AsyncAnthropicBedrockMantle), "
+                "not X-Api-Key. Upgrade clawagents>=6.20.45 and restart the sidecar."
+            ),
+            max_retries=0,
+            original=err,
+        )
     if status in (401, 403) or any(tok in msg for tok in (
         "unauthorized", "forbidden", "invalid api key", "invalid_api_key",
         "authentication", "invalid x-api-key", "permission denied",

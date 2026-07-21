@@ -3096,6 +3096,47 @@ class BedrockProvider(AnthropicProvider):
         self._temperature = config.temperature
 
 
+class MantleAnthropicProvider(AnthropicProvider):
+    """Claude on Bedrock Mantle via ``AsyncAnthropicBedrockMantle``.
+
+    Plain ``AsyncAnthropic`` sends ``X-Api-Key``; Mantle expects
+    ``Authorization: Bearer <Bedrock API key>`` (same as OpenAI Mantle chat).
+    Official AWS samples use ``AnthropicBedrockMantle`` / async twin.
+    """
+
+    name = "anthropic"
+
+    def __init__(self, config: EngineConfig):
+        if not _HAS_ANTHROPIC:
+            raise ImportError(
+                "anthropic package not installed. Install with: pip install clawagents[anthropic]"
+            )
+        key = (config.anthropic_api_key or config.openai_api_key or "").strip()
+        base = (getattr(config, "anthropic_base_url", None) or "").strip().rstrip("/")
+        if not base and config.openai_base_url:
+            base = mantle_anthropic_base_url(config.openai_base_url)
+        region = _mantle_region_from_url(base or config.openai_base_url)
+        mantle_cls = getattr(_anthropic_mod, "AsyncAnthropicBedrockMantle", None)
+        if mantle_cls is not None:
+            client_kwargs: dict[str, Any] = {"aws_region": region}
+            if key:
+                client_kwargs["api_key"] = key
+            if base:
+                client_kwargs["base_url"] = base
+            self.client = mantle_cls(**client_kwargs)
+        else:
+            # Older anthropic: Bearer via auth_token (avoid X-Api-Key).
+            client_kwargs = {}
+            if key:
+                client_kwargs["auth_token"] = key
+            if base:
+                client_kwargs["base_url"] = base
+            self.client = _anthropic_mod.AsyncAnthropic(**client_kwargs)
+        self.model = (config.anthropic_model or "").strip()
+        self._max_tokens = config.max_tokens
+        self._temperature = config.temperature
+
+
 def _converse_content_blocks(content: Any) -> list[dict[str, Any]]:
     """Convert message content into Bedrock Converse content blocks.
 
@@ -3359,6 +3400,17 @@ def mantle_anthropic_base_url(url: str) -> str:
     return f"{origin}/anthropic" if origin else ""
 
 
+def _mantle_region_from_url(url: str | None) -> str:
+    """Extract ``us-east-1`` from ``https://bedrock-mantle.us-east-1.api.aws/…``."""
+    from urllib.parse import urlparse
+
+    host = (urlparse((url or "").strip()).hostname or "").lower()
+    parts = host.split(".")
+    if len(parts) >= 4 and parts[0] == "bedrock-mantle":
+        return parts[1]
+    return "us-east-1"
+
+
 def mantle_openai_base_url(url: str) -> str:
     """Mantle OpenAI frontier root (SDK appends ``/responses`` → ``…/openai/v1/responses``).
 
@@ -3499,7 +3551,8 @@ def create_provider(
                 config.anthropic_api_key = mantle_key
             config.anthropic_model = model_name
             config.anthropic_base_url = mantle_anthropic_base_url(config.openai_base_url)
-            return AnthropicProvider(config)
+            # Must use Mantle client (Bearer), not plain AsyncAnthropic (X-Api-Key).
+            return MantleAnthropicProvider(config)
         if needs_mantle_openai_base(model_name):
             rewritten = mantle_openai_base_url(config.openai_base_url)
             if rewritten:
