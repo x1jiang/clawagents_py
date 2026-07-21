@@ -22,7 +22,6 @@ Efficiency features (learned from deepagents/openclaw):
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import logging
 import os
@@ -33,13 +32,9 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
 
-from clawagents.providers.llm import LLMProvider, LLMMessage, LLMResponse, NativeToolSchema, NativeToolCall, strip_thinking_tokens
+from clawagents.providers.llm import LLMProvider, LLMMessage, LLMResponse, NativeToolSchema
 from clawagents.tools.registry import ToolRegistry, ParsedToolCall, ToolResult
 from clawagents.run_context import RunContext
-from clawagents.session.heartbeat import (
-    DEFAULT_ACTIVITY_HEARTBEAT_INTERVAL_S,
-    run_with_heartbeat,
-)
 from clawagents.usage import Usage, RequestUsage
 from clawagents.lifecycle import RunHooks, AgentHooks
 from clawagents.guardrails import (
@@ -51,11 +46,9 @@ from clawagents.guardrails import (
 )
 from clawagents.stream_events import (
     StreamEvent,
-    stream_event_from_kind,
 )
-from clawagents.handoffs import Handoff, HandoffInputData
+from clawagents.handoffs import Handoff
 from clawagents.prompts import append_model_identity, build_system_prompt
-from clawagents.tracing import handoff_span
 
 logger = logging.getLogger(__name__)
 
@@ -71,20 +64,41 @@ from clawagents.graph.message_repair import (
 # ─── Tool Observation (extracted to graph/tool_observation.py) ─────────────
 from clawagents.graph.tool_observation import (
     _evict_large_tool_result,
+    _format_failed_exec_observation,
+    # Compatibility re-exports for integrations that historically imported
+    # these helpers from ``agent_loop`` before the observation module split.
+    _post_tool_side_effects,
+    _run_context_workspace,
     _tool_observation,
     _ui_tool_result_text,
-    _run_context_workspace,
     UI_TOOL_RESULT_CHARS,
     _CHARS_PER_TOKEN,
     _estimate_tokens,
-    _estimate_messages_tokens,
     _truncate_old_tool_args,
     _wait_for_tool_approval,
-    _post_tool_side_effects,
 )
-
-from clawagents.graph.model_profiles import (
-    resolve_long_context_threshold as _resolve_long_context_threshold,
+from clawagents.graph.run_runtime import (
+    HookDispatcher,
+    RunEvents,
+    SessionMessageJournal,
+    session_get_items as _session_get_items,
+)
+from clawagents.graph.run_config import AgentRunConfig
+from clawagents.graph.turn_llm import TurnLLMCaller
+from clawagents.graph.turn_response import TurnResponseInterpreter
+from clawagents.graph.handoff_router import HandoffRouter
+from clawagents.graph.run_finalizer import RunFinalizer
+from clawagents.graph.tool_turn import ToolTurnExecutor
+from clawagents.graph.completion_handler import CompletionHandler
+from clawagents.graph.turn_driver import TurnDriver
+from clawagents.graph.round_dispatcher import RoundDispatcher
+from clawagents.graph.round_scheduler import RoundScheduler
+from clawagents.graph.tool_batch import (
+    RethinkController,
+    ToolBatchSafety,
+    ToolCallRunner,
+    ToolPolicyGate,
+    ToolResultProcessor,
 )
 
 
@@ -213,54 +227,6 @@ async def _run_output_guardrails(
     return (output, None)
 
 
-async def _session_get_items(session: Any, limit: int | None = None) -> list[LLMMessage]:
-    """Fetch prior messages from a Session-protocol backend (async or sync)."""
-    get_items = getattr(session, "get_items", None)
-    if get_items is None:
-        return []
-    accepts_limit = False
-    if limit is not None:
-        try:
-            sig = inspect.signature(get_items)
-            accepts_limit = "limit" in sig.parameters or any(
-                p.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
-                for p in sig.parameters.values()
-            )
-        except (TypeError, ValueError):
-            accepts_limit = True
-    res = get_items(limit=limit) if accepts_limit else get_items()
-    if asyncio.iscoroutine(res):
-        res = await res
-    out: list[LLMMessage] = []
-    for item in res or []:
-        if isinstance(item, LLMMessage):
-            out.append(item)
-        elif isinstance(item, dict) and "role" in item:
-            out.append(LLMMessage(
-                role=item.get("role", "user"),
-                content=item.get("content", ""),
-                tool_call_id=item.get("tool_call_id"),
-                tool_calls_meta=item.get("tool_calls_meta"),
-                thinking=item.get("thinking"),
-            ))
-    return out
-
-
-async def _session_add_items(session: Any, items: list[LLMMessage]) -> None:
-    """Persist messages to a Session-protocol backend (async or sync).
-
-    Passes ``LLMMessage`` instances directly so both built-in backends
-    (``InMemorySession``, ``SQLiteSession``) and user-supplied backends
-    that accept dict payloads keep working.
-    """
-    add = getattr(session, "add_items", None)
-    if add is None:
-        return
-    res = add(items)
-    if asyncio.iscoroutine(res):
-        await res
-
-
 def _coerce_output_type(raw: str, output_type: type) -> Any:
     """Best-effort parse of final assistant text into ``output_type``.
 
@@ -353,31 +319,27 @@ Keep working until the task is fully complete.
 from clawagents.graph.loop_tracker import (
     _ToolCallTracker,
     _FailureTracker,
-    _RETHINK_MESSAGE,
+    _RETHINK_THRESHOLD,
 )
 
 
 # ─── Context Management (extracted to graph/context_management.py) ─────────
 from clawagents.graph.context_management import (
-    _MAX_OVERFLOW_RETRIES,
     _preflight_context_check,
     _COMPACTABLE_TOOLS,
-    _MICRO_COMPACT_KEEP_RECENT,
-    _MICRO_COMPACT_MIN_USAGE_RATIO,
     _extract_artifact_id,
     _micro_compact_stub,
-    _micro_compact_tool_results,
+    # Compatibility re-exports for callers that imported context helpers
+    # from ``agent_loop`` before their extraction into context_management.
     _soft_trim_messages,
     _CONTEXT_BUDGET_RATIO,
     _find_safe_split_index,
     _content_key_text,
+    _message_reuse_key,
+    _reuse_messages_where_possible,
     _goal_llm_complete,
-    _drain_interject,
-    _drain_interject_messages,
-    _sync_goal_reminder_into_system,
+    _offload_history,
     _compact_if_needed,
-    _wal_write,
-    _make_buffer,
     _looks_like_truncated_json,
 )
 
@@ -432,53 +394,7 @@ async def run_agent_graph(
     session_end_tail: bool = True,
 ) -> AgentState:
     """Single ReAct loop: LLM → tools → LLM → tools → ... → final answer."""
-    if features is not None:
-        from clawagents.config.features import temporary_overrides
-
-        with temporary_overrides(features):
-            return await _run_agent_graph_core(
-                task=task,
-                llm=llm,
-                tools=tools,
-                system_prompt=system_prompt,
-                max_iterations=max_iterations,
-                streaming=streaming,
-                context_window=context_window,
-                on_event=on_event,
-                before_llm=before_llm,
-                before_tool=before_tool,
-                after_tool=after_tool,
-                use_native_tools=use_native_tools,
-                trajectory=trajectory,
-                rethink=rethink,
-                learn=learn,
-                atlas=atlas,
-                atlas_config=atlas_config,
-                preview_chars=preview_chars,
-                response_chars=response_chars,
-                timeout_s=timeout_s,
-                advisor_llm=advisor_llm,
-                advisor_max_calls=advisor_max_calls,
-                run_context=run_context,
-                user_context=user_context,
-                hooks=hooks,
-                agent_hooks=agent_hooks,
-                input_guardrails=input_guardrails,
-                output_guardrails=output_guardrails,
-                output_type=output_type,
-                on_stream_event=on_stream_event,
-                session=session,
-                session_preload_limit=session_preload_limit,
-                handoffs=handoffs,
-                agent_name=agent_name,
-                action_mode=action_mode,
-                approval_handler=approval_handler,
-                require_approval_tools=require_approval_tools,
-                image_blocks=image_blocks,
-                file_blocks=file_blocks,
-                session_end_tail=session_end_tail,
-            )
-    return await _run_agent_graph_core(
+    config = AgentRunConfig(
         task=task,
         llm=llm,
         tools=tools,
@@ -499,6 +415,7 @@ async def run_agent_graph(
         preview_chars=preview_chars,
         response_chars=response_chars,
         timeout_s=timeout_s,
+        features=features,
         advisor_llm=advisor_llm,
         advisor_max_calls=advisor_max_calls,
         run_context=run_context,
@@ -520,6 +437,12 @@ async def run_agent_graph(
         file_blocks=file_blocks,
         session_end_tail=session_end_tail,
     )
+    if features is not None:
+        from clawagents.config.features import temporary_overrides
+
+        with temporary_overrides(features):
+            return await _run_agent_graph_core(**config.core_kwargs())
+    return await _run_agent_graph_core(**config.core_kwargs())
 
 
 async def _run_agent_graph_core(
@@ -670,15 +593,6 @@ async def _run_agent_graph_core(
     _budget_size = max_iterations if max_iterations > 0 else MAX_TOOL_ROUNDS
     await run_context.ensure_iteration_budget(_budget_size)
 
-    def _emit_typed(kind: str, data: dict[str, Any] | None = None) -> None:
-        """Dispatch a typed StreamEvent alongside the existing ``emit`` hook."""
-        if on_stream_event is None:
-            return
-        try:
-            on_stream_event(stream_event_from_kind(kind, data or {}))
-        except Exception as err:
-            emit("warn", {"message": f"on_stream_event error: {err}"})
-
     def _accumulate_usage(resp: LLMResponse) -> RequestUsage:
         prompt_t = int(getattr(resp, "prompt_tokens", 0) or 0)
         total_t = int(getattr(resp, "tokens_used", 0) or 0)
@@ -710,18 +624,6 @@ async def _run_agent_graph_core(
     # Expose hooks to nested tools (e.g. task → on_subagent_start/end).
     run_context._metadata["hooks"] = active_hooks
     run_context._metadata["agent_name"] = agent_name or "ClawAgent"
-
-    async def _fire_hook(method_name: str, *args: Any) -> None:
-        for h in active_hooks:
-            fn = getattr(h, method_name, None)
-            if fn is None:
-                continue
-            try:
-                result = fn(run_context, *args)
-                if asyncio.iscoroutine(result):
-                    await result
-            except Exception as hook_err:
-                emit("warn", {"message": f"{method_name} hook error: {hook_err}"})
 
     # Feature C + F: detect task type for adaptive rethink threshold
     _task_type = "general"
@@ -842,16 +744,6 @@ async def _run_agent_graph_core(
         except Exception:
             pass
 
-    async def _tax_permission_denied(
-        tool: str, reason: str, *, source: str,
-    ) -> None:
-        from clawagents.hooks.taxonomy import HookEvent
-
-        await _fire_taxonomy(
-            HookEvent.PERMISSION_DENIED,
-            {"tool": tool, "reason": reason, "source": source},
-        )
-
     def emit(kind: EventKind, data: dict[str, Any] | None = None) -> None:
         payload = data or {}
         _base_emit(kind, payload)
@@ -869,10 +761,55 @@ async def _run_agent_graph_core(
             except RuntimeError:
                 pass
 
-    token_multiplier = 1.0
-    resolved_model_name: Optional[str] = None
+    # Run-scoped side effects have explicit owners.  The local aliases keep
+    # the existing loop code mechanically stable while subsequent extractions
+    # move callers to these collaborators directly.
+    events = RunEvents(emit, on_stream_event)
+    _emit_typed = events.typed
+    hook_dispatcher = HookDispatcher(active_hooks, run_context, events)
+    _fire_hook = hook_dispatcher.fire
+    llm_caller = TurnLLMCaller(
+        llm=llm,
+        events=events,
+        hooks=hook_dispatcher,
+        registry=registry,
+        session_writer=session_writer,
+        external_hooks=ext_hook_runner,
+        accumulate_usage=_accumulate_usage,
+    )
+    response_interpreter = TurnResponseInterpreter(
+        llm=llm,
+        registry=registry,
+        events=events,
+    )
+    tool_batch_safety = ToolBatchSafety(loop_tracker, events)
+    rethink_controller = RethinkController(events)
+    tool_call_runner = ToolCallRunner(
+        registry=registry,
+        tracker=loop_tracker,
+        events=events,
+        hooks=hook_dispatcher,
+        run_context=run_context,
+        legacy_on_event=on_event,
+    )
+    tool_result_processor = ToolResultProcessor(
+        external_hooks=ext_hook_runner,
+        taxonomy_dispatcher=taxonomy_dispatcher,
+        after_tool=after_tool,
+        events=events,
+        session_writer=session_writer,
+        run_context=run_context,
+        preview_chars=preview_chars,
+    )
+    tool_policy_gate = ToolPolicyGate(
+        external_hooks=ext_hook_runner,
+        taxonomy_dispatcher=taxonomy_dispatcher,
+        before_tool=before_tool,
+        hook_result_type=HookResult,
+        events=events,
+    )
+
     _cached_sys_tokens: int = 0  # Feature D: cache system prompt token count
-    _last_memory_extraction_turn: int = 0  # Background memory extraction cursor
 
     # ── Advisor model: phone-a-friend for strategic guidance ────────
     _advisor_call_count = 0
@@ -894,6 +831,40 @@ async def _run_agent_graph_core(
                 emit("context", {"message": f"advisor: {advisor_response.content[:120]}..."})
         except Exception as err:
             emit("warn", {"message": f"advisor consultation failed: {err}"})
+
+    tool_turn_executor = ToolTurnExecutor(
+        registry=registry,
+        run_context=run_context,
+        events=events,
+        policy_gate=tool_policy_gate,
+        call_runner=tool_call_runner,
+        result_processor=tool_result_processor,
+        rethink_controller=rethink_controller,
+        loop_tracker=loop_tracker,
+        failure_tracker=failure_tracker,
+        recorder=recorder,
+        session_writer=session_writer,
+        require_approval_set=require_approval_set,
+        approval_handler=approval_handler,
+        use_native_tools=use_native_tools,
+        preview_chars=preview_chars,
+        task_type=_task_type,
+        learn=learn,
+        consult_advisor=_consult_advisor,
+        llm=llm,
+    )
+    completion_handler = CompletionHandler(
+        registry=registry,
+        run_context=run_context,
+        events=events,
+        recorder=recorder,
+        llm=llm,
+        before_tool=before_tool,
+        action_mode=action_mode_norm,
+        looks_like_truncated_json=_looks_like_truncated_json,
+        sanitize_assistant_text=_sanitize_assistant_text,
+        goal_llm_complete=_goal_llm_complete,
+    )
 
     prompt_to_use = append_model_identity(
         system_prompt or BASE_SYSTEM_PROMPT,
@@ -1051,14 +1022,6 @@ async def _run_agent_graph_core(
         _cached_sys_tokens = _estimate_tokens(messages[0].content)
         emit("context", {"message": f"system prompt: ~{_cached_sys_tokens} tokens (cached for budget calc)"})
 
-    def _budget_tokens(msgs: list[LLMMessage], mult: float | None = None) -> int:
-        return _estimate_messages_tokens(
-            msgs,
-            mult if mult is not None else token_multiplier,
-            resolved_model_name,
-            cached_system_tokens=_cached_sys_tokens or None,
-        )
-
     state = AgentState(
         messages=messages,
         current_task=task,
@@ -1133,56 +1096,94 @@ async def _run_agent_graph_core(
     except Exception:
         logger.debug("rewind snapshot failed", exc_info=True)
 
-    # Session protocol — hydrate history before first LLM call (non-destructive).
-    _session_preloaded_count = 0
-    # The current task message is part of the durable conversation and must
-    # be persisted alongside run-appended messages (assistant/tool turns).
-    _session_task_msg = next((m for m in messages if m.role == "user"), None)
-    if session is not None:
-        try:
-            prior = await _session_get_items(session, limit=session_preload_limit)
-            if prior:
-                # Limited preload can start mid tool-pair (tool result without
-                # its assistant tool_calls) → provider 400. Drop leading orphans
-                # here; full pair sanitization still runs before each LLM call.
-                prior = _drop_leading_orphan_tools(prior)
-                prior = _patch_dangling_tool_calls(prior)
-                # Replay history between the system prompt and the current
-                # task so the transcript reads in true conversational order.
-                insert_at = next(
-                    (i for i, m in enumerate(messages) if m.role == "user"),
-                    len(messages),
-                )
-                messages = [*messages[:insert_at], *prior, *messages[insert_at:]]
-                state.messages = messages
-                _session_preloaded_count = len(prior)
-        except Exception as err:
-            emit("warn", {"message": f"session load failed: {err}"})
-    # Identity-based tracking of preloaded vs. run-appended messages.
-    # A numeric cursor breaks when compaction rebuilds ``messages`` or
-    # dangling-tool-call patching inserts items mid-list, silently losing
-    # (or duplicating) turns at persist time. Instead we track message
-    # *objects*: anything unseen at the top of a round was appended by the
-    # run and gets persisted; anything synthesized by the pre-LLM transform
-    # pipeline (compaction summaries, patch inserts, prompt injections) is
-    # marked seen without being persisted. The dict keeps strong refs so
-    # CPython can't recycle an id() for a new message.
-    _session_initial_ids = frozenset(id(m) for m in messages)
-    _session_seen: dict[int, LLMMessage] = {id(m): m for m in messages}
-    _session_new_msgs: list[LLMMessage] = []
-    # Persist the task itself: without it, replayed history contains answers
-    # with no questions and multi-turn recall silently degrades.
-    if session is not None and _session_task_msg is not None:
-        _session_new_msgs.append(_session_task_msg)
+    # Session history is an independent concern.  Its journal owns identity
+    # tracking so transcript rewrites from compaction never leak into durable
+    # conversation history.
+    session_journal = SessionMessageJournal(session)
+    try:
+        messages = await session_journal.preload(
+            messages,
+            limit=session_preload_limit,
+            repair=_patch_dangling_tool_calls,
+            drop_leading_orphans=_drop_leading_orphan_tools,
+        )
+        state.messages = messages
+    except Exception as err:
+        # A broken backend must not prevent an otherwise valid agent run.
+        session_journal.begin(messages)
+        emit("warn", {"message": f"session load failed: {err}"})
+    _session_initial_ids = session_journal.initial_ids
+    handoff_router = HandoffRouter(
+        handoffs=handoff_map,
+        events=events,
+        hooks=hook_dispatcher,
+        run_context=run_context,
+        from_agent=agent_name or "ClawAgent",
+        task=task,
+        use_native_tools=use_native_tools,
+        session_initial_ids=_session_initial_ids,
+        on_stream_event=on_stream_event,
+    )
+    run_finalizer = RunFinalizer(
+        events=events,
+        hooks=hook_dispatcher,
+        run_context=run_context,
+        session_journal=session_journal,
+        session_writer=session_writer,
+        recorder=recorder,
+        llm=llm,
+        task=task,
+        learn=learn,
+        output_guardrails=output_guardrails,
+        output_type=output_type,
+        run_output_guardrails=_run_output_guardrails,
+        coerce_output_type=_coerce_output_type,
+        accumulate_usage=_accumulate_usage,
+        taxonomy_dispatcher=taxonomy_dispatcher,
+        session_end_tail=session_end_tail,
+    )
+    turn_driver = TurnDriver(
+        llm=llm,
+        caller=llm_caller,
+        events=events,
+        run_context=run_context,
+        session_journal=session_journal,
+        external_hooks=ext_hook_runner,
+        before_llm=before_llm,
+        fire_hook=_fire_hook,
+        taxonomy_dispatcher=taxonomy_dispatcher,
+        native_schemas=native_schemas,
+        handoffs=handoff_list,
+        use_native_tools=use_native_tools,
+        tools_supplied=tools is not None,
+        streaming=streaming,
+        output_type=output_type,
+        context_window=context_window,
+        resolved_model_name=None,
+        cached_system_tokens=_cached_sys_tokens,
+        compaction_savings=_compaction_savings,
+    )
 
-    def _session_note_messages(track: bool) -> None:
-        for _m in messages:
-            _mid = id(_m)
-            if _mid in _session_seen:
-                continue
-            _session_seen[_mid] = _m
-            if track:
-                _session_new_msgs.append(_m)
+    def _should_run_final_advisor_check(current_state: AgentState) -> bool:
+        return bool(
+            advisor_llm is not None
+            and _advisor_call_count > 0
+            and _advisor_call_count < advisor_max_calls
+            and current_state.tool_calls > 0
+        )
+
+    round_dispatcher = RoundDispatcher(
+        driver=turn_driver,
+        response_interpreter=response_interpreter,
+        completion_handler=completion_handler,
+        handoff_router=handoff_router,
+        safety=tool_batch_safety,
+        tool_executor=tool_turn_executor,
+        run_context=run_context,
+        use_native_tools=use_native_tools,
+        consult_advisor=_consult_advisor,
+        should_final_check=_should_run_final_advisor_check,
+    )
 
     # RunHooks: on_run_start
     if active_hooks:
@@ -1223,7 +1224,6 @@ async def _run_agent_graph_core(
                 "rewrite": True,
             })
 
-    overflow_retries = 0
     # Set when a handoff installs the combined parent+child transcript on
     # ``state.messages`` — the post-loop assignment must not overwrite it.
     _handoff_transcript_set = False
@@ -1248,1828 +1248,52 @@ async def _run_agent_graph_core(
     )
 
     t0 = time.monotonic()
-
-    def _check_timeout():
-        if timeout_s > 0 and (time.monotonic() - t0) > timeout_s:
-            raise TimeoutError(f"Agent run exceeded {timeout_s}s global timeout")
+    round_scheduler = RoundScheduler(
+        run_context=run_context,
+        events=events,
+        session_writer=session_writer,
+        timeout_s=timeout_s,
+        started_at=t0,
+    )
 
     try:
         for round_idx in range(effective_max_rounds):
-            if cancel_event.is_set():
-                state.status = "done"
-                state.result = state.result or "[cancelled]"
-                break
-
-            # Consume one unit of the iteration budget. When exhausted,
-            # surface the same outcome as Hermes' "max_iterations
-            # reached" so trajectory recorders can flag the run as
-            # truncated rather than successful. Note: ``round_idx == 0``
-            # always succeeds because the budget was sized to
-            # ``max_iterations`` above.
-            if not run_context.iteration_budget.consume():
-                emit("warn", {
-                    "message": (
-                        f"iteration budget exhausted "
-                        f"({run_context.iteration_budget.used}/"
-                        f"{run_context.iteration_budget.max_total})"
-                    ),
-                })
-                state.status = "max_iterations"
-                state.result = state.result or "[iteration budget exhausted]"
-                break
-
-            # One increment per loop round, unconditionally — previously only
-            # a handful of exit paths bumped this, so normal multi-round runs
-            # reported "1 iteration" in events and the session writer.
-            state.iterations += 1
-
-            # Mid-turn user redirect — each entry is its own synthetic user turn.
-            try:
-                from clawagents.config.features import is_enabled as _feat_ij
-
-                if _feat_ij("mid_turn_interject"):
-                    _ij_msgs = _drain_interject_messages(run_context)
-                    if _ij_msgs:
-                        messages.extend(_ij_msgs)
-                        emit(
-                            "context",
-                            {
-                                "message": (
-                                    f"mid-turn interjection applied ({len(_ij_msgs)} turn(s))"
-                                )
-                            },
-                        )
-            except Exception:
-                logger.debug("mid-turn interject drain failed", exc_info=True)
-
-            # Refresh Goal standing reminder if start_goal fired mid-run.
-            try:
-                _sync_goal_reminder_into_system(messages, run_context)
-            except Exception:
-                logger.debug("goal reminder sync failed", exc_info=True)
-
-            # Session: mark turn start
-            if session_writer:
-                session_writer.write_turn_started(round_idx)
-
-            try:
-                _check_timeout()
-            except TimeoutError as te:
-                emit("warn", {"message": str(te)})
-                state.status = "error"
-                state.result = str(te)
+            scheduled = await round_scheduler.begin(
+                state,
+                messages,
+                round_index=round_idx,
+                cancel_event=cancel_event,
+            )
+            messages = scheduled.messages
+            if scheduled.action == "stop":
                 break
 
             # ── Advisor: consult after initial orientation (first tool results in transcript)
             if advisor_llm and round_idx == 1 and _advisor_call_count == 0:
                 await _consult_advisor(messages, "planning")
 
-            # Write-ahead log: persist last message before API call (Claude Code pattern)
-            _wal_write(messages)
-
-            # Capture messages appended by the previous round *before* the
-            # transform pipeline below can compact/rebuild the list.
-            _session_note_messages(track=True)
-
-            # Patch dangling tool calls before sending to LLM
-            messages = _patch_dangling_tool_calls(messages)
-            # Claude Code pattern: clear old tool results — but only when the
-            # transcript is actually filling up (see _MICRO_COMPACT_MIN_USAGE_RATIO).
-            from clawagents.harness_profiles import resolve_harness_profile as _rhp
-            _mc_profile = _rhp(resolved_model_name)
-            _mc_keep = (
-                int(_mc_profile.clear_tool_keep)
-                if _mc_profile and _mc_profile.clear_tool_keep is not None
-                else _MICRO_COMPACT_KEEP_RECENT
+            dispatched = await round_dispatcher.dispatch(
+                state,
+                messages,
+                round_index=round_idx,
+                cancel_event=cancel_event,
             )
-            _mc_ratio = (
-                float(_mc_profile.clear_tool_trigger_ratio)
-                if _mc_profile and _mc_profile.clear_tool_trigger_ratio is not None
-                else _MICRO_COMPACT_MIN_USAGE_RATIO
-            )
-            _mc_tokens = _budget_tokens(messages)
-            _mc_safety = context_window * _mc_ratio
-            # Economic trigger: start clearing old tool results before the
-            # model's long-context pricing cliff (Luna 272K → ~245K).
-            _long_ctx = _resolve_long_context_threshold(resolved_model_name)
-            _mc_econ = int(_long_ctx * 0.90) if _long_ctx else None
-            if _mc_tokens > _mc_safety or (
-                _mc_econ is not None and _mc_tokens > _mc_econ
-            ):
-                messages = _micro_compact_tool_results(messages, keep_recent=_mc_keep)
-            messages = _soft_trim_messages(messages, context_window, token_multiplier, emit, resolved_model_name)
-            messages = await _compact_if_needed(
-                messages, context_window, llm, emit, token_multiplier, resolved_model_name, run_context,
-                fire_hook=_fire_hook,
-                savings_history=_compaction_savings,
-                taxonomy_dispatcher=taxonomy_dispatcher,
-            )
-            # Compaction / trim can still leave pairs inconsistent — sanitize again.
-            messages = _patch_dangling_tool_calls(messages)
-
-            # External pre_llm hook (runs before programmatic hook)
-            if ext_hook_runner:
-                try:
-                    extra_msgs = await ext_hook_runner.pre_llm(
-                        [{"role": m.role, "content": m.content[:100] if isinstance(m.content, str) else ""} for m in messages[-3:]]
-                    )
-                    if extra_msgs:
-                        from typing import Literal as _Literal, cast as _cast
-                        _ALLOWED_ROLES = ("system", "user", "assistant", "tool")
-                        _AllowedRole = _Literal["system", "user", "assistant", "tool"]
-                        for em in extra_msgs:
-                            raw_role = em.get("role", "user")
-                            if raw_role not in _ALLOWED_ROLES:
-                                emit("warn", {
-                                    "message": (
-                                        f"external pre_llm hook returned message with unknown role "
-                                        f"{raw_role!r}; coercing to 'user'"
-                                    )
-                                })
-                                role: _AllowedRole = "user"
-                            else:
-                                # raw_role is now provably one of the allowed literal strings,
-                                # but mypy can't narrow ``str`` from a tuple membership test.
-                                role = _cast(_AllowedRole, raw_role)
-                            messages.append(LLMMessage(role=role, content=em.get("content", "")))
-                except Exception as hook_err:
-                    emit("warn", {"message": f"external pre_llm hook error: {hook_err}"})
-
-            if before_llm:
-                try:
-                    hooked = before_llm(messages)
-                    if isinstance(hooked, list) and len(hooked) > 0:
-                        messages = hooked
-                    else:
-                        emit("warn", {"message": "before_llm returned invalid value — ignored"})
-                except Exception as hook_err:
-                    emit("warn", {"message": f"before_llm hook error: {hook_err}"})
-
-            # Framework-synthesized messages (compaction summaries, dangling
-            # tool-call patches, hook/prompt injections) are regenerated per
-            # run — mark them seen so they are never persisted to the session.
-            _session_note_messages(track=False)
-
-            buf, _buffer_chunk = _make_buffer()
-
-            def on_chunk(chunk: str) -> None:
-                _buffer_chunk(chunk)
-                _emit_typed("assistant_delta", {"delta": chunk})
-
-            if active_hooks:
-                await _fire_hook("on_llm_start", resolved_model_name or "", messages)
-            try:
-                # Native structured output (json_schema → provider wire formats)
-                try:
-                    from clawagents.config.features import is_enabled as _feat_so
-                    from clawagents.structured_output import schema_from_output_type
-
-                    if _feat_so("structured_output") and output_type is not None:
-                        _schema = schema_from_output_type(output_type)
-                        setattr(llm, "_structured_json_schema", _schema)
-                    else:
-                        setattr(llm, "_structured_json_schema", None)
-                except Exception:
-                    pass
-                # Doom-loop recovery: force a non-thinking response channel.
-                chat_messages = messages
-                if (
-                    run_context is not None
-                    and isinstance(run_context._metadata, dict)
-                    and run_context._metadata.get("doom_force_response")
-                ):
-                    chat_messages = list(messages) + [
-                        LLMMessage(
-                            role="user",
-                            content=(
-                                "CRITICAL recovery instruction: Do NOT emit any "
-                                "<think>...</think> blocks or private chain-of-thought. "
-                                "Respond with the next tool call or final answer only."
-                            ),
-                        )
-                    ]
-                # Rebuild schemas each turn so activate_tool_group / skill
-                # allow-lists take effect without restarting the loop.
-                if use_native_tools and tools:
-                    native_schemas = registry.to_native_schemas()
-                    # Keep synthetic handoff tools visible.
-                    if handoff_list:
-                        handoff_params = {
-                            "reason": {
-                                "type": "string",
-                                "description": (
-                                    "Free-text rationale for why the handoff is appropriate."
-                                ),
-                                "required": False,
-                            }
-                        }
-                        native_schemas = list(native_schemas or [])
-                        for h in handoff_list:
-                            native_schemas.append(
-                                NativeToolSchema(
-                                    name=h.name,
-                                    description=h.description,
-                                    parameters=handoff_params,
-                                )
-                            )
-                # When a skill has activated an allowed-tools boundary, only
-                # advertise those tools (+ control plane) so the model stops
-                # reaching for tools the registry will refuse.
-                turn_tools = native_schemas
-                if turn_tools and run_context is not None:
-                    allowed = getattr(run_context, "active_skill_allowed_tools", None)
-                    if allowed is not None:
-                        control = {
-                            "use_skill",
-                            "list_skills",
-                            "retrieve_tool_result",
-                            "activate_tool_group",
-                        }
-                        turn_tools = [
-                            s
-                            for s in turn_tools
-                            if s.name in allowed or s.name in control
-                        ]
-                response = await llm.chat(
-                    chat_messages,
-                    on_chunk=on_chunk if streaming else None,
-                    cancel_event=cancel_event,
-                    tools=turn_tools,
+            messages = dispatched.messages
+            if dispatched.action == "handoff":
+                child_state = dispatched.child_state
+                state.result = child_state.result
+                state.status = child_state.status if child_state.status != "running" else "done"
+                state.final_output = (
+                    child_state.final_output
+                    if child_state.final_output is not None
+                    else child_state.result
                 )
-                if not resolved_model_name and response.model:
-                    resolved_model_name = response.model
-                _last_request_usage = _accumulate_usage(response)
-                if active_hooks:
-                    await _fire_hook(
-                        "on_llm_end",
-                        response.model or resolved_model_name or "",
-                        response.content or "",
-                        _last_request_usage,
-                    )
-
-                # Session: write usage
-                if session_writer:
-                    session_writer.write_usage(
-                        response.tokens_used,
-                        cache_read_tokens=response.cache_read_tokens,
-                        cache_creation_tokens=response.cache_creation_tokens,
-                    )
-
-                # External post_llm hook (fire-and-forget)
-                if ext_hook_runner:
-                    try:
-                        await ext_hook_runner.post_llm(
-                            response.content[:500],
-                            len(response.tool_calls or []),
-                        )
-                    except Exception:
-                        pass
-
-                # Prompt cache tracking (Claude Code pattern)
-                from clawagents.config.features import is_enabled as _is_feat_enabled
-                if _is_feat_enabled("cache_tracking") and response.prompt_tokens > 0:
-                    cache_pct = (response.cache_read_tokens / response.prompt_tokens * 100) if response.prompt_tokens > 0 else 0
-                    emit("context", {
-                        "message": f"cache: {cache_pct:.0f}% hit ({response.cache_read_tokens}/{response.prompt_tokens} prompt tokens, {response.cache_creation_tokens} created)"
-                    })
-            except Exception as err:
-                # Feature: Error Taxonomy — classify and apply recovery recipe
-                from clawagents.errors.taxonomy import classify_error, ErrorClass
-                descriptor = classify_error(err)
-                emit("error", {
-                    "phase": "llm_call",
-                    "message": str(err),
-                    "error_class": descriptor.error_class.value,
-                    "retryable": descriptor.retryable,
-                    "recovery_hint": descriptor.recovery_hint,
-                })
-
-                if descriptor.error_class == ErrorClass.CONTEXT_WINDOW:
-                    overflow_retries += 1
-                    if overflow_retries > _MAX_OVERFLOW_RETRIES:
-                        emit("error", {
-                            "phase": "llm_call",
-                            "message": (
-                                f"context overflow persists after {_MAX_OVERFLOW_RETRIES} retries. "
-                                "Increase CONTEXT_WINDOW, reduce tools, or shorten your instruction."
-                            ),
-                        })
-                        state.status = "error"
-                        state.result = str(err)
-                        break
-                    observed_ratio = context_window / max(
-                        _budget_tokens(messages, 1.0), 1,
-                    )
-                    token_multiplier = min(observed_ratio * 1.1, 3.0)
-                    # Also shrink the effective window: the multiplier is
-                    # capped at 3.0, so with a wildly overstated
-                    # CONTEXT_WINDOW (e.g. 1M configured on a 128K model)
-                    # compaction below would never fire and every retry
-                    # would overflow again.
-                    context_window = max(int(context_window * 0.5), 16_000)
-                    emit("context", {
-                        "message": (
-                            f"token overflow — calibrated multiplier to {token_multiplier:.2f}, "
-                            f"shrunk effective window to {context_window} "
-                            f"(retry {overflow_retries}/{_MAX_OVERFLOW_RETRIES})"
-                        ),
-                    })
-                    messages = _soft_trim_messages(messages, context_window, token_multiplier, emit, resolved_model_name)
-                    messages = await _compact_if_needed(
-                        messages, context_window, llm, emit, token_multiplier, resolved_model_name, run_context,
-                        fire_hook=_fire_hook,
-                        savings_history=_compaction_savings,
-                        taxonomy_dispatcher=taxonomy_dispatcher,
-                    )
-                    # Don't persist recovery-compaction artifacts to the session.
-                    _session_note_messages(track=False)
-                    continue
-
-                logger.exception("LLM call failed at round %d: [%s] %s", round_idx, descriptor.error_class.value, err)
-                state.status = "error"
-                state.result = f"[{descriptor.error_class.value}] {descriptor.recovery_hint}"
+                state.tool_calls += child_state.tool_calls
+                state.messages = messages + child_state.messages
+                _handoff_transcript_set = True
                 break
-
-            if response.partial and not response.content.strip():
-                emit("warn", {"message": "interrupted — no content received"})
-                state.status = "done"
-                state.result = state.result or "[interrupted]"
+            if dispatched.action == "stop":
                 break
-
-            # Feature H: extract and preserve thinking tokens (<think>...</think>)
-            _thinking_content: str | None = None
-            if response.content and "<think>" in response.content:
-                clean_content, _thinking_content = strip_thinking_tokens(response.content)
-                response = LLMResponse(
-                    content=clean_content,
-                    model=response.model,
-                    tokens_used=response.tokens_used,
-                    partial=response.partial,
-                    tool_calls=response.tool_calls,
-                    gemini_parts=response.gemini_parts,
-                )
-            # Provider-native thinking field (Anthropic/Gemini) when no <think> tags.
-            if not _thinking_content and getattr(response, "thinking", None):
-                _thinking_content = str(response.thinking)
-
-            # Doom-loop: thinking OR response tail-repetition → resample with temp bump
-            try:
-                from clawagents.config.features import is_enabled as _feat_doom
-                from clawagents.doom_loop import (
-                    DoomLoopRecoveryPolicy,
-                    DoomLoopState,
-                    detect_tail_repetition,
-                    note_trigger,
-                    should_resample,
-                )
-
-                if _feat_doom("doom_loop"):
-                    sig = None
-                    if _thinking_content:
-                        sig = detect_tail_repetition(
-                            _thinking_content, channel="thinking"
-                        )
-                    if sig is None and response.content:
-                        sig = detect_tail_repetition(
-                            str(response.content), channel="response"
-                        )
-                    if sig is not None:
-                        meta = (
-                            run_context._metadata
-                            if run_context is not None
-                            and isinstance(run_context._metadata, dict)
-                            else {}
-                        )
-                        doom_state = meta.get("doom_loop_state")
-                        if not isinstance(doom_state, DoomLoopState):
-                            doom_state = DoomLoopState()
-                            if meta is not None:
-                                meta["doom_loop_state"] = doom_state
-                        note_trigger(doom_state, sig)
-                        pol = DoomLoopRecoveryPolicy()
-                        if should_resample(sig, doom_state, pol):
-                            doom_state.retry_count += 1
-                            # Bump temperature so resample is not a deterministic repeat.
-                            try:
-                                cur_t = float(getattr(llm, "_temperature", 0.0) or 0.0)
-                                setattr(llm, "_temperature", min(1.0, max(0.4, cur_t + 0.4)))
-                            except Exception:
-                                pass
-                            # Force next attempt onto the response channel (no think tags).
-                            if meta is not None:
-                                meta["doom_force_response"] = True
-                            emit(
-                                "warn",
-                                {
-                                    "message": (
-                                        f"doom-loop {sig.label} — resampling "
-                                        f"({doom_state.retry_count}/{pol.max_retries}, "
-                                        "force response channel)"
-                                    )
-                                },
-                            )
-                            continue
-                        if (
-                            meta is not None
-                            and meta.get("doom_force_response")
-                            and sig.channel == "thinking"
-                        ):
-                            # Forced-response attempt still thought — keep forcing.
-                            meta["doom_force_response"] = True
-            except Exception:
-                logger.debug("doom-loop check failed", exc_info=True)
-
-            # Clear force-response once we got a usable non-doom turn.
-            if (
-                run_context is not None
-                and isinstance(run_context._metadata, dict)
-                and run_context._metadata.pop("doom_force_response", None)
-            ):
-                pass
-
-            # Use exclusively native or text-based tool calls based on user-provided mode
-            native_tool_call_objects: list[NativeToolCall] | None = None
-            if use_native_tools:
-                native_tool_call_objects = response.tool_calls or []
-                tool_calls = [
-                    ParsedToolCall(tool_name=tc.tool_name, args=tc.args)
-                    for tc in native_tool_call_objects
-                ]
-            else:
-                tool_calls = registry.parse_tool_calls(response.content)
-
-
-            if not tool_calls:
-                # Check if the response is a truncated JSON tool call (hit max_tokens)
-                if not use_native_tools and _looks_like_truncated_json(response.content):
-                    emit("warn", {"message": "truncated JSON tool call detected — asking LLM to retry"})
-                    messages.append(LLMMessage(role="assistant", content=response.content, thinking=_thinking_content))
-                    messages.append(LLMMessage(
-                        role="user",
-                        content=(
-                            "Your previous response was cut off mid-JSON. "
-                            "Please resend the complete tool call as valid JSON."
-                        ),
-                    ))
-                    continue
-
-                # ── CodeAct: execute Python action when no native tool calls ──
-                if action_mode_norm == "code":
-                    from clawagents.graph.codeact import extract_code_action, run_code_action
-
-                    code = extract_code_action(response.content or "")
-                    if code:
-                        messages.append(LLMMessage(
-                            role="assistant",
-                            content=response.content,
-                            thinking=_thinking_content,
-                        ))
-                        emit("tool_call", {"name": "codeact", "args": {"code": code[:500]}})
-
-                        def _run_async(coro: Any) -> Any:
-                            try:
-                                asyncio.get_running_loop()
-                            except RuntimeError:
-                                return asyncio.run(coro)
-                            import concurrent.futures
-
-                            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                                return pool.submit(asyncio.run, coro).result()
-
-                        result = run_code_action(
-                            code,
-                            registry,
-                            before_tool=before_tool,
-                            run_context=run_context,
-                            run_async=_run_async,
-                        )
-                        state.tool_calls += len(result.get("tool_calls") or []) or 1
-                        obs = str(result.get("observation") or "")
-                        emit("tool_result", {
-                            "name": "codeact",
-                            "success": not result.get("error"),
-                            "output": obs[:2000],
-                        })
-                        if result.get("done"):
-                            state.result = obs
-                            state.status = "done"
-                            emit("final_content", {"content": state.result})
-                            _emit_typed("assistant_message", {
-                                "content": state.result,
-                                "thinking": _thinking_content,
-                            })
-                            break
-                        messages.append(LLMMessage(
-                            role="user",
-                            content=f"[CodeAct Observation]\n{obs}",
-                        ))
-                        continue
-
-                # ── Advisor: final check before declaring done ──
-                # Track whether the final-check path already appended the
-                # assistant message: when the advisor errored or returned
-                # nothing, the fall-through below appended it a second time.
-                _final_assistant_appended = False
-                if advisor_llm and _advisor_call_count > 0 and _advisor_call_count < advisor_max_calls and state.tool_calls > 0:
-                    messages.append(LLMMessage(role="assistant", content=response.content, thinking=_thinking_content))
-                    _final_assistant_appended = True
-                    await _consult_advisor(messages, "final-check")
-                    # If advisor injected guidance, let the LLM process it
-                    last_msg = messages[-1] if messages else None
-                    if last_msg and isinstance(last_msg.content, str) and last_msg.content.startswith("[Advisor Guidance]"):
-                        continue
-
-
-                # ── Goal autopilot final gate ──
-                try:
-                    from clawagents.config.features import is_enabled as _feat_goal
-                    from clawagents.goal import GoalOrchestrator, get_goal_tracker
-
-                    _goal_mode_on = bool(
-                        isinstance(run_context._metadata, dict)
-                        and run_context._metadata.get("goal_mode")
-                    )
-                    _goal_tracker = get_goal_tracker(run_context) if _goal_mode_on else None
-                    if (
-                        _goal_mode_on
-                        and _feat_goal("goal_autopilot")
-                        and _goal_tracker is not None
-                        and _goal_tracker.is_active()
-                        and _goal_tracker.state is not None
-                        and _goal_tracker.state.status.value
-                        not in ("done", "failed", "paused")
-                    ):
-                        if not _final_assistant_appended:
-                            messages.append(LLMMessage(
-                                role="assistant",
-                                content=response.content,
-                                thinking=_thinking_content,
-                            ))
-                            _final_assistant_appended = True
-                        evidence = (response.content or "")[:6000]
-                        orch = GoalOrchestrator(
-                            _goal_tracker,
-                            _goal_llm_complete(run_context, llm),
-                        )
-                        ok, gst = await orch.verify(evidence)
-                        if not ok:
-                            inject = (
-                                "[Goal Verifier] Completion rejected. Continue the plan.\n"
-                                f"Consecutive misses: {gst.consecutive_not_achieved}.\n"
-                            )
-                            if gst.strategy_text:
-                                inject += f"Strategy note:\n{gst.strategy_text[:2000]}\n"
-                            messages.append(LLMMessage(role="user", content=inject))
-                            emit("context", {"message": "goal verifier rejected completion"})
-                            continue
-                        emit("context", {"message": "goal verifier accepted — DONE"})
-                except Exception:
-                    logger.debug("goal final gate failed", exc_info=True)
-
-                if recorder:
-                    recorder.record_turn(
-                        response_text=response.content or "",
-                        model=response.model,
-                        tokens_used=response.tokens_used,
-                        thinking=_thinking_content,
-                    )
-                state.result = _sanitize_assistant_text(response.content)
-                state.status = "done"
-                emit("final_content", {"content": state.result})
-                _emit_typed("assistant_message", {
-                    "content": state.result,
-                    "thinking": _thinking_content,
-                })
-                if not _final_assistant_appended:
-                    messages.append(LLMMessage(role="assistant", content=response.content, thinking=_thinking_content))
-                break
-
-            # ── Handoff dispatch (v6.4) ──────────────────────────────
-            # If the LLM called a synthetic handoff tool, transfer control
-            # to the target agent and return its terminal state. We honour
-            # only the first handoff call in a batch — multiple handoffs
-            # in one turn don't make sense (a transfer is exclusive).
-            if handoff_map:
-                _handoff_call: ParsedToolCall | None = None
-                _handoff_native_tc: NativeToolCall | None = None
-                for _i, _tc in enumerate(tool_calls):
-                    if _tc.tool_name in handoff_map:
-                        _handoff_call = _tc
-                        if native_tool_call_objects and _i < len(native_tool_call_objects):
-                            _handoff_native_tc = native_tool_call_objects[_i]
-                        break
-                if _handoff_call is not None:
-                    h_obj = handoff_map[_handoff_call.tool_name]
-                    reason_text = str(_handoff_call.args.get("reason", "")) if isinstance(_handoff_call.args, dict) else ""
-                    # Materialise the target agent now so a Handoff(factory=)
-                    # constructed before the import cycle was broken can
-                    # still resolve.
-                    try:
-                        target_agent = h_obj.resolve_target()
-                    except Exception as resolve_err:
-                        emit("warn", {"message": f"handoff target resolution failed: {resolve_err}"})
-                        messages.append(LLMMessage(
-                            role="user",
-                            content=f"[Handoff Error] Could not resolve target agent: {resolve_err}",
-                        ))
-                        continue
-
-                    target_name = getattr(target_agent, "name", None) or _handoff_call.tool_name
-                    from_name = agent_name or "ClawAgent"
-
-                    # Stamp the assistant message that triggered the handoff
-                    # so the input filter sees a complete transcript.
-                    if use_native_tools and _handoff_native_tc and _handoff_native_tc.tool_call_id:
-                        messages.append(LLMMessage(
-                            role="assistant",
-                            content=response.content or "",
-                            tool_calls_meta=[{
-                                "id": _handoff_native_tc.tool_call_id,
-                                "name": _handoff_call.tool_name,
-                                "args": _handoff_call.args,
-                            }],
-                            thinking=_thinking_content,
-                        ))
-                        # Synthesize a tool-result message acknowledging the
-                        # transfer, since most providers reject orphan tool
-                        # calls (the rule that drives _patch_dangling_tool_calls).
-                        messages.append(LLMMessage(
-                            role="tool",
-                            content=f"[Handoff] transferred to {target_name}",
-                            tool_call_id=_handoff_native_tc.tool_call_id,
-                        ))
-                    else:
-                        messages.append(LLMMessage(
-                            role="assistant",
-                            content=f'{{"tool": "{_handoff_call.tool_name}", "args": {json.dumps(_handoff_call.args)}}}',
-                            thinking=_thinking_content,
-                        ))
-                        messages.append(LLMMessage(
-                            role="user",
-                            content=f"[Handoff] transferred to {target_name}",
-                        ))
-
-                    # Build the input filter payload from the messages
-                    # accumulated so far (input_history). The pre/new split
-                    # is approximate: we treat anything past the original
-                    # user task as new_items.
-                    handoff_payload = HandoffInputData(
-                        input_history=list(messages),
-                        pre_handoff_items=[
-                            m for m in messages if id(m) in _session_initial_ids
-                        ],
-                        new_items=[
-                            m for m in messages if id(m) not in _session_initial_ids
-                        ],
-                        run_context=run_context,
-                    )
-                    if h_obj.input_filter is not None:
-                        try:
-                            handoff_payload = h_obj.input_filter(handoff_payload)
-                        except Exception as filter_err:
-                            emit("warn", {"message": f"handoff input_filter raised: {filter_err}"})
-                    filtered_messages = list(handoff_payload.input_history)
-
-                    # Fire the on_handoff side-effect (per-Handoff) before
-                    # firing class-based RunHooks.on_handoff. Both are
-                    # observation-only — exceptions are logged.
-                    if h_obj.on_handoff is not None:
-                        try:
-                            await h_obj.on_handoff(run_context)
-                        except Exception as hk_err:
-                            emit("warn", {"message": f"handoff on_handoff raised: {hk_err}"})
-                    if active_hooks:
-                        await _fire_hook("on_handoff", from_name, target_name)
-
-                    # Emit the typed event + warn line so callers tracking
-                    # `on_event` see the transfer too.
-                    emit("warn", {"message": f"handoff: {from_name} → {target_name}"})
-                    _emit_typed("handoff_occurred", {
-                        "from_agent": from_name,
-                        "to_agent": target_name,
-                        "tool_name": _handoff_call.tool_name,
-                        "reason": reason_text,
-                    })
-
-                    # Re-enter the loop on the target agent inside a
-                    # ``handoff_span`` so traces capture the transfer.
-                    with handoff_span(_handoff_call.tool_name, from_agent=from_name, to_agent=target_name):
-                        # Build a fresh task string. We forward the most
-                        # recent user message from the filtered history if
-                        # one exists; otherwise fall back to the original.
-                        last_user = next(
-                            (m for m in reversed(filtered_messages)
-                             if m.role == "user" and isinstance(m.content, str)),
-                            None,
-                        )
-                        if last_user is not None and isinstance(last_user.content, str):
-                            forward_task = last_user.content
-                        else:
-                            forward_task = task
-
-                        # Drop the system message — the target agent has
-                        # its own. Pass remaining filtered history (if any)
-                        # via session-protocol-style preload by appending
-                        # to messages after the loop's own system prompt
-                        # is constructed; the simplest path is to re-call
-                        # invoke() with the filtered task + pass any prior
-                        # non-system messages via a transient session.
-                        non_system = [
-                            m for m in filtered_messages if m.role != "system"
-                        ]
-
-                        class _TransientSession:
-                            def __init__(self, items: list[LLMMessage]):
-                                self._items = items
-
-                            async def get_items(self) -> list[LLMMessage]:
-                                return list(self._items)
-
-                            async def add_items(self, _new: list[LLMMessage]) -> None:
-                                return None
-
-                        # Don't preload the user message we're about to
-                        # send as ``task`` — drop the trailing user msg.
-                        preload = list(non_system)
-                        if preload and preload[-1].role == "user" and isinstance(preload[-1].content, str) and preload[-1].content == forward_task:
-                            preload = preload[:-1]
-
-                        try:
-                            child_state = await target_agent.invoke(
-                                forward_task,
-                                run_context=run_context,
-                                session=_TransientSession(preload) if preload else None,
-                                on_stream_event=on_stream_event,
-                                session_end_tail=False,
-                            )
-                        except Exception as run_err:
-                            emit("warn", {"message": f"handoff target raised: {run_err}"})
-                            messages.append(LLMMessage(
-                                role="user",
-                                content=f"[Handoff Error] Target agent failed: {run_err}",
-                            ))
-                            continue
-
-                    state.result = child_state.result
-                    state.status = child_state.status if child_state.status != "running" else "done"
-                    state.final_output = (
-                        child_state.final_output
-                        if child_state.final_output is not None
-                        else child_state.result
-                    )
-                    state.tool_calls += child_state.tool_calls
-                    state.messages = messages + child_state.messages
-                    _handoff_transcript_set = True
-                    break
-
-            if loop_tracker.is_circuit_broken():
-                emit("warn", {"message": f"circuit breaker tripped ({loop_tracker._no_progress_count} no-progress calls) — breaking"})
-                state.status = "done"
-                state.result = "Circuit breaker: too many tool calls with no progress. Stopping."
-                break
-
-            poll_hit = None
-            for call in tool_calls:
-                poll_hit = loop_tracker.check_known_poll_no_progress(call.tool_name, call.args)
-                if poll_hit and poll_hit.level == "critical":
-                    break
-            if poll_hit and poll_hit.stuck and poll_hit.level == "critical":
-                emit("warn", {"message": poll_hit.message})
-                state.status = "done"
-                state.result = poll_hit.message
-                break
-
-            if loop_tracker.is_hard_looping_batch(tool_calls):
-                names = ", ".join(c.tool_name for c in tool_calls)
-                emit("warn", {"message": f"tool loop detected ({names}) — breaking"})
-                state.status = "done"
-                state.result = f"Tool loop detected ({names}). Stopping."
-                break
-
-            if loop_tracker.is_ping_ponging():
-                recent_unique = list(set(loop_tracker._history[-6:]))
-                emit("warn", {"message": f"ping-pong oscillation detected ({' ↔ '.join(recent_unique)}) — breaking"})
-                state.status = "done"
-                state.result = "Ping-pong loop detected between tools. Stopping."
-                break
-
-            if loop_tracker.is_soft_looping_batch(tool_calls):
-                loop_tracker.record_batch(tool_calls)
-                n = loop_tracker.bump_soft_warning()
-                repeated_calls = [
-                    c for c in tool_calls
-                    if loop_tracker.is_soft_looping(c.tool_name, c.args)
-                ]
-                repeated_names = ", ".join(c.tool_name for c in repeated_calls)
-                has_repeated_execute = any(c.tool_name == "execute" for c in repeated_calls)
-                emit("warn", {"message": f"repeated tool call warning #{n}: {repeated_names}"})
-                if has_repeated_execute:
-                    hint = (
-                        "[System] You are re-calling the same execute command with the same arguments. "
-                        "The command already ran; if the previous result has success=false or a nonzero "
-                        "exit_code, treat stdout/stderr as diagnostic feedback, not as a tool failure. "
-                        "Read the prior output, then edit code or inspect new evidence before trying again. "
-                        "Do not rerun this command until something relevant changed. "
-                        "If you believe the task is complete, provide your final answer now."
-                    )
-                else:
-                    hint = (
-                        f"[System] You are re-calling {repeated_names} with the same arguments. "
-                        "You already have the result in the conversation above. "
-                        "Use the existing data instead of re-reading. "
-                        "If you believe the task is complete, provide your final answer now."
-                    )
-                messages.append(LLMMessage(
-                    role="user",
-                    content=hint,
-                ))
-                continue
-
-            # Surface intermediate assistant commentary (text alongside tool
-            # calls) on the typed stream. Skipped in text-tool mode where
-            # ``response.content`` is the raw JSON tool call itself.
-            if use_native_tools and response.content and response.content.strip():
-                _emit_typed("assistant_message", {
-                    "content": response.content,
-                    "thinking": _thinking_content,
-                })
-
-            # Session: write assistant message with tool calls
-            if session_writer:
-                tc_meta = []
-                if native_tool_call_objects:
-                    tc_meta = [{"id": tc.tool_call_id, "name": tc.tool_name, "args": tc.args} for tc in native_tool_call_objects]
-                session_writer.write_assistant_message(
-                    response.content or "",
-                    tool_calls=tc_meta or None,
-                    thinking=_thinking_content,
-                )
-
-            if len(tool_calls) == 1:
-                call = tool_calls[0]
-                native_tc = native_tool_call_objects[0] if native_tool_call_objects else None
-                emit("tool_call", {"name": call.tool_name})
-
-                # External / taxonomy pre_tool_use hook
-                if ext_hook_runner and taxonomy_dispatcher is None:
-                    try:
-                        ext_allowed, ext_args = await ext_hook_runner.pre_tool_use(call.tool_name, call.args)
-                        if not ext_allowed:
-                            emit("tool_skipped", {"name": call.tool_name, "reason": "blocked by external hook"})
-                            await _tax_permission_denied(
-                                call.tool_name,
-                                "blocked by external hook",
-                                source="external_hook",
-                            )
-                            if use_native_tools and native_tc and native_tc.tool_call_id:
-                                messages.append(LLMMessage(
-                                    role="assistant",
-                                    content=response.content or "",
-                                    tool_calls_meta=[{
-                                        "id": native_tc.tool_call_id,
-                                        "name": call.tool_name,
-                                        "args": call.args,
-                                    }],
-                                    gemini_parts=getattr(response, "gemini_parts", None),
-                                    thinking=_thinking_content,
-                                ))
-                                messages.append(LLMMessage(
-                                    role="tool",
-                                    content=f"[Tool Skipped] {call.tool_name} was blocked by external hook.",
-                                    tool_call_id=native_tc.tool_call_id,
-                                ))
-                            else:
-                                messages.append(LLMMessage(
-                                    role="user",
-                                    content=f"[Tool Skipped] {call.tool_name} was blocked by external hook.",
-                                ))
-                            continue
-                        call = ParsedToolCall(tool_name=call.tool_name, args=ext_args)
-                    except Exception as hook_err:
-                        emit("warn", {"message": f"external pre_tool_use hook error: {hook_err}"})
-
-                if taxonomy_dispatcher is not None:
-                    try:
-                        from clawagents.hooks.external import dispatch_taxonomy_hook
-                        from clawagents.hooks.taxonomy import HookEvent
-
-                        tax_allowed, tax_reason = await dispatch_taxonomy_hook(
-                            taxonomy_dispatcher,
-                            HookEvent.PRE_TOOL_USE,
-                            {"tool": call.tool_name, "args": call.args},
-                            blocking=True,
-                        )
-                        if not tax_allowed:
-                            reason = tax_reason or "blocked by taxonomy hook"
-                            emit("tool_skipped", {"name": call.tool_name, "reason": reason})
-                            await _tax_permission_denied(
-                                call.tool_name, reason, source="taxonomy",
-                            )
-                            if use_native_tools and native_tc and native_tc.tool_call_id:
-                                messages.append(LLMMessage(
-                                    role="assistant",
-                                    content=response.content or "",
-                                    tool_calls_meta=[{
-                                        "id": native_tc.tool_call_id,
-                                        "name": call.tool_name,
-                                        "args": call.args,
-                                    }],
-                                    gemini_parts=getattr(response, "gemini_parts", None),
-                                    thinking=_thinking_content,
-                                ))
-                                messages.append(LLMMessage(
-                                    role="tool",
-                                    content=f"[Tool Skipped] {call.tool_name} was not approved: {reason}",
-                                    tool_call_id=native_tc.tool_call_id,
-                                ))
-                            else:
-                                messages.append(LLMMessage(
-                                    role="user",
-                                    content=f"[Tool Skipped] {call.tool_name} was not approved: {reason}",
-                                ))
-                            continue
-                    except Exception as hook_err:
-                        emit("warn", {"message": f"taxonomy pre_tool_use hook error: {hook_err}"})
-
-                if before_tool:
-                    hook_approved = True
-                    hook_reason = "rejected by before_tool hook"
-                    try:
-                        hook_raw = before_tool(call.tool_name, call.args)
-                        if isinstance(hook_raw, HookResult):
-                            hook_approved = hook_raw.allowed
-                            if hook_raw.reason:
-                                hook_reason = hook_raw.reason
-                            if hook_raw.allowed and hook_raw.updated_args is not None:
-                                call = ParsedToolCall(tool_name=call.tool_name, args=hook_raw.updated_args)
-                            if hook_raw.messages:
-                                messages.extend(hook_raw.messages)
-                        else:
-                            hook_approved = bool(hook_raw)
-                    except Exception as hook_err:
-                        emit("warn", {"message": f"before_tool hook error: {hook_err}"})
-                        hook_approved = False
-                    if not hook_approved:
-                        emit("tool_skipped", {"name": call.tool_name, "reason": hook_reason})
-                        await _tax_permission_denied(
-                            call.tool_name, hook_reason, source="before_tool",
-                        )
-                        # Close the native tool pair so Gemini sees
-                        # model(function_call) → user(function_response), not a bare
-                        # "[Tool Skipped]" user turn that breaks turn alternation.
-                        if use_native_tools and native_tc and native_tc.tool_call_id:
-                            messages.append(LLMMessage(
-                                role="assistant",
-                                content=response.content or "",
-                                tool_calls_meta=[{
-                                    "id": native_tc.tool_call_id,
-                                    "name": call.tool_name,
-                                    "args": call.args,
-                                }],
-                                gemini_parts=getattr(response, "gemini_parts", None),
-                                thinking=_thinking_content,
-                            ))
-                            messages.append(LLMMessage(
-                                role="tool",
-                                content=f"[Tool Skipped] {call.tool_name} was not approved: {hook_reason}",
-                                tool_call_id=native_tc.tool_call_id,
-                            ))
-                        else:
-                            messages.append(LLMMessage(
-                                role="user",
-                                content=f"[Tool Skipped] {call.tool_name} was not approved: {hook_reason}",
-                            ))
-                        continue
-
-                loop_tracker.record(call.tool_name, call.args)
-
-                # HITL tool approval (via RunContext). ``None`` means undecided,
-                # which we treat as approve-by-default for backward compatibility.
-                native_tc_id = native_tc.tool_call_id if native_tc else call.tool_name
-                approval_state = run_context.is_tool_approved(
-                    native_tc_id, tool_name=call.tool_name,
-                )
-                if approval_state is False:
-                    rec = run_context.get_approval(native_tc_id, tool_name=call.tool_name)
-                    reason = (rec.reason if rec else None) or "rejected via RunContext"
-                    emit("tool_skipped", {"name": call.tool_name, "reason": reason})
-                    if use_native_tools and native_tc and native_tc.tool_call_id:
-                        messages.append(LLMMessage(
-                            role="assistant",
-                            content=response.content or "",
-                            tool_calls_meta=[{
-                                "id": native_tc.tool_call_id,
-                                "name": call.tool_name,
-                                "args": call.args,
-                            }],
-                            gemini_parts=getattr(response, "gemini_parts", None),
-                            thinking=_thinking_content,
-                        ))
-                        messages.append(LLMMessage(
-                            role="tool",
-                            content=f"[Tool Skipped] {call.tool_name} was rejected: {reason}",
-                            tool_call_id=native_tc.tool_call_id,
-                        ))
-                    else:
-                        messages.append(LLMMessage(
-                            role="user",
-                            content=f"[Tool Skipped] {call.tool_name} was rejected: {reason}",
-                        ))
-                    continue
-                if approval_state is None:
-                    tool_obj = registry.tools.get(call.tool_name)
-                    needs_approval = (
-                        call.tool_name in require_approval_set
-                        or bool(getattr(tool_obj, "require_approval", False))
-                    )
-                    emit("approval_required", {"name": call.tool_name, "id": native_tc_id})
-                    _emit_typed("approval_required", {
-                        "tool_name": call.tool_name,
-                        "call_id": native_tc_id,
-                        "args": call.args,
-                    })
-                    if needs_approval and approval_handler is not None:
-                        approved = await _wait_for_tool_approval(
-                            run_context,
-                            native_tc_id,
-                            call.tool_name,
-                            call.args if isinstance(call.args, dict) else {},
-                            approval_handler=approval_handler,
-                            emit=emit,
-                        )
-                        if not approved:
-                            emit("tool_skipped", {
-                                "name": call.tool_name,
-                                "reason": "approval denied or timed out",
-                            })
-                            if use_native_tools and native_tc and native_tc.tool_call_id:
-                                messages.append(LLMMessage(
-                                    role="assistant",
-                                    content=response.content or "",
-                                    tool_calls_meta=[{
-                                        "id": native_tc.tool_call_id,
-                                        "name": call.tool_name,
-                                        "args": call.args,
-                                    }],
-                                    gemini_parts=getattr(response, "gemini_parts", None),
-                                    thinking=_thinking_content,
-                                ))
-                                messages.append(LLMMessage(
-                                    role="tool",
-                                    content=f"[Tool Skipped] {call.tool_name} was not approved",
-                                    tool_call_id=native_tc.tool_call_id,
-                                ))
-                            else:
-                                messages.append(LLMMessage(
-                                    role="user",
-                                    content=f"[Tool Skipped] {call.tool_name} was not approved",
-                                ))
-                            continue
-                        run_context.approve_tool(native_tc_id, tool_name=call.tool_name)
-
-                _emit_typed("tool_started", {
-                    "tool_name": call.tool_name,
-                    "call_id": native_tc_id,
-                    "args": call.args,
-                })
-                if active_hooks:
-                    await _fire_hook(
-                        "on_tool_start", call.tool_name, native_tc_id, call.args,
-                    )
-                # ── Activity heartbeats (Hermes parity) ─────────────────
-                # Long-running tools (slow web fetches, deep bash runs)
-                # would otherwise produce zero events between start and
-                # finish; upstream proxies and chat-platform gateways
-                # interpret that as "idle" and kill the connection.
-                # Emit a periodic ``tool_heartbeat`` while the call is
-                # in flight so listeners can keep the channel alive and
-                # surface progress.
-                _reuse = loop_tracker.reuse_tool_output(call.tool_name, call.args)
-                if _reuse is not None:
-                    from clawagents.tools.registry import ToolResult as _TR
-
-                    tool_result = _TR(success=True, output=_reuse)
-                    emit(
-                        "warn",
-                        {
-                            "message": (
-                                f"suppressed duplicate/overlapping {call.tool_name} "
-                                "(reused prior result)"
-                            )
-                        },
-                    )
-                else:
-                    tool_result = await run_with_heartbeat(
-                        registry.execute_tool(
-                            call.tool_name, call.args, run_context=run_context,
-                        ),
-                        on_event=on_event,
-                        kind="tool_heartbeat",
-                        payload={
-                            "tool_name": call.tool_name,
-                            "call_id": native_tc_id,
-                        },
-                        interval=DEFAULT_ACTIVITY_HEARTBEAT_INTERVAL_S,
-                    )
-                    if tool_result.success:
-                        loop_tracker.cache_result_output(
-                            call.tool_name,
-                            call.args,
-                            str(tool_result.output or ""),
-                        )
-                state.tool_calls += 1
-                if active_hooks:
-                    await _fire_hook(
-                        "on_tool_end",
-                        call.tool_name,
-                        native_tc_id,
-                        tool_result.success,
-                        str(tool_result.output)[:2000] if tool_result.output else "",
-                        tool_result.error if not tool_result.success else None,
-                    )
-                    if not tool_result.success:
-                        await _fire_hook(
-                            "on_tool_failure",
-                            call.tool_name,
-                            native_tc_id,
-                            tool_result.error or str(tool_result.output)[:500],
-                        )
-
-
-                # External / taxonomy post_tool_use hook
-                if ext_hook_runner and taxonomy_dispatcher is None:
-                    try:
-                        ext_result = await ext_hook_runner.post_tool_use(
-                            call.tool_name, call.args,
-                            {"success": tool_result.success, "output": str(tool_result.output)[:1000]},
-                        )
-                        if "success" in ext_result and "output" in ext_result:
-                            tool_result = ToolResult(
-                                success=ext_result["success"],
-                                output=ext_result["output"],
-                                error=ext_result.get("error"),
-                            )
-                    except Exception as hook_err:
-                        emit("warn", {"message": f"external post_tool_use hook error: {hook_err}"})
-
-                if taxonomy_dispatcher is not None:
-                    try:
-                        from clawagents.hooks.external import dispatch_taxonomy_hook
-                        from clawagents.hooks.taxonomy import HookEvent
-
-                        await dispatch_taxonomy_hook(
-                            taxonomy_dispatcher,
-                            HookEvent.POST_TOOL_USE,
-                            {
-                                "tool": call.tool_name,
-                                "args": call.args,
-                                "success": tool_result.success,
-                                "output": str(tool_result.output)[:1000],
-                            },
-                            blocking=False,
-                        )
-                        if not tool_result.success:
-                            await dispatch_taxonomy_hook(
-                                taxonomy_dispatcher,
-                                HookEvent.POST_TOOL_USE_FAILURE,
-                                {
-                                    "tool": call.tool_name,
-                                    "args": call.args,
-                                    "error": tool_result.error or str(tool_result.output)[:500],
-                                },
-                                blocking=False,
-                            )
-                    except Exception as hook_err:
-                        emit("warn", {"message": f"taxonomy post_tool_use hook error: {hook_err}"})
-
-                if after_tool:
-                    try:
-                        hooked_result = after_tool(call.tool_name, call.args, tool_result)
-                        if hasattr(hooked_result, "success") and hasattr(hooked_result, "output"):
-                            tool_result = hooked_result
-                        else:
-                            emit("warn", {"message": "after_tool returned invalid ToolResult — ignored"})
-                    except Exception as hook_err:
-                        emit("warn", {"message": f"after_tool hook error: {hook_err}"})
-
-                raw_output: str | list[dict[str, Any]] = _tool_observation(tool_result)
-                # UI gets uncrushed observation (bounded); model gets crushed tool_output.
-                ui_text = _ui_tool_result_text(tool_result, raw_output)
-                tool_output: str | list[dict[str, Any]]
-                if isinstance(raw_output, list):
-                    try:
-                        from clawagents.media.images import sanitize_tool_output
-
-                        tool_output = sanitize_tool_output(raw_output)  # type: ignore[assignment]
-                    except Exception:
-                        logger.debug("sanitize_tool_output failed", exc_info=True)
-                        tool_output = raw_output
-                    preview: str = "[Multimodal Array Content]"
-                else:
-                    from clawagents.tool_output_artifacts import prepare_tool_output_for_context
-
-                    tool_output, artifact_id = prepare_tool_output_for_context(
-                        tool_name=call.tool_name,
-                        tool_use_id=native_tc.tool_call_id if native_tc else call.tool_name,
-                        output=raw_output,
-                        workspace=_run_context_workspace(run_context),
-                        success=bool(tool_result.success),
-                    )
-                    if artifact_id is not None:
-                        emit("context", {"message": f"tool output crushed/stored id={artifact_id}"})
-                    preview = tool_output[:preview_chars]
-
-                tool_output = _post_tool_side_effects(
-                    call.tool_name,
-                    call.args if isinstance(call.args, dict) else {},
-                    tool_result.success,
-                    tool_output,
-                    emit=emit,
-                    run_context=run_context,
-                )
-                if isinstance(tool_output, str):
-                    preview = tool_output[:preview_chars]
-
-                emit("tool_result", {
-                    "name": call.tool_name,
-                    "success": tool_result.success,
-                    "preview": preview,
-                    "output": ui_text,
-                })
-                _emit_typed("tool_result", {
-                    "tool_name": call.tool_name,
-                    "call_id": native_tc_id,
-                    "success": tool_result.success,
-                    "output": ui_text,
-                    "error": tool_result.error if not tool_result.success else None,
-                })
-
-                # Session: write tool result
-                if session_writer:
-                    tc_id = native_tc.tool_call_id if native_tc else ""
-                    session_writer.write_tool_result(
-                        tc_id, call.tool_name, tool_result.success,
-                        str(tool_result.output)[:2000],
-                        error=tool_result.error if not tool_result.success else None,
-                    )
-
-                # Record result hash for no-progress / circuit breaker detection
-                if isinstance(tool_output, str):
-                    loop_tracker.record_result(call.tool_name, call.args, tool_output)
-
-                # ── Failure tracking + trajectory ──
-                if failure_tracker:
-                    failure_tracker.record(tool_result.success, call.tool_name)
-                if recorder:
-                    from clawagents.trajectory.recorder import ToolCallRecord
-                    # Feature 4: capture observation context (last tool result the agent saw)
-                    obs_ctx = ""
-                    for m in reversed(messages):
-                        if m.role in ("user", "tool") and m.content and isinstance(m.content, str) and m.content.startswith("[Tool Result]"):
-                            obs_ctx = m.content[:300]
-                            break
-                    recorder.record_turn(
-                        response_text=response.content or "",
-                        model=response.model,
-                        tokens_used=response.tokens_used,
-                        tool_calls=[ToolCallRecord(
-                            tool_name=call.tool_name,
-                            args=call.args,
-                            success=tool_result.success,
-                            output_preview=preview if isinstance(preview, str) else "[multimodal]",
-                            error=tool_result.error if not tool_result.success else None,
-                        )],
-                        observation_context=obs_ctx,
-                        thinking=_thinking_content,
-                    )
-
-                # Use proper tool role messages when native tools are enabled
-                if use_native_tools and native_tc and native_tc.tool_call_id:
-                    messages.append(LLMMessage(
-                        role="assistant",
-                        content=response.content or "",
-                        tool_calls_meta=[{"id": native_tc.tool_call_id, "name": call.tool_name, "args": call.args}],
-                        gemini_parts=getattr(response, "gemini_parts", None),
-                        thinking=_thinking_content,
-                    ))
-                    tool_content = f"{tool_output}" if isinstance(tool_output, str) else json.dumps(tool_output)
-                    messages.append(LLMMessage(
-                        role="tool",
-                        content=tool_content,
-                        tool_call_id=native_tc.tool_call_id,
-                    ))
-                else:
-                    messages.append(
-                        LLMMessage(role="assistant", content=f'{{"tool": "{call.tool_name}", "args": {json.dumps(call.args)}}}', thinking=_thinking_content)
-                    )
-                    user_content: str | list[dict[str, Any]]
-                    if isinstance(tool_output, str):
-                        user_content = f"[Tool Result] {tool_output}"
-                    else:
-                        user_content = tool_output
-                    messages.append(
-                        LLMMessage(role="user", content=user_content)
-                    )
-
-                # ── Rethink injection on consecutive failures ──
-                if failure_tracker:
-                    # Feature F: update threshold dynamically based on progress
-                    try:
-                        from clawagents.trajectory.verifier import compute_adaptive_rethink_threshold
-                        failure_tracker._threshold = compute_adaptive_rethink_threshold(
-                            _task_type, round_idx, state.tool_calls
-                        )
-                    except Exception:
-                        pass
-                    if failure_tracker.should_rethink():
-                        # ── Advisor: consult when stuck ──
-                        await _consult_advisor(messages, "stuck")
-                        n = failure_tracker.consecutive_failures
-                        rethink_num = failure_tracker.bump_rethink()
-                        emit("warn", {"message": f"rethink #{rethink_num}: {n} consecutive failures (threshold={failure_tracker._threshold})"})
-                        rethink_msg = _RETHINK_MESSAGE.format(n=n)
-                        if learn:
-                            from clawagents.trajectory.lessons import build_rethink_with_lessons
-                            fmt_count = sum(1 for t in (recorder.turns if recorder else []) for tc in t.tool_calls if not tc.success and tc.failure_type == "format")
-                            logic_count = sum(1 for t in (recorder.turns if recorder else []) for tc in t.tool_calls if not tc.success and tc.failure_type == "logic")
-                            rethink_msg = build_rethink_with_lessons(rethink_msg, fmt_count, logic_count)
-                        messages.append(LLMMessage(
-                            role="user",
-                            content=rethink_msg,
-                        ))
-
-            else:
-                # ── External pre_tool_use hook (parallel) ──
-                # Mirror the single-call path: an external policy gate must not
-                # be bypassable by batching a forbidden call with another one.
-                _candidate_pairs: list[tuple[int, ParsedToolCall]] = list(enumerate(tool_calls))
-                if ext_hook_runner and taxonomy_dispatcher is None:
-                    _ext_pairs: list[tuple[int, ParsedToolCall]] = []
-                    for _orig_i, _c in _candidate_pairs:
-                        try:
-                            ext_allowed, ext_args = await ext_hook_runner.pre_tool_use(_c.tool_name, _c.args)
-                            if not ext_allowed:
-                                emit("tool_skipped", {"name": _c.tool_name, "reason": "blocked by external hook"})
-                                await _tax_permission_denied(
-                                    _c.tool_name,
-                                    "blocked by external hook",
-                                    source="external_hook",
-                                )
-                                messages.append(LLMMessage(role="user", content=f"[Tool Skipped] {_c.tool_name} was blocked by external hook."))
-                                continue
-                            _c = ParsedToolCall(tool_name=_c.tool_name, args=ext_args)
-                        except Exception as hook_err:
-                            emit("warn", {"message": f"external pre_tool_use hook error: {hook_err}"})
-                        _ext_pairs.append((_orig_i, _c))
-                    _candidate_pairs = _ext_pairs
-                    if not _candidate_pairs:
-                        continue
-
-                if taxonomy_dispatcher is not None:
-                    from clawagents.hooks.external import dispatch_taxonomy_hook
-                    from clawagents.hooks.taxonomy import HookEvent
-
-                    _tax_pairs: list[tuple[int, ParsedToolCall]] = []
-                    for _orig_i, _c in _candidate_pairs:
-                        try:
-                            tax_allowed, tax_reason = await dispatch_taxonomy_hook(
-                                taxonomy_dispatcher,
-                                HookEvent.PRE_TOOL_USE,
-                                {"tool": _c.tool_name, "args": _c.args},
-                                blocking=True,
-                            )
-                            if not tax_allowed:
-                                reason = tax_reason or "blocked by taxonomy hook"
-                                emit("tool_skipped", {"name": _c.tool_name, "reason": reason})
-                                await _tax_permission_denied(
-                                    _c.tool_name, reason, source="taxonomy",
-                                )
-                                messages.append(
-                                    LLMMessage(
-                                        role="user",
-                                        content=f"[Tool Skipped] {_c.tool_name} was not approved: {reason}",
-                                    )
-                                )
-                                continue
-                        except Exception as hook_err:
-                            emit("warn", {"message": f"taxonomy pre_tool_use hook error: {hook_err}"})
-                        _tax_pairs.append((_orig_i, _c))
-                    _candidate_pairs = _tax_pairs
-                    if not _candidate_pairs:
-                        continue
-
-                # ── before_tool hook (parallel) — filter out rejected calls ──
-                # Track original tool_calls index alongside each approved call so
-                # native_tool_call_objects[orig_idx] stays correct even when the hook
-                # rejects calls (skipping reduces approved length) or modifies args
-                # (which produces a new ParsedToolCall instance, breaking identity checks).
-                approved_calls: list[ParsedToolCall] = []
-                _approved_orig_indices: list[int] = []
-                if before_tool:
-                    def _apply_hook(c):
-                        """Return (approved_call_or_None, reason) after running the hook."""
-                        try:
-                            hook_raw = before_tool(c.tool_name, c.args)
-                            if isinstance(hook_raw, HookResult):
-                                if not hook_raw.allowed:
-                                    return None, hook_raw.reason or "rejected by before_tool hook"
-                                if hook_raw.messages:
-                                    messages.extend(hook_raw.messages)
-                                if hook_raw.updated_args is not None:
-                                    c = ParsedToolCall(tool_name=c.tool_name, args=hook_raw.updated_args)
-                                return c, ""
-                            else:
-                                if not bool(hook_raw):
-                                    return None, "rejected by before_tool hook"
-                                return c, ""
-                        except Exception as hook_err:
-                            emit("warn", {"message": f"before_tool hook error: {hook_err}"})
-                            return None, "hook error"
-
-                    for _orig_i, c in _candidate_pairs:
-                        result_call, reason = _apply_hook(c)
-                        if result_call is None:
-                            emit("tool_skipped", {"name": c.tool_name, "reason": reason})
-                            await _tax_permission_denied(
-                                c.tool_name, reason, source="before_tool",
-                            )
-                        else:
-                            approved_calls.append(result_call)
-                            _approved_orig_indices.append(_orig_i)
-                    if not approved_calls:
-                        messages.append(LLMMessage(role="user", content="[Tool Skipped] All tool calls were not approved."))
-                        continue
-                else:
-                    approved_calls = [c for _, c in _candidate_pairs]
-                    _approved_orig_indices = [i for i, _ in _candidate_pairs]
-
-                # Resolve a stable call_id per approved call (prefer native tc id).
-                # Index native_tool_call_objects by ORIGINAL tool_calls index, not
-                # approved_calls index — those diverge when before_tool rejects a call.
-                _approved_call_ids: list[str] = []
-                for _idx, _c in enumerate(approved_calls):
-                    _orig_idx = _approved_orig_indices[_idx]
-                    _ntc = native_tool_call_objects[_orig_idx] if (
-                        native_tool_call_objects
-                        and _orig_idx < len(native_tool_call_objects)
-                    ) else None
-                    _approved_call_ids.append(
-                        (_ntc.tool_call_id if _ntc else None) or _c.tool_name
-                    )
-
-                _runnable_calls: list[ParsedToolCall] = []
-                _runnable_call_ids: list[str] = []
-                for _c, _cid in zip(approved_calls, _approved_call_ids):
-                    approval_state = run_context.is_tool_approved(_cid, tool_name=_c.tool_name)
-                    if approval_state is False:
-                        rec = run_context.get_approval(_cid, tool_name=_c.tool_name)
-                        reason = (rec.reason if rec else None) or "rejected via RunContext"
-                        emit("tool_skipped", {"name": _c.tool_name, "reason": reason})
-                        messages.append(LLMMessage(
-                            role="user",
-                            content=f"[Tool Skipped] {_c.tool_name} was rejected: {reason}",
-                        ))
-                        continue
-                    if approval_state is None:
-                        emit("approval_required", {"name": _c.tool_name, "id": _cid})
-                        _emit_typed("approval_required", {
-                            "tool_name": _c.tool_name,
-                            "call_id": _cid,
-                            "args": _c.args,
-                        })
-                    _runnable_calls.append(_c)
-                    _runnable_call_ids.append(_cid)
-                approved_calls = _runnable_calls
-                _approved_call_ids = _runnable_call_ids
-                if not approved_calls:
-                    continue
-
-                for call in approved_calls:
-                    emit("tool_call", {"name": call.tool_name})
-                loop_tracker.record_batch(approved_calls)
-
-                for _c, _cid in zip(approved_calls, _approved_call_ids):
-                    _emit_typed("tool_started", {
-                        "tool_name": _c.tool_name,
-                        "call_id": _cid,
-                        "args": _c.args,
-                    })
-                    if active_hooks:
-                        await _fire_hook(
-                            "on_tool_start", _c.tool_name, _cid, _c.args,
-                        )
-                # Heartbeat while the parallel batch runs; the call_ids
-                # field lets listeners disambiguate which group of tools
-                # is in flight.
-                results = await run_with_heartbeat(
-                    registry.execute_tools_parallel(
-                        approved_calls, run_context=run_context,
-                    ),
-                    on_event=on_event,
-                    kind="tool_heartbeat",
-                    payload={
-                        "parallel": True,
-                        "tool_names": [_c.tool_name for _c in approved_calls],
-                        "call_ids": list(_approved_call_ids),
-                    },
-                    interval=DEFAULT_ACTIVITY_HEARTBEAT_INTERVAL_S,
-                )
-                state.tool_calls += len(approved_calls)
-                if active_hooks:
-                    for _c, _cid, _r in zip(
-                        approved_calls, _approved_call_ids, results
-                    ):
-                        await _fire_hook(
-                            "on_tool_end",
-                            _c.tool_name,
-                            _cid,
-                            _r.success,
-                            str(_r.output)[:2000] if _r.output else "",
-                            _r.error if not _r.success else None,
-                        )
-                        if not _r.success:
-                            await _fire_hook(
-                                "on_tool_failure",
-                                _c.tool_name,
-                                _cid,
-                                _r.error or str(_r.output)[:500],
-                            )
-
-
-                # External / taxonomy post_tool_use hook (parallel)
-                if ext_hook_runner and taxonomy_dispatcher is None:
-                    _ext_results: list[ToolResult] = []
-                    for _c, _r in zip(approved_calls, results):
-                        try:
-                            ext_result = await ext_hook_runner.post_tool_use(
-                                _c.tool_name, _c.args,
-                                {"success": _r.success, "output": str(_r.output)[:1000]},
-                            )
-                            if "success" in ext_result and "output" in ext_result:
-                                _r = ToolResult(
-                                    success=ext_result["success"],
-                                    output=ext_result["output"],
-                                    error=ext_result.get("error"),
-                                )
-                        except Exception as hook_err:
-                            emit("warn", {"message": f"external post_tool_use hook error: {hook_err}"})
-                        _ext_results.append(_r)
-                    results = _ext_results
-
-                if taxonomy_dispatcher is not None:
-                    from clawagents.hooks.external import dispatch_taxonomy_hook
-                    from clawagents.hooks.taxonomy import HookEvent
-
-                    for _c, _r in zip(approved_calls, results):
-                        try:
-                            await dispatch_taxonomy_hook(
-                                taxonomy_dispatcher,
-                                HookEvent.POST_TOOL_USE,
-                                {
-                                    "tool": _c.tool_name,
-                                    "args": _c.args,
-                                    "success": _r.success,
-                                    "output": str(_r.output)[:1000],
-                                },
-                                blocking=False,
-                            )
-                            if not _r.success:
-                                await dispatch_taxonomy_hook(
-                                    taxonomy_dispatcher,
-                                    HookEvent.POST_TOOL_USE_FAILURE,
-                                    {
-                                        "tool": _c.tool_name,
-                                        "args": _c.args,
-                                        "error": _r.error or str(_r.output)[:500],
-                                    },
-                                    blocking=False,
-                                )
-                        except Exception as hook_err:
-                            emit("warn", {"message": f"taxonomy post_tool_use hook error: {hook_err}"})
-
-                if after_tool:
-                    safe_results: list[ToolResult] = []
-                    for c, r in zip(approved_calls, results):
-                        try:
-                            hooked_parallel = after_tool(c.tool_name, c.args, r)
-                            if hasattr(hooked_parallel, "success") and hasattr(hooked_parallel, "output"):
-                                safe_results.append(hooked_parallel)
-                            else:
-                                emit("warn", {"message": "after_tool returned invalid ToolResult — ignored"})
-                                safe_results.append(r)
-                        except Exception as hook_err:
-                            emit("warn", {"message": f"after_tool hook error: {hook_err}"})
-                            safe_results.append(r)
-                    results = safe_results
-
-                # Build a map from approved-list index to NativeToolCall for ID lookup.
-                # Use the orig-index list captured during approval — identity-checking
-                # `tc is approved_calls[i]` fails when before_tool returns updated_args
-                # (which constructs a new ParsedToolCall).
-                native_tc_map: dict[int, NativeToolCall] = {}
-                if native_tool_call_objects:
-                    for _idx, _orig_idx in enumerate(_approved_orig_indices):
-                        if _orig_idx < len(native_tool_call_objects):
-                            native_tc_map[_idx] = native_tool_call_objects[_orig_idx]
-
-                call_summaries: list[str] = []
-                tool_outputs: list[str] = []
-                for _idx2, (call, result) in enumerate(zip(approved_calls, results)):
-                    raw_out: str | list[dict[str, Any]] = _tool_observation(result)
-                    ui_text = _ui_tool_result_text(result, raw_out)
-                    output: str | list[dict[str, Any]]
-                    _call_id = (
-                        _approved_call_ids[_idx2]
-                        if _idx2 < len(_approved_call_ids)
-                        else call.tool_name
-                    )
-                    if isinstance(raw_out, list):
-                        try:
-                            from clawagents.media.images import sanitize_tool_output
-
-                            output = sanitize_tool_output(raw_out)  # type: ignore[assignment]
-                        except Exception:
-                            logger.debug("sanitize_tool_output failed", exc_info=True)
-                            output = raw_out
-                        preview = "[Multimodal Array Content]"
-                    else:
-                        from clawagents.tool_output_artifacts import prepare_tool_output_for_context
-
-                        output, artifact_id = prepare_tool_output_for_context(
-                            tool_name=call.tool_name,
-                            tool_use_id=_call_id,
-                            output=raw_out,
-                            workspace=_run_context_workspace(run_context),
-                            success=bool(result.success),
-                        )
-                        if artifact_id is not None:
-                            emit("context", {"message": f"tool output crushed/stored id={artifact_id}"})
-                        preview = output[:preview_chars]
-
-                    output = _post_tool_side_effects(
-                        call.tool_name,
-                        call.args if isinstance(call.args, dict) else {},
-                        result.success,
-                        output,
-                        emit=emit,
-                        run_context=run_context,
-                    )
-                    if isinstance(output, str):
-                        preview = output[:preview_chars]
-
-                    emit("tool_result", {
-                        "name": call.tool_name,
-                        "success": result.success,
-                        "preview": preview,
-                        "output": ui_text,
-                    })
-                    _emit_typed("tool_result", {
-                        "tool_name": call.tool_name,
-                        "call_id": _call_id,
-                        "success": result.success,
-                        "output": ui_text,
-                        "error": result.error if not result.success else None,
-                    })
-
-                    # Session: write tool result (parity with single-call path)
-                    if session_writer:
-                        session_writer.write_tool_result(
-                            _call_id, call.tool_name, result.success,
-                            str(result.output)[:2000],
-                            error=result.error if not result.success else None,
-                        )
-                    
-                    if isinstance(output, str):
-                        call_summaries.append(f"{call.tool_name}({json.dumps(call.args)}) => {output}")
-                        tool_outputs.append(output)
-                    else:
-                        call_summaries.append(f"{call.tool_name}({json.dumps(call.args)}) => [Multimodal Output Length: {len(output)}]")
-                        call_summaries.append(json.dumps(output))
-                        tool_outputs.append(json.dumps(output))
-
-                # Record result hashes for no-progress / circuit breaker detection
-                for c_rec, out_rec in zip(approved_calls, tool_outputs):
-                    if isinstance(out_rec, str):
-                        loop_tracker.record_result(c_rec.tool_name, c_rec.args, out_rec)
-
-                # ── Failure tracking + trajectory (parallel) ──
-                if failure_tracker:
-                    failure_tracker.record_batch([
-                        (r.success, c.tool_name) for c, r in zip(approved_calls, results)
-                    ])
-                if recorder:
-                    from clawagents.trajectory.recorder import ToolCallRecord
-                    tc_records = []
-                    for call, result in zip(approved_calls, results):
-                        if not result.success:
-                            raw_p = (result.error or "")[:preview_chars]
-                        elif isinstance(result.output, str):
-                            raw_p = result.output[:preview_chars]
-                        else:
-                            # Multimodal output (list of content blocks) — store a marker
-                            # because ToolCallRecord.output_preview expects a str.
-                            raw_p = "[multimodal]"
-                        tc_records.append(ToolCallRecord(
-                            tool_name=call.tool_name,
-                            args=call.args,
-                            success=result.success,
-                            output_preview=raw_p,
-                            error=result.error if not result.success else None,
-                        ))
-                    # Feature 4: capture observation context
-                    obs_ctx = ""
-                    for m in reversed(messages):
-                        if m.role in ("user", "tool") and m.content and isinstance(m.content, str) and m.content.startswith("[Tool Result"):
-                            obs_ctx = m.content[:300]
-                            break
-                    recorder.record_turn(
-                        response_text=response.content or "",
-                        model=response.model,
-                        tokens_used=response.tokens_used,
-                        tool_calls=tc_records,
-                        observation_context=obs_ctx,
-                        thinking=_thinking_content,
-                    )
-
-                # Use proper tool role messages when native tools are enabled
-                if use_native_tools and native_tc_map:
-                    tc_meta = []
-                    for idx, call in enumerate(approved_calls):
-                        ntc = native_tc_map.get(idx)
-                        tc_id = ntc.tool_call_id if ntc else f"fallback_{idx}"
-                        tc_meta.append({"id": tc_id, "name": call.tool_name, "args": call.args})
-                    
-                    messages.append(LLMMessage(
-                        role="assistant",
-                        content=response.content or "",
-                        tool_calls_meta=tc_meta,
-                        gemini_parts=getattr(response, "gemini_parts", None),
-                        thinking=_thinking_content,
-                    ))
-                    for idx, (call, output_str) in enumerate(zip(approved_calls, tool_outputs)):
-                        ntc = native_tc_map.get(idx)
-                        tc_id = ntc.tool_call_id if ntc else f"fallback_{idx}"
-                        messages.append(LLMMessage(
-                            role="tool",
-                            content=output_str,
-                            tool_call_id=tc_id,
-                        ))
-                else:
-                    tool_call_str = json.dumps([
-                        {"tool": c.tool_name, "args": c.args} for c in approved_calls
-                    ])
-                    messages.append(
-                        LLMMessage(role="assistant", content=tool_call_str, thinking=_thinking_content)
-                    )
-                    messages.append(
-                        LLMMessage(
-                            role="user",
-                            content="[Tool Results]\n" + "\n".join(call_summaries),
-                        )
-                    )
-
-                # ── Rethink injection on consecutive failures (parallel) ──
-                if failure_tracker:
-                    # Feature F: update threshold dynamically
-                    try:
-                        from clawagents.trajectory.verifier import compute_adaptive_rethink_threshold
-                        failure_tracker._threshold = compute_adaptive_rethink_threshold(
-                            _task_type, round_idx, state.tool_calls
-                        )
-                    except Exception:
-                        pass
-                    if failure_tracker.should_rethink():
-                        # ── Advisor: consult when stuck ──
-                        await _consult_advisor(messages, "stuck")
-                        n = failure_tracker.consecutive_failures
-                        rethink_num = failure_tracker.bump_rethink()
-                        emit("warn", {"message": f"rethink #{rethink_num}: {n} consecutive failures (threshold={failure_tracker._threshold})"})
-                        rethink_msg = _RETHINK_MESSAGE.format(n=n)
-                        if learn:
-                            from clawagents.trajectory.lessons import build_rethink_with_lessons
-                            fmt_count = sum(1 for t in (recorder.turns if recorder else []) for tc in t.tool_calls if not tc.success and tc.failure_type == "format")
-                            logic_count = sum(1 for t in (recorder.turns if recorder else []) for tc in t.tool_calls if not tc.success and tc.failure_type == "logic")
-                            rethink_msg = build_rethink_with_lessons(rethink_msg, fmt_count, logic_count)
-                        messages.append(LLMMessage(
-                            role="user",
-                            content=rethink_msg,
-                        ))
-
-                # ── Continuous background memory extraction (Claude Code pattern) ──
-                # Skipped for isolated subagents (skip_memory=True): they do
-                # not write back to the parent's memory store.
-                if (
-                    learn
-                    and recorder
-                    and not getattr(run_context, "skip_memory", False)
-                ):
-                    try:
-                        from clawagents.trajectory.background_memory import maybe_extract_memories
-                        _last_memory_extraction_turn = await maybe_extract_memories(
-                            llm, messages, round_idx, _last_memory_extraction_turn,
-                        )
-                    except Exception:
-                        pass  # Background extraction failure should never block the loop
 
         else:
             emit("warn", {"message": f"reached max {effective_max_rounds} tool rounds"})
@@ -3097,294 +1321,4 @@ async def _run_agent_graph_core(
     if not _handoff_transcript_set:
         state.messages = messages
 
-    # Session: write final turn_completed
-    if session_writer:
-        session_writer.write_turn_completed(
-            state.iterations, state.tool_calls, state.status,
-        )
-        state.session_file = str(session_writer.path)
-
-    # ── Finalize trajectory ──
-    run_summary = None
-    if recorder:
-        outcome = state.status if state.status != "running" else "success"
-        run_summary = recorder.finalize(outcome)
-        state.trajectory_file = run_summary.trajectory_file
-        emit("context", {"message": f"trajectory saved to {run_summary.trajectory_file}"})
-
-
-    # ── Feature G: LLM-as-Judge verification ──
-    if learn and recorder and run_summary:
-        try:
-            from dataclasses import asdict
-            from clawagents.trajectory.judge import judge_run
-            summary_dict = asdict(run_summary)
-            turn_dicts = [asdict(t) for t in recorder.turns]
-            judge_result = await judge_run(
-                llm, task, summary_dict, state.result, turn_dicts,
-            )
-            # Count the judge's own LLM call into the run's usage totals so
-            # PTRL/trajectory spend is never invisible to callers.
-            judge_resp = judge_result.pop("_llm_response", None)
-            if judge_resp is not None:
-                try:
-                    _accumulate_usage(judge_resp)
-                except Exception:  # noqa: BLE001
-                    pass
-            run_summary.judge_score = judge_result.get("judge_score")
-            run_summary.judge_justification = judge_result.get("judge_justification", "")
-            emit("context", {
-                "message": f"LLM Judge: score={run_summary.judge_score}/3 — {run_summary.judge_justification[:80]}"
-            })
-        except Exception:
-            logger.debug("LLM-as-Judge failed", exc_info=True)
-
-    # ── PTRL Layer 3: Post-run self-analysis (with quality gate) ──
-    # Skipped for isolated subagents (skip_memory=True): subagents must not
-    # write lessons back into the parent's lesson store.
-    if (
-        learn
-        and recorder
-        and run_summary
-        and not getattr(run_context, "skip_memory", False)
-    ):
-        try:
-            from dataclasses import asdict
-            from clawagents.trajectory.lessons import extract_lessons, save_lessons, should_extract_lessons
-            summary_dict = asdict(run_summary)
-
-            # Feature 1: Quality gate — only extract lessons from informative runs
-            if should_extract_lessons(summary_dict):
-                turn_dicts = [asdict(t) for t in recorder.turns]
-                lessons_text = await extract_lessons(llm, summary_dict, turn_dicts)
-                if lessons_text:
-                    save_lessons(
-                        lessons_text, run_summary.task, run_summary.outcome,
-                        model=run_summary.model,
-                    )
-                    emit("context", {"message": "PTRL: extracted and saved lessons from this run"})
-                    try:
-                        from clawagents.trajectory.failure_learn import (
-                            append_failure_lessons_to_agents_md,
-                        )
-
-                        promoted = append_failure_lessons_to_agents_md(lessons_text)
-                        if promoted:
-                            emit("context", {
-                                "message": f"PTRL: appended {len(promoted)} failure lesson(s) to AGENTS.md",
-                            })
-                    except Exception:
-                        logger.debug("PTRL: AGENTS.md failure-learn append failed", exc_info=True)
-                    try:
-                        from clawagents.config.features import is_enabled
-                        if is_enabled("fact_store"):
-                            from clawagents.memory.facts import promote_lesson_bullets_to_facts
-
-                            facts = promote_lesson_bullets_to_facts(lessons_text)
-                            if facts:
-                                emit("context", {
-                                    "message": f"PTRL: promoted {len(facts)} live fact(s)",
-                                })
-                    except Exception:
-                        logger.debug("PTRL: fact promotion failed", exc_info=True)
-                    try:
-                        from clawagents.trajectory.lesson_promotion import maybe_promote_recurring_lessons
-
-                        promoted = maybe_promote_recurring_lessons(
-                            lessons_text,
-                            task=run_summary.task,
-                        )
-                        if promoted:
-                            emit("context", {
-                                "message": f"PTRL: promoted {len(promoted)} recurring lesson(s) to skill_workshop",
-                            })
-                    except Exception:
-                        logger.debug("PTRL: lesson promotion failed", exc_info=True)
-            else:
-                emit("context", {
-                    "message": f"PTRL: skipped lesson extraction (quality={run_summary.quality}, "
-                    f"mixed={run_summary.has_mixed_outcomes}, score={run_summary.run_score})"
-                })
-        except Exception:
-            logger.debug("PTRL: post-run self-analysis failed", exc_info=True)
-
-    # ── Output guardrails + structured output coercion ──
-    if output_guardrails and state.result:
-        try:
-            rewritten, tripped = await _run_output_guardrails(
-                output_guardrails, run_context, state.result,
-            )
-            if tripped:
-                state.guardrail_triggered = tripped
-                state.result = str(rewritten)
-                _emit_typed("guardrail_tripped", {
-                    "guardrail_name": tripped,
-                    "where": "output",
-                    "behavior": GuardrailBehavior.REJECT_CONTENT.value,
-                    "message": state.result,
-                })
-                emit("warn", {"message": f"output guardrail tripped: {tripped}"})
-        except GuardrailTripwireTriggered as tripwire:
-            state.guardrail_triggered = tripwire.guardrail_name
-            _emit_typed("guardrail_tripped", {
-                "guardrail_name": tripwire.guardrail_name,
-                "where": "output",
-                "behavior": tripwire.result.behavior.value,
-                "message": tripwire.result.message or "",
-            })
-            emit("warn", {"message": f"output guardrail raised: {tripwire.guardrail_name}"})
-
-    if output_type is not None and state.status == "done" and state.result:
-        try:
-            state.final_output = _coerce_output_type(state.result, output_type)
-        except Exception as err:
-            emit("warn", {"message": f"output_type coercion failed: {err}"})
-            state.final_output = state.result
-    elif state.status == "done":
-        state.final_output = state.result
-
-    # Persist only the messages newly added in this run to the Session backend.
-    if session is not None:
-        try:
-            _session_note_messages(track=True)
-            if _session_new_msgs:
-                await _session_add_items(session, _session_new_msgs)
-        except Exception as err:
-            emit("warn", {"message": f"session save failed: {err}"})
-
-    _emit_typed("final_output", {
-        "output": (
-            state.final_output
-            if state.final_output is not None
-            else state.result
-        ),
-        "raw": state.result if isinstance(state.result, str) else "",
-        "usage": usage.to_dict(),
-    })
-    if active_hooks:
-        await _fire_hook("on_run_end", state.result)
-
-    # Dream consolidation + session-end taxonomy (non-blocking with timeout)
-    try:
-        from clawagents.config.features import is_enabled as _feat_dream
-
-        _ws = None
-        if run_context is not None and isinstance(run_context._metadata, dict):
-            _ws = run_context._metadata.get("workspace")
-        if _ws is None:
-            import os as _os
-
-            _ws = _os.getcwd()
-
-        # Nested runs (handoff children, subagents, forks) are not session
-        # ends: they must not append session logs or trigger dream — a dream
-        # here burns an extra LLM call per child and rewrites MEMORY.md from
-        # subagent context mid-parent-run.
-        if session_end_tail and (_feat_dream("memory_dream") or _feat_dream("smart_memory")):
-            from clawagents.memory.dream import (
-                append_session_log,
-                check_dream_gates,
-                run_dream,
-            )
-
-            _stem = None
-            if session_writer is not None:
-                _stem = getattr(session_writer, "session_id", None)
-            _log_body = f"## Task\n{(task or '')[:4000]}\n\n## Outcome\n{state.status}\n\n## Result\n{(state.result or '')[:8000]}"
-            append_session_log(_log_body, workspace=_ws, stem=_stem)
-
-        if session_end_tail and _feat_dream("memory_dream"):
-            _gate = check_dream_gates(_ws)
-            if not isinstance(_gate, str):
-
-                async def _dream_llm(prompt: str) -> str:
-                    resp = await llm.chat(
-                        [LLMMessage(role="user", content=prompt)],
-                    )
-                    return str(getattr(resp, "content", "") or "")
-
-                try:
-                    dream_out = await asyncio.wait_for(
-                        run_dream(_dream_llm, workspace=_ws),
-                        timeout=90.0,
-                    )
-                    if dream_out.ok:
-                        emit("context", {"message": f"dream: {dream_out.reason}"})
-                    else:
-                        emit("context", {"message": f"dream skipped: {dream_out.reason}"})
-                except asyncio.TimeoutError:
-                    # Do not orphan a second task while the cancelled coroutine
-                    # still holds dream.lock — run_dream's finally releases it.
-                    emit("context", {"message": "dream: timed out (lock released)"})
-    except Exception:
-        logger.debug("dream scheduling failed", exc_info=True)
-
-    if taxonomy_dispatcher is not None:
-        try:
-            from clawagents.hooks.external import dispatch_taxonomy_hook
-            from clawagents.hooks.taxonomy import HookEvent
-
-            await dispatch_taxonomy_hook(
-                taxonomy_dispatcher,
-                HookEvent.SESSION_END,
-                {
-                    "status": state.status,
-                    "result_preview": (state.result or "")[:500],
-                    "tool_calls": state.tool_calls,
-                },
-                blocking=False,
-            )
-            _result_text = state.result or ""
-            _stop_failed = (
-                state.status in ("error", "max_iterations")
-                or _result_text.startswith("[cancelled]")
-                or _result_text.startswith("[interrupted]")
-            )
-            if _stop_failed:
-                await dispatch_taxonomy_hook(
-                    taxonomy_dispatcher,
-                    HookEvent.STOP_FAILURE,
-                    {
-                        "status": state.status,
-                        "message": _result_text or state.status,
-                    },
-                    blocking=False,
-                )
-                await dispatch_taxonomy_hook(
-                    taxonomy_dispatcher,
-                    HookEvent.NOTIFICATION,
-                    {
-                        "message": _result_text or state.status,
-                        "kind": "stop_failure",
-                    },
-                    blocking=False,
-                )
-            await dispatch_taxonomy_hook(
-                taxonomy_dispatcher,
-                HookEvent.STOP,
-                {"status": state.status},
-                blocking=False,
-            )
-        except Exception:
-            logger.debug("taxonomy session_end hook failed", exc_info=True)
-
-    emit("agent_done", {
-        "tool_calls": state.tool_calls,
-        "iterations": state.iterations,
-        "elapsed": elapsed,
-        "usage": usage.to_dict(),
-    })
-
-    # Stranded interjects (arrived after last drain / on cancel) → host queues them.
-    try:
-        from clawagents.interjection import take_stranded_interjects
-
-        stranded = take_stranded_interjects(run_context)
-        if stranded:
-            if run_context is not None and isinstance(getattr(run_context, "_metadata", None), dict):
-                run_context._metadata["stranded_interjects"] = list(stranded)
-            emit("stranded_interject", {"prompts": stranded, "count": len(stranded)})
-    except Exception:
-        logger.debug("stranded interject flush failed", exc_info=True)
-
-    return state
+    return await run_finalizer.finalize(state, messages, elapsed=elapsed)
