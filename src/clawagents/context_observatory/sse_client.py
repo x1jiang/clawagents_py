@@ -27,7 +27,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 
-import aiohttp
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -299,21 +299,19 @@ class SseClient:
         body: Any = None,
         timeout: float = 8.0,
     ) -> dict[str, Any]:
-        async with aiohttp.ClientSession() as session:
-            kwargs: dict[str, Any] = {
-                "headers": self._headers(),
-                "timeout": aiohttp.ClientTimeout(total=timeout),
-            }
+        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
+            kwargs: dict[str, Any] = {"headers": self._headers()}
             if body is not None:
                 kwargs["json"] = body
-            async with session.request(
+            resp = await client.request(
                 method, f"{self.base_url}{path}", **kwargs
-            ) as resp:
-                if resp.status >= 400:
-                    text = await resp.text()
-                    raise RuntimeError(f"{method} {path} HTTP {resp.status}: {text}")
-                text = await resp.text()
-                return json.loads(text) if text.strip() else {}
+            )
+            if resp.status_code >= 400:
+                raise RuntimeError(
+                    f"{method} {path} HTTP {resp.status_code}: {resp.text}"
+                )
+            text = resp.text
+            return json.loads(text) if text.strip() else {}
 
     # -- Health / settings --------------------------------------------------
 
@@ -412,28 +410,26 @@ class SseClient:
         headers = self._headers(accept="text/event-stream")
         headers["Content-Type"] = "application/json"
 
-        timeout = aiohttp.ClientTimeout(
-            total=None,       # no total timeout for streaming
-            sock_read=60.0,   # 60s idle timeout (sidecar sends keepalives)
-        )
+        # No total timeout for streaming; 60s read timeout for keepalives.
+        timeout = httpx.Timeout(timeout=None, read=60.0)
 
         resolved_chat_id: str | None = chat_id
         saw_terminal = False
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            async with client.stream(
+                "POST",
                 f"{self.base_url}/chat/stream",
                 json=body,
                 headers=headers,
-                timeout=timeout,
             ) as resp:
-                if resp.status >= 400:
-                    text = await resp.text()
-                    yield {"type": "error", "message": f"HTTP {resp.status}: {text}"}
+                if resp.status_code >= 400:
+                    await resp.aread()
+                    yield {"type": "error", "message": f"HTTP {resp.status_code}: {resp.text}"}
                     return
 
                 buffer = ""
-                async for chunk in resp.content.iter_any():
+                async for chunk in resp.aiter_bytes():
                     buffer += chunk.decode("utf-8", errors="replace")
                     events, buffer = parse_sse_chunk(buffer)
 
