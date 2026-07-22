@@ -209,12 +209,43 @@ class EventStore:
         writer.writerows(curve)
         p.write_text(output.getvalue(), encoding="utf-8")
 
-    # ── Import (replay) ──────────────────────────────────────────────────
+    # ── Import (replay) & Package Management ──────────────────────────────
 
     @classmethod
     def load_from_json(cls, path: str | Path) -> "EventStore":
-        """Load a previously exported session for replay."""
+        """Load a previously exported session for replay from json file, directory, or zip."""
+        import zipfile
+
         p = Path(path)
+
+        # Handle .zip file or package
+        if p.is_file() and p.suffix.lower() == ".zip":
+            history_dir = get_history_dir()
+            history_dir.mkdir(parents=True, exist_ok=True)
+            extract_dir = history_dir / p.stem
+            extract_dir.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(p, "r") as zf:
+                zf.extractall(extract_dir)
+            session_file = extract_dir / "session.json"
+            if not session_file.exists():
+                # Look for any json file in extracted directory
+                jsons = list(extract_dir.glob("*.json"))
+                if jsons:
+                    session_file = jsons[0]
+            if session_file.exists():
+                return cls.load_from_json(session_file)
+
+        # Handle session directory
+        if p.is_dir():
+            session_file = p / "session.json"
+            if not session_file.exists():
+                jsons = list(p.glob("*.json"))
+                if jsons:
+                    session_file = jsons[0]
+                else:
+                    raise ValueError(f"No session.json found in directory {p}")
+            p = session_file
+
         raw = json.loads(p.read_text(encoding="utf-8"))
         store = cls()
         store._session_meta = raw.get("session_meta", {})
@@ -227,10 +258,14 @@ class EventStore:
     # ── Auto-save (history) ──────────────────────────────────────────────
 
     def auto_save(self, chat_id: str | None = None) -> Path | None:
-        """Persist this session to the observatory history directory.
+        """Persist this session to the .clawagents/context-observatory/<session_id>/ directory.
 
         Returns the path written, or None if there was nothing to save.
-        File naming: ``YYYY-MM-DD_HHMMSS_{chat_id}.json``
+        Structure:
+          .clawagents/context-observatory/<session_id>/
+            ├── session.json
+            ├── events.jsonl
+            └── contexts/ (if large files present)
         """
         if not self._events:
             return None
@@ -241,19 +276,53 @@ class EventStore:
         history_dir = get_history_dir()
         history_dir.mkdir(parents=True, exist_ok=True)
 
-        ts = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         slug = (chat_id or "session").replace("/", "_")[:40]
-        filename = f"{ts}_{slug}.json"
-        path = history_dir / filename
+        session_id = f"{slug}" if chat_id else f"{ts}_{slug}"
+
+        session_dir = history_dir / session_id
+        session_dir.mkdir(parents=True, exist_ok=True)
+
+        session_json_path = session_dir / "session.json"
+        events_jsonl_path = session_dir / "events.jsonl"
+        contexts_dir = session_dir / "contexts"
 
         try:
-            path.write_text(
-                json.dumps(self.to_dict(), indent=2, default=str, ensure_ascii=False)
-                + "\n",
+            # 1. Save main session.json
+            payload = self.to_dict()
+
+            # Separate large message contents if needed (>50KB)
+            for event_dict in payload.get("events", []):
+                if event_dict.get("kind") == "llm_call":
+                    for idx, msg in enumerate(event_dict.get("messages", [])):
+                        full_content = msg.get("full_content") or ""
+                        if len(full_content) > 50_000:
+                            contexts_dir.mkdir(parents=True, exist_ok=True)
+                            c_file = contexts_dir / f"turn_{event_dict.get('turn', 0)}_msg_{idx}_{msg.get('role', 'msg')}.txt"
+                            c_file.write_text(full_content, encoding="utf-8")
+                            msg["external_file"] = str(c_file.relative_to(session_dir))
+
+            session_json_path.write_text(
+                json.dumps(payload, indent=2, default=str, ensure_ascii=False) + "\n",
                 encoding="utf-8",
             )
-            logging.getLogger(__name__).info("Auto-saved session to %s", path)
-            return path
+
+            # 2. Save raw events.jsonl
+            with open(events_jsonl_path, "w", encoding="utf-8") as f:
+                f.write(
+                    json.dumps({
+                        "__meta__": True,
+                        "timestamp": datetime.datetime.now().isoformat(),
+                        "session_id": session_id,
+                        "session_meta": self._session_meta,
+                        "event_count": len(self._events),
+                    }) + "\n"
+                )
+                for event in self._events:
+                    f.write(json.dumps(event.to_dict(), default=str) + "\n")
+
+            logging.getLogger(__name__).info("Auto-saved observatory session to %s", session_dir)
+            return session_json_path
         except Exception:
             logging.getLogger(__name__).debug(
                 "Failed to auto-save session", exc_info=True
@@ -262,51 +331,130 @@ class EventStore:
 
     @staticmethod
     def list_history() -> list[dict[str, Any]]:
-        """List all saved sessions in the history directory.
+        """List all saved sessions in the context-observatory directory.
 
-        Returns a list of dicts with keys: path, filename, size_bytes,
-        and (when parseable) session_meta fields.
+        Returns a list of dicts with session metadata, sizes, and file paths.
         """
         history_dir = get_history_dir()
         if not history_dir.is_dir():
             return []
 
         entries: list[dict[str, Any]] = []
+
+        # Check subdirectories first
+        for item in sorted(history_dir.iterdir(), reverse=True):
+            if item.is_dir():
+                session_json = item / "session.json"
+                if session_json.exists():
+                    total_bytes = sum(f.stat().st_size for f in item.glob("**/*") if f.is_file())
+                    entry: dict[str, Any] = {
+                        "path": str(session_json),
+                        "dir_path": str(item),
+                        "filename": item.name,
+                        "size_bytes": total_bytes,
+                        "is_directory": True,
+                    }
+                    try:
+                        raw = json.loads(session_json.read_text(encoding="utf-8"))
+                        meta = raw.get("session_meta", {})
+                        entry["model"] = meta.get("model", "")
+                        entry["context_window"] = meta.get("context_window", 0)
+                        entry["started_at"] = meta.get("started_at")
+                        entry["completed_at"] = meta.get("completed_at")
+                        entry["status"] = meta.get("status", "")
+                        entry["session_cost_usd"] = meta.get("session_cost_usd")
+                        entry["event_count"] = len(raw.get("events", []))
+                        entry["llm_calls"] = sum(
+                            1 for e in raw.get("events", []) if e.get("kind") == "llm_call"
+                        )
+                    except Exception:
+                        pass
+                    entries.append(entry)
+
+        # Check single .json files (legacy fallback)
         for p in sorted(history_dir.glob("*.json"), reverse=True):
-            entry: dict[str, Any] = {
-                "path": str(p),
-                "filename": p.name,
-                "size_bytes": p.stat().st_size,
-            }
-            # Quick-parse session_meta without loading full events
-            try:
-                raw = json.loads(p.read_text(encoding="utf-8"))
-                meta = raw.get("session_meta", {})
-                entry["model"] = meta.get("model", "")
-                entry["context_window"] = meta.get("context_window", 0)
-                entry["started_at"] = meta.get("started_at")
-                entry["completed_at"] = meta.get("completed_at")
-                entry["status"] = meta.get("status", "")
-                entry["session_cost_usd"] = meta.get("session_cost_usd")
-                entry["event_count"] = len(raw.get("events", []))
-                # Count LLM calls specifically
-                entry["llm_calls"] = sum(
-                    1 for e in raw.get("events", []) if e.get("kind") == "llm_call"
-                )
-            except Exception:
-                pass
-            entries.append(entry)
+            if p.is_file():
+                entry = {
+                    "path": str(p),
+                    "dir_path": str(p.parent),
+                    "filename": p.name,
+                    "size_bytes": p.stat().st_size,
+                    "is_directory": False,
+                }
+                try:
+                    raw = json.loads(p.read_text(encoding="utf-8"))
+                    meta = raw.get("session_meta", {})
+                    entry["model"] = meta.get("model", "")
+                    entry["context_window"] = meta.get("context_window", 0)
+                    entry["started_at"] = meta.get("started_at")
+                    entry["completed_at"] = meta.get("completed_at")
+                    entry["status"] = meta.get("status", "")
+                    entry["session_cost_usd"] = meta.get("session_cost_usd")
+                    entry["event_count"] = len(raw.get("events", []))
+                    entry["llm_calls"] = sum(
+                        1 for e in raw.get("events", []) if e.get("kind") == "llm_call"
+                    )
+                except Exception:
+                    pass
+                entries.append(entry)
+
+        # Also check legacy observatory_history dir if exists
+        legacy_dir = Path.cwd() / ".clawagents" / "observatory_history"
+        if legacy_dir.is_dir() and legacy_dir != history_dir:
+            for p in sorted(legacy_dir.glob("*.json"), reverse=True):
+                if p.is_file():
+                    entry = {
+                        "path": str(p),
+                        "dir_path": str(p.parent),
+                        "filename": f"[legacy] {p.name}",
+                        "size_bytes": p.stat().st_size,
+                        "is_directory": False,
+                    }
+                    try:
+                        raw = json.loads(p.read_text(encoding="utf-8"))
+                        meta = raw.get("session_meta", {})
+                        entry["model"] = meta.get("model", "")
+                        entry["context_window"] = meta.get("context_window", 0)
+                        entry["started_at"] = meta.get("started_at")
+                        entry["completed_at"] = meta.get("completed_at")
+                        entry["status"] = meta.get("status", "")
+                        entry["session_cost_usd"] = meta.get("session_cost_usd")
+                        entry["event_count"] = len(raw.get("events", []))
+                        entry["llm_calls"] = sum(
+                            1 for e in raw.get("events", []) if e.get("kind") == "llm_call"
+                        )
+                    except Exception:
+                        pass
+                    entries.append(entry)
 
         return entries
 
+    def export_package_zip(self, session_id: str | None = None) -> bytes:
+        """Export session as a downloadable ZIP package containing session files."""
+        import zipfile
+
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            session_meta = self.to_dict()
+            zf.writestr("session.json", json.dumps(session_meta, indent=2, default=str, ensure_ascii=False))
+
+            # Also include events.jsonl
+            events_lines = []
+            for e in self._events:
+                events_lines.append(json.dumps(e.to_dict(), default=str))
+            zf.writestr("events.jsonl", "\n".join(events_lines) + "\n")
+
+        return buffer.getvalue()
+
 
 def get_history_dir() -> Path:
-    """Return the observatory history directory path.
+    """Return the context observatory directory (.clawagents/context-observatory/)."""
+    try:
+        from clawagents.paths import get_context_observatory_dir
+        return get_context_observatory_dir(create=False)
+    except Exception:
+        return Path.cwd() / ".clawagents" / "context-observatory"
 
-    Uses ``.clawagents/observatory_history/`` in the current working directory,
-    matching the convention used by other ClawAgents data directories.
-    """
-    return Path.cwd() / ".clawagents" / "observatory_history"
 
 
 def _deserialize_event(data: dict[str, Any]) -> ContextEvent | None:
