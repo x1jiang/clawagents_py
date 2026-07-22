@@ -50,14 +50,14 @@ def render_history_browser(store: EventStore) -> None:
     st.subheader("📚 Session History")
 
     # ── Import section ──────────────────────────────────────────────────
-    with st.expander("📥 Import Sessions", expanded=False):
+    with st.expander("📥 Import Sessions / Packages", expanded=False):
         imp_col1, imp_col2 = st.columns(2)
 
         with imp_col1:
-            st.markdown("**Import from file**")
+            st.markdown("**Import Package or File**")
             uploaded = st.file_uploader(
-                "Upload .json session file(s)",
-                type=["json"],
+                "Upload session (.zip package or .json file)",
+                type=["json", "zip"],
                 accept_multiple_files=True,
                 key="history_import_files",
             )
@@ -65,11 +65,11 @@ def render_history_browser(store: EventStore) -> None:
                 _handle_file_import(uploaded)
 
         with imp_col2:
-            st.markdown("**Import from folder**")
+            st.markdown("**Import Folder**")
             folder_path = st.text_input(
-                "Local folder path containing .json sessions",
+                "Local folder path (session directory or package folder)",
                 key="history_import_folder",
-                placeholder="/path/to/sessions/",
+                placeholder="/path/to/context-observatory/session_id/",
             )
             if st.button("📂 Import Folder", key="import_folder_btn"):
                 if folder_path:
@@ -85,8 +85,8 @@ def render_history_browser(store: EventStore) -> None:
     if not entries:
         st.info(
             "No saved sessions found.\n\n"
-            "Sessions are automatically saved when a conversation completes. "
-            "You can also import sessions using the controls above."
+            "Sessions are automatically saved to `.clawagents/context-observatory/<session_id>/` when a conversation runs. "
+            "You can also import session packages (.zip / .json) using the controls above."
         )
         return
 
@@ -95,7 +95,7 @@ def render_history_browser(store: EventStore) -> None:
     # ── Column headers ──────────────────────────────────────────────────
     header_cols = st.columns([2.5, 1.5, 1, 1, 1, 1, 0.8, 0.8])
     with header_cols[0]:
-        st.markdown("**File**")
+        st.markdown("**Session / File**")
     with header_cols[1]:
         st.markdown("**Model**")
     with header_cols[2]:
@@ -129,14 +129,16 @@ def _render_session_row(
     cost = entry.get("session_cost_usd")
     size = entry.get("size_bytes", 0)
     path = entry.get("path", "")
+    dir_path = entry.get("dir_path") or path
 
     cost_str = f"${cost:.4f}" if cost else "—"
+    is_dir = entry.get("is_directory", False)
+    display_name = f"📁 {filename}" if is_dir else f"📄 {filename}"
 
     row_cols = st.columns([2.5, 1.5, 1, 1, 1, 1, 0.8, 0.8])
 
     with row_cols[0]:
-        # Show filename with tooltip of full path
-        st.caption(filename)
+        st.caption(display_name)
     with row_cols[1]:
         st.caption(model or "—")
     with row_cols[2]:
@@ -148,16 +150,14 @@ def _render_session_row(
     with row_cols[5]:
         st.caption(_fmt_size(size))
     with row_cols[6]:
-        if st.button("📂", key=f"load_hist_{idx}", help="Load this session"):
+        if st.button("📂", key=f"load_hist_{idx}", help="Load this session into Observatory"):
             _load_session(path, store)
     with row_cols[7]:
         if st.button("🗑️", key=f"del_hist_{idx}", help="Delete this session"):
-            _delete_session(path)
+            _delete_session(dir_path if is_dir else path)
 
     # ── Expanded detail panel ───────────────────────────────────────────
-    detail_key = f"hist_detail_{idx}"
-    if st.session_state.get(detail_key):
-        _render_detail_panel(idx, entry)
+    _render_detail_panel(idx, entry)
 
 
 def _load_session(path: str, store: EventStore) -> None:
@@ -180,9 +180,13 @@ def _load_session(path: str, store: EventStore) -> None:
 
 
 def _delete_session(path: str) -> None:
-    """Delete a saved session file."""
+    """Delete a saved session file or directory."""
     try:
-        os.remove(path)
+        p = Path(path)
+        if p.is_dir():
+            shutil.rmtree(p)
+        elif p.is_file():
+            os.remove(p)
         st.toast("🗑️ Session deleted", icon="✅")
         st.rerun()
     except Exception as e:
@@ -190,37 +194,48 @@ def _delete_session(path: str) -> None:
 
 
 def _handle_file_import(uploaded_files: list) -> None:
-    """Import uploaded JSON files into the history directory."""
+    """Import uploaded JSON or ZIP files into the history directory."""
+    import zipfile
+
     history_dir = get_history_dir()
     history_dir.mkdir(parents=True, exist_ok=True)
 
     imported = 0
     for uploaded in uploaded_files:
         try:
+            filename = uploaded.name
             raw = uploaded.read()
-            # Validate it's proper JSON
-            json.loads(raw)
-            dest = history_dir / uploaded.name
-            # Avoid overwriting — add suffix if needed
-            if dest.exists():
-                stem = dest.stem
-                suffix = dest.suffix
-                counter = 1
-                while dest.exists():
-                    dest = history_dir / f"{stem}_{counter}{suffix}"
-                    counter += 1
-            dest.write_bytes(raw)
-            imported += 1
+
+            if filename.lower().endswith(".zip"):
+                session_id = Path(filename).stem
+                dest_dir = history_dir / session_id
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                with zipfile.ZipFile(io.BytesIO(raw), "r") as zf:
+                    zf.extractall(dest_dir)
+                imported += 1
+            else:
+                # Validate JSON
+                json.loads(raw)
+                dest = history_dir / filename
+                if dest.exists():
+                    stem = dest.stem
+                    suffix = dest.suffix
+                    counter = 1
+                    while dest.exists():
+                        dest = history_dir / f"{stem}_{counter}{suffix}"
+                        counter += 1
+                dest.write_bytes(raw)
+                imported += 1
         except Exception as e:
             st.warning(f"Skipped {uploaded.name}: {e}")
 
     if imported:
-        st.toast(f"✅ Imported {imported} session(s)", icon="📥")
+        st.toast(f"✅ Imported {imported} session package(s)", icon="📥")
         st.rerun()
 
 
 def _handle_folder_import(folder_path: str) -> None:
-    """Import all .json files from a local folder into history."""
+    """Import a local folder or session directory into history."""
     src = Path(folder_path).expanduser().resolve()
     if not src.is_dir():
         st.error(f"Not a valid directory: {folder_path}")
@@ -229,53 +244,79 @@ def _handle_folder_import(folder_path: str) -> None:
     history_dir = get_history_dir()
     history_dir.mkdir(parents=True, exist_ok=True)
 
-    json_files = list(src.glob("*.json"))
-    if not json_files:
-        st.warning(f"No .json files found in {folder_path}")
-        return
-
     imported = 0
-    for f in json_files:
-        try:
-            # Validate JSON
-            json.loads(f.read_text(encoding="utf-8"))
-            dest = history_dir / f.name
-            if dest.exists():
-                stem = dest.stem
-                suffix = dest.suffix
-                counter = 1
-                while dest.exists():
-                    dest = history_dir / f"{stem}_{counter}{suffix}"
-                    counter += 1
-            shutil.copy2(str(f), str(dest))
-            imported += 1
-        except Exception as e:
-            st.warning(f"Skipped {f.name}: {e}")
+    # Check if src itself is a session folder (contains session.json)
+    if (src / "session.json").is_file():
+        dest = history_dir / src.name
+        if dest.exists() and dest != src:
+            dest = history_dir / f"{src.name}_{int(os.path.getmtime(src))}"
+        if dest != src:
+            shutil.copytree(src, dest, dirs_exist_ok=True)
+        imported += 1
+    else:
+        # Import any subdirectories or json files inside src
+        for sub in src.iterdir():
+            if sub.is_dir() and (sub / "session.json").is_file():
+                dest = history_dir / sub.name
+                if dest != sub:
+                    shutil.copytree(sub, dest, dirs_exist_ok=True)
+                imported += 1
+            elif sub.is_file() and sub.suffix.lower() == ".json":
+                try:
+                    json.loads(sub.read_text(encoding="utf-8"))
+                    dest = history_dir / sub.name
+                    if dest != sub:
+                        shutil.copy2(sub, dest)
+                    imported += 1
+                except Exception:
+                    pass
 
     if imported:
         st.toast(f"✅ Imported {imported} session(s) from folder", icon="📂")
         st.rerun()
+    else:
+        st.warning(f"No valid session directories or .json files found in {folder_path}")
 
 
 def _render_detail_panel(idx: int, entry: dict[str, Any]) -> None:
-    """Render an expanded detail panel for a session."""
-    st.markdown("---")
-    cols = st.columns(3)
-    with cols[0]:
-        st.markdown(f"**Started:** {_fmt_ts(entry.get('started_at'))}")
-    with cols[1]:
-        st.markdown(f"**Completed:** {_fmt_ts(entry.get('completed_at'))}")
-    with cols[2]:
-        st.markdown(f"**Status:** {entry.get('status', '—')}")
+    """Render details and download buttons for a session."""
+    with st.expander(f"ℹ️ Details — {entry.get('filename')}", expanded=False):
+        cols = st.columns(3)
+        with cols[0]:
+            st.markdown(f"**Started:** {_fmt_ts(entry.get('started_at'))}")
+        with cols[1]:
+            st.markdown(f"**Completed:** {_fmt_ts(entry.get('completed_at'))}")
+        with cols[2]:
+            st.markdown(f"**Status:** {entry.get('status', '—')}")
 
-    # Download button
-    path = entry.get("path", "")
-    if path and Path(path).exists():
-        data = Path(path).read_text(encoding="utf-8")
-        st.download_button(
-            label="📥 Download Session JSON",
-            data=data,
-            file_name=entry.get("filename", "session.json"),
-            mime="application/json",
-            key=f"download_hist_{idx}",
-        )
+        dl_cols = st.columns(2)
+        path = entry.get("path", "")
+        dir_path = entry.get("dir_path", "")
+
+        # 1. Download Session ZIP Package
+        with dl_cols[0]:
+            try:
+                loaded_store = EventStore.load_from_json(path)
+                zip_bytes = loaded_store.export_package_zip()
+                st.download_button(
+                    label="📦 Download ZIP Package",
+                    data=zip_bytes,
+                    file_name=f"{entry.get('filename', 'session')}.zip",
+                    mime="application/zip",
+                    key=f"dl_zip_hist_{idx}",
+                )
+            except Exception as e:
+                st.caption(f"ZIP package unavailable: {e}")
+
+        # 2. Download Session JSON
+        with dl_cols[1]:
+            if path and Path(path).exists():
+                data = Path(path).read_text(encoding="utf-8")
+                st.download_button(
+                    label="📄 Download JSON File",
+                    data=data,
+                    file_name=entry.get("filename", "session.json") if not entry.get("filename", "").endswith(".json") else entry.get("filename"),
+                    mime="application/json",
+                    key=f"dl_json_hist_{idx}",
+                )
+

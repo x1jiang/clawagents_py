@@ -349,21 +349,22 @@ def _handle_user_input(
 
 
 def _dump_events_to_file(events: list[dict[str, Any]], user_input: str) -> None:
-    """Save raw SSE events to a JSONL file for debugging."""
+    """Save raw SSE events to a JSONL file in the session directory."""
     import datetime
+    from clawagents.context_observatory.store import get_history_dir
 
-    dump_dir = Path.cwd() / ".clawagents" / "observatory_debug"
-    dump_dir.mkdir(parents=True, exist_ok=True)
+    chat_id = st.session_state.get("active_chat_id") or f"session_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    session_dir = get_history_dir() / chat_id
+    session_dir.mkdir(parents=True, exist_ok=True)
 
-    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    dump_file = dump_dir / f"events_{ts}.jsonl"
+    dump_file = session_dir / "events.jsonl"
 
     try:
-        with open(dump_file, "w") as f:
-            # Write header
+        with open(dump_file, "a", encoding="utf-8") as f:
+            # Write turn header
             f.write(json.dumps({
                 "__meta__": True,
-                "timestamp": ts,
+                "timestamp": datetime.datetime.now().isoformat(),
                 "user_input": user_input,
                 "event_count": len(events),
             }) + "\n")
@@ -373,6 +374,7 @@ def _dump_events_to_file(events: list[dict[str, Any]], user_input: str) -> None:
         logger.info("Dumped %d events to %s", len(events), dump_file)
     except Exception:
         logger.debug("Failed to dump events", exc_info=True)
+
 
 
 async def _collect_sse_events(
