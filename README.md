@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.20.45-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.20.46-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -21,9 +21,9 @@ This repo is the **Python framework** (`pip install clawagents`). Ready-made cli
 
 | Product | Latest | What it is | Link |
 |---------|--------|------------|------|
-| **ClawAgents Desktop** | **v0.4.25** | Native macOS app — project chats, file editor, SSH remotes, Settings (incl. AWS Bedrock), Developer ID signed + notarized | [Repo](https://github.com/x1jiang/clawagents-desktop) · [Download DMG](https://github.com/x1jiang/clawagents-desktop/releases/tag/v0.4.25) |
-| **ClawAgents for VS Code / Cursor** | **v1.0.136** | Editor extension — companion lockstep (context-mode / rtk), full caveman skill, chat, Bedrock | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Releases](https://github.com/x1jiang/clawagents-vscode/releases) |
-| **Python package** | **v6.20.45** | This library — Mantle Claude Bearer auth · `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/) · [Release](https://github.com/x1jiang/clawagents_py/releases) |
+| **ClawAgents Desktop** | **v0.4.26** | Native macOS app — project chats, file editor, SSH remotes, Settings (incl. AWS Bedrock), Developer ID signed + notarized | [Repo](https://github.com/x1jiang/clawagents-desktop) · [Download DMG](https://github.com/x1jiang/clawagents-desktop/releases/tag/v0.4.26) |
+| **ClawAgents for VS Code / Cursor** | **v1.0.138** | Editor extension — fork hardening, Mantle Kimi ids, companion lockstep | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Releases](https://github.com/x1jiang/clawagents-vscode/releases) |
+| **Python package** | **v6.20.46** | This library — Mantle sampling/Kimi/Fable fixes · `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/) · [Release](https://github.com/x1jiang/clawagents_py/releases) |
 | **TypeScript package** | **v6.12.13** | Node/TS sibling — `npm install git+https://github.com/x1jiang/clawagents.git` | [Repo](https://github.com/x1jiang/clawagents) |
 
 ## Installation
@@ -36,6 +36,8 @@ pip install -U 'clawagents[bedrock]'   # + Amazon Bedrock (Claude via IAM + Nova
 pip install -U 'clawagents[all]'       # All providers + tiktoken
 ```
 
+> **Version 6.20.46** — Mantle Grok/Sonnet-5 omit temperature; Kimi `moonshotai.*`; Fable retention hint (July 2026).
+>
 > **Version 6.20.45** — Mantle Claude via `AsyncAnthropicBedrockMantle` (Bearer) (July 2026).
 >
 > **Version 6.20.44** — Mantle frontier base is `…/openai/v1` (fixes GPT-5.x 404) (July 2026).
@@ -59,6 +61,11 @@ pip install -U 'clawagents[all]'       # All providers + tiktoken
 > **Version 6.19.0** — Companion lockstep (July 2026).
 
 > **Version 6.18.0** — Grok-inspired edit/execute harness (July 2026).
+
+### New In v6.20.46
+- Omit `temperature` for Mantle Grok and Claude Sonnet 5 / Fable 5 (models reject sampling params)
+- Rewrite legacy `moonshot.*` Mantle ids to catalog `moonshotai.*`
+- Clearer recovery hint when Claude Fable 5 requires account `provider_data_share`
 
 ### New In v6.20.45
 - Mantle Claude uses `AsyncAnthropicBedrockMantle` (Bearer token) instead of plain `AsyncAnthropic` (`X-Api-Key`)

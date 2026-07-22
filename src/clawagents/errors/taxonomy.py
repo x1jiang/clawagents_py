@@ -209,7 +209,24 @@ def classify_error(err: BaseException, provider: str = "") -> ErrorDescriptor:
             original=err,
         )
 
-    # 4. Mantle / Bedrock model or path 404 (often region or wrong …/openai vs …/openai/v1)
+    # 4a. Claude Fable / Mythos — account must opt into provider_data_share.
+    if "data retention mode" in msg and (
+        "provider_data_share" in msg or "not available for this model" in msg
+    ):
+        return ErrorDescriptor(
+            error_class=ErrorClass.PROVIDER_AUTH,
+            retryable=False,
+            recovery_hint=(
+                "This Mantle model (e.g. Claude Fable 5) requires account data "
+                "retention mode provider_data_share. Set it once via "
+                "PUT …/v1/data_retention {\"mode\":\"provider_data_share\"} with your "
+                "Bedrock API key (AWS docs). Not a ClawAgents bug."
+            ),
+            max_retries=0,
+            original=err,
+        )
+
+    # 4b. Mantle / Bedrock model or path 404 (often region or wrong …/openai vs …/openai/v1)
     if status == 404 or "does not exist" in msg or "error code: 404" in msg:
         return ErrorDescriptor(
             error_class=ErrorClass.UNKNOWN,
