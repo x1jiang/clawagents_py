@@ -171,7 +171,34 @@ def create_app() -> tuple:
             def on_event(kind, data):
                 sse("agent", {"kind": kind, "data": data})
 
-            return await agent.invoke(task, on_event=on_event)
+            # Check if Context Observatory recording is enabled by payload setting or env
+            enable_obs = bool(
+                payload.get("enable_context_observatory")
+                or payload.get("context_observatory")
+                or os.environ.get("CLAWAGENTS_ENABLE_CONTEXT_OBSERVATORY") == "1"
+            )
+
+            if enable_obs:
+                import time
+                from clawagents.context_observatory.hooks import ContextObserverHooks
+                from clawagents.context_observatory.store import EventStore
+
+                chat_id = payload.get("chat_id") or payload.get("session_id") or payload.get("chatId")
+                store = EventStore()
+                store.set_session_meta(model=str(llm), started_at=time.time())
+                observer = ContextObserverHooks(store=store, model=str(llm))
+
+                try:
+                    result = await agent.invoke(task, on_event=on_event, hooks=observer)
+                    store.set_session_meta(completed_at=time.time(), status=result.status)
+                    store.auto_save(chat_id=chat_id)
+                    return result
+                except Exception:
+                    store.set_session_meta(completed_at=time.time(), status="failed")
+                    store.auto_save(chat_id=chat_id)
+                    raise
+            else:
+                return await agent.invoke(task, on_event=on_event)
 
         run_task = asyncio.create_task(_run())
 
