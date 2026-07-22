@@ -1,5 +1,11 @@
 # ClawAgents Changelog
 
+## Unreleased
+
+- Refactor: split the agent loop into smaller modules; extracted agent_loop utilities into dedicated modules to reduce cognitive load and improve testability.
+- Feature: context observatory / context-monitor integration merged; enables LLM context inspection and monitoring during runs.
+- Docs: changelog now includes a dedicated Unreleased section to track upcoming changes before formal version release.
+
 
 ### v6.20.42 — Lower-churn patch, sandbox, timeout, and PTY recovery (July 2026)
 

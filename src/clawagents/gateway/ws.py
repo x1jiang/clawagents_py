@@ -11,6 +11,7 @@ Supports:
 from __future__ import annotations
 
 import json
+import os
 import time
 import math
 import secrets
@@ -139,7 +140,32 @@ async def _handle_chat_send(ws: WebSocket, msg: dict, llm: Any):
             async def on_event(kind, data):
                 await send_event("agent", {"kind": kind, **(data if isinstance(data, dict) else {"data": data})})
 
-            return await agent.invoke(task, on_event=on_event)
+            # Check if Context Observatory recording is enabled by params setting or env
+            enable_obs = bool(
+                params.get("enable_context_observatory")
+                or params.get("context_observatory")
+                or os.environ.get("CLAWAGENTS_ENABLE_CONTEXT_OBSERVATORY") == "1"
+            )
+
+            if enable_obs:
+                from clawagents.context_observatory.hooks import ContextObserverHooks
+                from clawagents.context_observatory.store import EventStore
+
+                store = EventStore()
+                store.set_session_meta(model=str(llm), started_at=time.time())
+                observer = ContextObserverHooks(store=store, model=str(llm))
+
+                try:
+                    result = await agent.invoke(task, on_event=on_event, hooks=observer)
+                    store.set_session_meta(completed_at=time.time(), status=result.status)
+                    store.auto_save(chat_id=session_id)
+                    return result
+                except Exception:
+                    store.set_session_meta(completed_at=time.time(), status="failed")
+                    store.auto_save(chat_id=session_id)
+                    raise
+            else:
+                return await agent.invoke(task, on_event=on_event)
 
         result = await enqueue_command_in_lane(lane, _execute)
 
