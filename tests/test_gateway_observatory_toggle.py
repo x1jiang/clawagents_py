@@ -1,6 +1,8 @@
 """Tests for Context Observatory Gateway toggle setting."""
 
+import json
 from unittest.mock import AsyncMock, patch
+
 import pytest
 
 from clawagents.gateway.server import create_app
@@ -72,8 +74,13 @@ async def test_gateway_observatory_enabled(tmp_path, monkeypatch):
         assert mock_agent.invoke.called
         kwargs = mock_agent.invoke.call_args.kwargs
         assert "hooks" in kwargs and kwargs["hooks"] is not None
+        # Model profile window (or payload override), not the 1_000_000 default.
+        assert kwargs["hooks"].context_window != 1_000_000
+        assert kwargs["hooks"].context_window > 0
 
         # Verify session dir created
         session_dir = tmp_path / ".clawagents" / "context-observatory" / "vscode_chat_001"
         assert session_dir.exists()
         assert (session_dir / "session.json").exists()
+        meta = json.loads((session_dir / "session.json").read_text())["session_meta"]
+        assert meta.get("context_window") == kwargs["hooks"].context_window

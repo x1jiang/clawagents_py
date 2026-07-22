@@ -31,6 +31,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import queue
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -38,6 +40,74 @@ from typing import Any
 import streamlit as st
 
 logger = logging.getLogger(__name__)
+
+
+class _SseStreamSession:
+    """Background SSE reader that keeps the sidecar connection open for HITL.
+
+    Streamlit reruns close any in-script HTTP streams. Breaking out of
+    ``stream_chat`` on ``permission_required`` therefore cancelled the agent
+    run on the sidecar. This worker keeps reading on a daemon thread so
+    ``POST /permissions/...`` can unblock the still-running turn.
+    """
+
+    def __init__(
+        self,
+        client: Any,
+        task: str,
+        *,
+        chat_id: str | None,
+        mode: str,
+        model: str | None,
+        reasoning_effort: str | None,
+        interaction: str,
+    ) -> None:
+        self.events: queue.Queue[dict[str, Any] | None] = queue.Queue()
+        self.done = False
+        self.waiting_prompt = False
+        self.error: str | None = None
+        self._client = client
+        self._task = task
+        self._chat_id = chat_id
+        self._mode = mode
+        self._model = model
+        self._reasoning_effort = reasoning_effort
+        self._interaction = interaction
+        self._thread = threading.Thread(target=self._run, name="obs-sse-stream", daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def _run(self) -> None:
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(self._collect())
+        except Exception as exc:
+            logger.exception("Background SSE stream failed")
+            self.error = str(exc)
+            self.events.put({"type": "error", "message": f"Connection failed: {exc}"})
+        finally:
+            self.done = True
+            self.waiting_prompt = False
+            self.events.put(None)
+            loop.close()
+
+    async def _collect(self) -> None:
+        async for event in self._client.stream_chat(
+            self._task,
+            chat_id=self._chat_id,
+            mode=self._mode,
+            model=self._model,
+            reasoning_effort=self._reasoning_effort,
+            interaction=self._interaction,
+            enable_context_observatory=True,
+        ):
+            et = event.get("type")
+            if et in ("permission_required", "ask_user_required"):
+                self.waiting_prompt = True
+            elif et in ("done", "error", "cancelled"):
+                self.waiting_prompt = False
+            self.events.put(event)
 
 
 def _configure_page() -> None:
@@ -223,11 +293,14 @@ def main() -> None:
         if user_input and not st.session_state.get("chat_busy"):
             _handle_user_input(user_input, config, store)
 
-        # Handle pending permission actions
+        # Handle pending permission actions (POST while SSE stays open)
         _handle_pending_permissions(config)
 
         # Handle pending ask-user actions
         _handle_pending_ask_user(config)
+
+        # Drain background SSE (keeps HITL turns alive across Streamlit reruns)
+        _drain_sse_stream(store, config)
 
     with tab_inspector:
         render_context_inspector(store)
@@ -256,31 +329,24 @@ def _handle_user_input(
     config: dict[str, Any],
     store: EventStore,
 ) -> None:
-    """Send user input to the sidecar via SSE and process the event stream."""
-    from clawagents.context_observatory.components.chat_panel import (
-        add_chat_item,
-        apply_sse_event,
-    )
+    """Start a background SSE turn against the sidecar."""
+    from clawagents.context_observatory.components.chat_panel import add_chat_item
     from clawagents.context_observatory.sse_client import SseClient
     from clawagents.context_observatory.sse_hooks_bridge import SseEventBridge
 
-    # Add user message
+    if st.session_state.get("sse_stream") and not st.session_state["sse_stream"].done:
+        return
+
     add_chat_item({"kind": "user", "text": user_input})
     st.session_state["chat_busy"] = True
-    st.session_state["chat_streaming"] = False
+    st.session_state["chat_streaming"] = True
 
-    # Render user message immediately
-    from clawagents.context_observatory.components.chat_panel import _render_user
-    _render_user(len(st.session_state["chat_items"]) - 1, {"kind": "user", "text": user_input})
-
-    # Create SSE client
     client = SseClient(
         host=config.get("sidecar_host", "127.0.0.1"),
         port=config.get("sidecar_port", 3001),
         token=config.get("sidecar_token", ""),
     )
 
-    # Create event bridge for analytics
     context_window = config.get("context_window", 128_000)
     model = config.get("model") or ""
     bridge = SseEventBridge(
@@ -289,6 +355,9 @@ def _handle_user_input(
         model=model,
         user_text=user_input,
     )
+    st.session_state["sse_bridge"] = bridge
+    st.session_state["sse_user_input"] = user_input
+    st.session_state["sse_collected"] = []
 
     store.set_session_meta(
         model=model,
@@ -296,55 +365,92 @@ def _handle_user_input(
         started_at=time.time(),
     )
 
-    # Generate a chat_id upfront if this is a new session
     if not st.session_state.get("active_chat_id"):
         import uuid
         st.session_state["active_chat_id"] = f"chat_{uuid.uuid4().hex[:8]}"
 
-    # Run the SSE stream
-    try:
-        loop = asyncio.new_event_loop()
-        thinking_container = st.chat_message("assistant", avatar="🤖")
-        with thinking_container:
-            with st.spinner("Agent is thinking... ⏳"):
-                events = loop.run_until_complete(
-                    _collect_sse_events(
-                        client,
-                        user_input,
-                        chat_id=st.session_state["active_chat_id"],
-                        mode=config.get("mode", "auto"),
-                        model=config.get("model"),
-                        reasoning_effort=config.get("reasoning_effort"),
-                        interaction=config.get("interaction", "interactive"),
-                    )
-                )
-        loop.close()
+    session = _SseStreamSession(
+        client,
+        user_input,
+        chat_id=st.session_state["active_chat_id"],
+        mode=config.get("mode", "auto"),
+        model=config.get("model"),
+        reasoning_effort=config.get("reasoning_effort"),
+        interaction=config.get("interaction", "interactive"),
+    )
+    st.session_state["sse_stream"] = session
+    session.start()
+    st.rerun()
 
-        # Update connection status
+
+def _drain_sse_stream(store: EventStore, config: dict[str, Any]) -> None:
+    """Apply queued SSE events; keep rerunning until the background turn ends."""
+    from clawagents.context_observatory.components.chat_panel import apply_sse_event
+
+    session: _SseStreamSession | None = st.session_state.get("sse_stream")
+    if session is None:
+        return
+
+    bridge = st.session_state.get("sse_bridge")
+    collected: list[dict[str, Any]] = st.session_state.setdefault("sse_collected", [])
+    saw_prompt = False
+    finished = False
+
+    while True:
+        try:
+            event = session.events.get_nowait()
+        except queue.Empty:
+            break
+        if event is None:
+            finished = True
+            continue
+        collected.append(event)
+        apply_sse_event(event)
+        if bridge is not None:
+            try:
+                bridge.ingest(event)
+            except Exception:
+                logger.debug("SSE bridge ingest failed", exc_info=True)
+        if event.get("type") == "done" and event.get("chatId"):
+            st.session_state["active_chat_id"] = event["chatId"]
+        if event.get("type") in ("permission_required", "ask_user_required"):
+            saw_prompt = True
+        if event.get("type") in ("done", "error", "cancelled"):
+            finished = True
+
+    if session.error:
+        st.session_state["sidecar_status"] = "error"
+        st.session_state["sidecar_error"] = session.error
+    elif collected:
         st.session_state["sidecar_status"] = "connected"
 
-        # Dump raw events to file for debugging
-        _dump_events_to_file(events, user_input)
-
-        # Apply all events to chat items and bridge
-        for event in events:
-            apply_sse_event(event)
-            bridge.ingest(event)
-
-            # Track chat_id from done events
-            if event.get("type") == "done" and event.get("chatId"):
-                st.session_state["active_chat_id"] = event["chatId"]
-
-    except Exception as e:
-        logger.exception("SSE stream failed")
-        st.session_state["sidecar_status"] = "error"
-        st.session_state["sidecar_error"] = str(e)
-        apply_sse_event({
-            "type": "error",
-            "message": f"Connection failed: {e}",
-        })
+    # HITL prompt: stay in the turn (connection open) but do not spin forever
+    # without a UI refresh — rerun so Allow/Deny buttons appear.
+    if finished or session.done:
+        user_input = st.session_state.get("sse_user_input") or ""
+        if collected:
+            _dump_events_to_file(collected, user_input)
         st.session_state["chat_busy"] = False
+        st.session_state["chat_streaming"] = False
+        st.session_state["sse_stream"] = None
+        st.session_state.pop("sse_bridge", None)
+        st.session_state.pop("sse_user_input", None)
+        st.session_state.pop("sse_collected", None)
+        st.rerun()
+        return
 
+    if saw_prompt:
+        # New HITL prompt just arrived — refresh so Allow/Deny widgets render.
+        # Keep chat_busy True so a second user message is not sent mid-turn.
+        st.rerun()
+        return
+
+    if session.waiting_prompt:
+        # Idle until the user clicks Allow/Deny (that click triggers a rerun).
+        return
+
+    # Still streaming agent output — short poll then refresh
+    time.sleep(0.05)
     st.rerun()
 
 
@@ -376,47 +482,6 @@ def _dump_events_to_file(events: list[dict[str, Any]], user_input: str) -> None:
         logger.debug("Failed to dump events", exc_info=True)
 
 
-
-async def _collect_sse_events(
-    client: "SseClient",
-    task: str,
-    *,
-    chat_id: str | None,
-    mode: str,
-    model: str | None,
-    reasoning_effort: str | None,
-    interaction: str,
-) -> list[dict[str, Any]]:
-    """Collect all SSE events from the stream into a list.
-
-    Streamlit's rerun model prevents true incremental rendering during
-    a single script execution. We collect all events, then apply them
-    in bulk before rerunning the script.
-
-    For permission_required / ask_user_required events, we stop collecting
-    and return immediately so the UI can render the interactive prompt.
-    """
-    events: list[dict[str, Any]] = []
-
-    async for event in client.stream_chat(
-        task,
-        chat_id=chat_id,
-        mode=mode,
-        model=model,
-        reasoning_effort=reasoning_effort,
-        interaction=interaction,
-        enable_context_observatory=True,
-    ):
-        events.append(event)
-
-        # If we hit a blocking event, stop and let the UI render it
-        if event.get("type") in ("permission_required", "ask_user_required"):
-            # Don't mark as done — we'll resume after the user responds
-            break
-
-    return events
-
-
 # ── Permission / ask-user resolution ────────────────────────────────────
 
 
@@ -445,6 +510,10 @@ def _handle_pending_permissions(config: dict[str, Any]) -> None:
                     client.resolve_permission(request_id, decision)
                 )
                 loop.close()
+                # Resume draining the still-open SSE stream for post-approval events.
+                st.session_state.pop(action_key, None)
+                st.rerun()
+                return
             except Exception as e:
                 logger.warning("Failed to resolve permission: %s", e)
 
@@ -481,6 +550,9 @@ def _handle_pending_ask_user(config: dict[str, Any]) -> None:
                     )
                 )
                 loop.close()
+                st.session_state.pop(action_key, None)
+                st.rerun()
+                return
             except Exception as e:
                 logger.warning("Failed to resolve ask_user: %s", e)
 
