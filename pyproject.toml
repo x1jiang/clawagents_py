@@ -30,6 +30,7 @@ dependencies = [
     "pydantic-settings>=2.0.0",
     # Skill SKILL.md frontmatter (allowed-tools lists, block scalars, …).
     "pyyaml>=6.0",
+    "plotly>=5.0.0",
 ]
 
 [project.optional-dependencies]
