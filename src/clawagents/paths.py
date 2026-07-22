@@ -197,6 +197,32 @@ def get_sessions_dir(
     return out
 
 
+def get_context_observatory_dir(
+    *,
+    scope: str = "workspace",
+    profile: str | None = None,
+    create: bool = False,
+) -> Path:
+    """Return the context observatory directory (.clawagents/context-observatory/).
+
+    Args:
+        scope: ``"workspace"`` (default; per-project) or ``"home"``
+            (per-user, profile-scoped).
+        profile: Forwarded to :func:`get_clawagents_home` when
+            ``scope == "home"``.
+        create: If True, create the directory (and parents) if missing.
+    """
+    if scope == "home":
+        out = get_clawagents_home(profile, create=False) / "context-observatory"
+    elif scope == "workspace":
+        out = get_clawagents_workspace_dir(create=False) / "context-observatory"
+    else:
+        raise ValueError(f"unknown scope {scope!r} (expected 'workspace' or 'home')")
+    if create:
+        out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
 def get_lessons_dir(
     *,
     scope: str = "home",
