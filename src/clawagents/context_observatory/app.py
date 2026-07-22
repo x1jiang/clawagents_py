@@ -405,6 +405,7 @@ async def _collect_sse_events(
         model=model,
         reasoning_effort=reasoning_effort,
         interaction=interaction,
+        enable_context_observatory=True,
     ):
         events.append(event)
 

@@ -26,7 +26,7 @@ Usage::
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Callable
 
 from clawagents.context_observatory.analyzer import (
     analyze_system_prompt,
@@ -71,10 +71,12 @@ class ContextObserverHooks(RunHooks):
         *,
         context_window: int = 1_000_000,
         model: str | None = None,
+        event_sink: Callable[[Any], None] | None = None,
     ) -> None:
         self.store = store if store is not None else EventStore()
         self.context_window = context_window
         self.model = model
+        self._event_sink = event_sink
         self._turn = self.store.max_turn
         # State for compaction tracking
         self._pre_compact_tokens = 0
@@ -84,6 +86,18 @@ class ContextObserverHooks(RunHooks):
         # Cumulative token accumulators
         self._cumulative_input = 0
         self._cumulative_output = 0
+
+    def _record(self, event: Any) -> None:
+        """Persist an event and optionally forward it to a live transport."""
+        self.store.append(event)
+        self._publish(event)
+
+    def _publish(self, event: Any) -> None:
+        if self._event_sink is not None:
+            try:
+                self._event_sink(event)
+            except Exception:
+                logger.debug("Context Observatory event sink failed", exc_info=True)
 
     # ── on_llm_start ─────────────────────────────────────────────────────
 
@@ -153,7 +167,7 @@ class ContextObserverHooks(RunHooks):
                 else 0.0
             )
 
-            self.store.append(LLMCallEvent(
+            self._record(LLMCallEvent(
                 turn=turn,
                 model=model or self.model or "",
                 messages=msg_snapshots,
@@ -220,6 +234,7 @@ class ContextObserverHooks(RunHooks):
                 self._cumulative_output += last.total_output_tokens
                 last.cumulative_input_tokens = self._cumulative_input
                 last.cumulative_output_tokens = self._cumulative_output
+                self._publish(last)
         except Exception:
             logger.debug("ContextObserverHooks.on_llm_end failed", exc_info=True)
 
@@ -236,7 +251,7 @@ class ContextObserverHooks(RunHooks):
             self._pre_compact_tokens = token_estimate
             self._pre_compact_msg_count = message_count
 
-            self.store.append(CompactionEvent(
+            self._record(CompactionEvent(
                 turn=self._turn,
                 phase="start",
                 tokens_before=token_estimate,
@@ -269,7 +284,7 @@ class ContextObserverHooks(RunHooks):
                 else 0.0
             )
 
-            self.store.append(CompactionEvent(
+            self._record(CompactionEvent(
                 turn=self._turn,
                 phase="end",
                 tokens_before=self._pre_compact_tokens,
@@ -311,7 +326,7 @@ class ContextObserverHooks(RunHooks):
             # Simulate crush to measure savings (non-destructive)
             result = crush_tool_output(output, tool_name=tool_name)
             if result.did_crush:
-                self.store.append(CrushEvent(
+                self._record(CrushEvent(
                     turn=self._turn,
                     tool_name=tool_name,
                     content_kind=result.kind,
@@ -336,7 +351,7 @@ class ContextObserverHooks(RunHooks):
             budgets = DEFAULT_CONTENT_BUDGETS
             cw = self.context_window
 
-            self.store.append(BudgetSnapshot(
+            self._record(BudgetSnapshot(
                 turn=turn,
                 system_tokens=tokens_by_role.get("system", 0),
                 tool_tokens=tokens_by_role.get("tool", 0),
@@ -365,7 +380,7 @@ class ContextObserverHooks(RunHooks):
         trimmed_chars: int,
     ) -> None:
         """Manually record a trim event (called by external instrumentation)."""
-        self.store.append(TrimEvent(
+        self._record(TrimEvent(
             turn=self._turn,
             role=role,
             original_chars=original_chars,
