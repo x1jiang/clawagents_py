@@ -157,7 +157,8 @@ def test_mantle_anthropic_provider_uses_bearer_auth():
     [
         ("openai.gpt-oss-20b", "openai", "/v1", "chat_completions"),
         ("deepseek.v3.2", "openai", "/v1", "chat_completions"),
-        ("moonshot.kimi-k2.5", "openai", "/v1", "chat_completions"),
+        ("moonshotai.kimi-k2.5", "openai", "/v1", "chat_completions"),
+        ("moonshot.kimi-k2.5", "openai", "/v1", "chat_completions"),  # alias → moonshotai
         ("zai.glm-5", "openai", "/v1", "chat_completions"),
         ("xai.grok-4.3", "openai", "/openai/v1", "responses"),
         ("openai.gpt-5.6-luna", "openai", "/openai/v1", "responses"),
