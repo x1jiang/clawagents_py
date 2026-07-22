@@ -249,8 +249,9 @@ class EventStore:
         raw = json.loads(p.read_text(encoding="utf-8"))
         store = cls()
         store._session_meta = raw.get("session_meta", {})
+        session_dir = p.parent if p.is_file() else p
         for entry in raw.get("events", []):
-            event = _deserialize_event(entry)
+            event = _deserialize_event(entry, base_dir=session_dir)
             if event is not None:
                 store._events.append(event)
         return store
@@ -301,6 +302,8 @@ class EventStore:
                             c_file = contexts_dir / f"turn_{event_dict.get('turn', 0)}_msg_{idx}_{msg.get('role', 'msg')}.txt"
                             c_file.write_text(full_content, encoding="utf-8")
                             msg["external_file"] = str(c_file.relative_to(session_dir))
+                            # Keep JSON lean; hydrate from external_file on load.
+                            msg.pop("full_content", None)
 
             session_json_path.write_text(
                 json.dumps(payload, indent=2, default=str, ensure_ascii=False) + "\n",
@@ -457,7 +460,42 @@ def get_history_dir() -> Path:
 
 
 
-def _deserialize_event(data: dict[str, Any]) -> ContextEvent | None:
+def _message_snapshot_from_dict(
+    data: dict[str, Any],
+    *,
+    base_dir: Path | None = None,
+) -> MessageSnapshot:
+    """Build a MessageSnapshot, ignoring unknown keys and hydrating external files."""
+    from dataclasses import fields
+
+    payload = dict(data)
+    external = payload.pop("external_file", None)
+    if external and base_dir is not None and not payload.get("full_content"):
+        try:
+            ext_path = (base_dir / str(external)).resolve()
+            base_resolved = base_dir.resolve()
+            # Stay inside the session directory (zip-slip guard).
+            if ext_path == base_resolved or base_resolved in ext_path.parents:
+                if ext_path.is_file():
+                    payload["full_content"] = ext_path.read_text(encoding="utf-8")
+        except OSError:
+            pass
+    allowed = {f.name for f in fields(MessageSnapshot)}
+    return MessageSnapshot(**{k: v for k, v in payload.items() if k in allowed})
+
+
+def _tool_call_snapshot_from_dict(data: dict[str, Any]) -> ToolCallSnapshot:
+    from dataclasses import fields
+
+    allowed = {f.name for f in fields(ToolCallSnapshot)}
+    return ToolCallSnapshot(**{k: v for k, v in data.items() if k in allowed})
+
+
+def _deserialize_event(
+    data: dict[str, Any],
+    *,
+    base_dir: Path | None = None,
+) -> ContextEvent | None:
     """Reconstruct a typed ContextEvent from its dict representation."""
     kind = data.get("kind", "")
     turn = data.get("turn", 0)
@@ -465,10 +503,14 @@ def _deserialize_event(data: dict[str, Any]) -> ContextEvent | None:
 
     if kind == "llm_call":
         messages = [
-            MessageSnapshot(**m) for m in data.get("messages", [])
+            _message_snapshot_from_dict(m, base_dir=base_dir)
+            for m in data.get("messages", [])
+            if isinstance(m, dict)
         ]
         tool_calls = [
-            ToolCallSnapshot(**tc) for tc in data.get("tool_calls_made", [])
+            _tool_call_snapshot_from_dict(tc)
+            for tc in data.get("tool_calls_made", [])
+            if isinstance(tc, dict)
         ]
         return LLMCallEvent(
             turn=turn,
