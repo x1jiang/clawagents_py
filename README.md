@@ -66,6 +66,7 @@ pip install -U 'clawagents[all]'       # All providers + tiktoken
 
 ### New In v6.20.47
 - **Context Observatory:** real-time LLM context inspector with token analytics, message timeline, budget visualization, session export/import (.zip), and auto-saved history browser
+- **Gateway-backed Observatory UI:** the Streamlit dashboard now connects directly to the running ClawAgents gateway on port 3000. When observability is enabled, the gateway streams the same `ContextObserverHooks` events used by HTTP and VSCode WebSocket sessions; no separate proxy agent or port 3002 is required.
 - **RunBootstrapper:** extracted 800+ lines of initialization from `agent_loop.py` into a 7-phase ordered bootstrapper — agent_loop.py reduced from 1382 to 676 lines (−51%)
 - **ContextLayer pipeline:** pluggable system-prompt injection with 9 built-in layers (Lessons, Goal, CoreMemory, ContextLedger, MemoryBank, FactStore, Plan, RepoMap, WorkspaceEnv)
 - **Gateway Observatory toggle:** `POST /observatory/toggle` endpoint to enable/disable context event streaming at runtime

@@ -52,8 +52,8 @@ async def test_gateway_observatory_enabled(tmp_path, monkeypatch):
         mock_result.iterations = 1
         async def fake_invoke(task, on_event=None, hooks=None):
             if hooks and hasattr(hooks, "store"):
-                from clawagents.context_observatory.events import ContextEvent
-                hooks.store.append(ContextEvent(turn=1, kind="llm_call"))
+                await hooks.on_llm_start(None, "test-model", [])
+                await hooks.on_llm_end(None, "test-model", "ok", None)
             return mock_result
 
         mock_agent.invoke.side_effect = fake_invoke
@@ -65,6 +65,8 @@ async def test_gateway_observatory_enabled(tmp_path, monkeypatch):
 
         response = client.post("/chat/stream", json={"task": "hello", "chat_id": "vscode_chat_001", "enable_context_observatory": True})
         assert response.status_code == 200
+        assert "event: observatory" in response.text
+        assert '"kind": "llm_call"' in response.text
 
         # Check mock_agent.invoke call args — hooks should be passed
         assert mock_agent.invoke.called

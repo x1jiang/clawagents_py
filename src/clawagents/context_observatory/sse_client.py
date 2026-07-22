@@ -198,6 +198,9 @@ def map_agent_event(kind: str, data: dict[str, Any]) -> dict[str, Any] | None:
             "tokens_by_role": data.get("tokens_by_role", {}),
         }
 
+    if kind == "observatory":
+        return {"type": "observatory_event", "event": data}
+
     if kind == "usage":
         # Usage event forwarded from on_stream_event
         return {
@@ -383,6 +386,7 @@ class SseClient:
         reasoning_effort: str | None = None,
         interaction: str = "interactive",
         api_key: str | None = None,
+        enable_context_observatory: bool = True,
     ) -> AsyncIterator[dict[str, Any]]:
         """Stream chat events via SSE.
 
@@ -405,6 +409,7 @@ class SseClient:
             "reasoning_effort": reasoning_effort or None,
             "interaction": interaction,
             "api_key": resolved_api_key,
+            "enable_context_observatory": enable_context_observatory,
         }
 
         headers = self._headers(accept="text/event-stream")
@@ -494,6 +499,9 @@ class SseClient:
                                 "runCostUsd": _num(data.get("run_cost_usd")),
                                 "sessionCostUsd": _num(data.get("session_cost_usd")),
                             }
+
+                        elif ev["event"] == "observatory":
+                            mapped = {"type": "observatory_event", "event": data}
 
                         elif ev["event"] == "done":
                             usage_obj = (

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Gateway-backed Context Observatory:** Streamlit connects directly to the running gateway instead of creating a proxy agent. The observability toggle now streams `ContextObserverHooks` events through both HTTP SSE and the VSCode WebSocket path, keeping dashboard data aligned with the real runtime.
+- **Observability accuracy:** add `tiktoken` to the development environment so context and message token counts use the model tokenizer rather than the fallback character estimate.
 - Refactor: split the agent loop into smaller modules; extracted agent_loop utilities into dedicated modules to reduce cognitive load and improve testability.
 - Feature: context observatory / context-monitor integration merged; enables LLM context inspection and monitoring during runs.
 - Docs: changelog now includes a dedicated Unreleased section to track upcoming changes before formal version release.
