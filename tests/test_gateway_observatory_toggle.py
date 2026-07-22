@@ -9,6 +9,7 @@ from clawagents.gateway.server import create_app
 @pytest.mark.asyncio
 async def test_gateway_observatory_disabled_by_default(tmp_path, monkeypatch):
     """Verify that when enable_context_observatory is false/omitted, no observer hooks are attached."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-mock-key")
     monkeypatch.setenv("CLAWAGENTS_WORKSPACE", str(tmp_path))
 
     with patch("clawagents.gateway.server.create_claw_agent") as mock_create:
@@ -40,6 +41,7 @@ async def test_gateway_observatory_disabled_by_default(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_gateway_observatory_enabled(tmp_path, monkeypatch):
     """Verify that when enable_context_observatory is True, observer hooks are attached and session saved."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-mock-key")
     monkeypatch.setenv("CLAWAGENTS_WORKSPACE", str(tmp_path))
 
     with patch("clawagents.gateway.server.create_claw_agent") as mock_create:
