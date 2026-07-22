@@ -12,6 +12,7 @@ from clawagents.agent import create_claw_agent
 
 
 def test_goal_tools_only_registered_in_goal_mode(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-mock-key")
     monkeypatch.setenv("CLAW_FEATURE_GOAL_AUTOPILOT", "1")
     act = create_claw_agent("gpt-4o-mini", goal_mode=False, streaming=False)
     goal = create_claw_agent("gpt-4o-mini", goal_mode=True, streaming=False)
