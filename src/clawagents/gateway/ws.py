@@ -151,15 +151,40 @@ async def _handle_chat_send(ws: WebSocket, msg: dict, llm: Any):
             if enable_obs:
                 from clawagents.context_observatory.hooks import ContextObserverHooks
                 from clawagents.context_observatory.store import EventStore
+                from clawagents.graph.model_profiles import resolve_model_profile
 
+                model_name = getattr(llm, "model", None) or getattr(llm, "name", None) or str(llm)
+                profile = resolve_model_profile(str(model_name))
+                context_window = int(
+                    params.get("context_window")
+                    or (profile["max_input_tokens"] if profile else 128_000)
+                )
                 store = EventStore()
-                store.set_session_meta(model=str(llm), started_at=time.time())
+                store.set_session_meta(
+                    model=str(model_name),
+                    context_window=context_window,
+                    started_at=time.time(),
+                )
+                # Serialize observatory publishes on the event loop so bursts
+                # cannot drop/reorder via fire-and-forget create_task.
+                obs_queue: asyncio.Queue[Any | None] = asyncio.Queue()
+
+                def _obs_sink(event: Any) -> None:
+                    obs_queue.put_nowait(event)
+
+                async def _pump_obs() -> None:
+                    while True:
+                        item = await obs_queue.get()
+                        if item is None:
+                            break
+                        await send_event("observatory", item.to_dict())
+
+                pump = asyncio.create_task(_pump_obs())
                 observer = ContextObserverHooks(
                     store=store,
-                    model=str(llm),
-                    event_sink=lambda event: asyncio.create_task(
-                        send_event("observatory", event.to_dict())
-                    ),
+                    model=str(model_name),
+                    context_window=context_window,
+                    event_sink=_obs_sink,
                 )
 
                 try:
@@ -171,6 +196,12 @@ async def _handle_chat_send(ws: WebSocket, msg: dict, llm: Any):
                     store.set_session_meta(completed_at=time.time(), status="failed")
                     store.auto_save(chat_id=session_id)
                     raise
+                finally:
+                    await obs_queue.put(None)
+                    try:
+                        await pump
+                    except Exception:
+                        pass
             else:
                 return await agent.invoke(task, on_event=on_event)
 

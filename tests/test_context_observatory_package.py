@@ -73,6 +73,34 @@ def test_export_and_import_zip_package(tmp_path, monkeypatch):
     assert imported_store.events[0].model == "gpt-5-nano"
 
 
+def test_auto_save_external_file_roundtrip(tmp_path, monkeypatch):
+    """Large message bodies externalized on save must reload without NameError/TypeError."""
+    monkeypatch.setenv("CLAWAGENTS_WORKSPACE", str(tmp_path))
+
+    store = EventStore()
+    store.set_session_meta(model="test-model", context_window=128000)
+    huge = "x" * 60_000
+    msg = MessageSnapshot(
+        role="system",
+        content_preview=huge[:200],
+        content_length=len(huge),
+        token_count=1000,
+        full_content=huge,
+    )
+    store.append(LLMCallEvent(turn=1, timestamp=100.0, model="test-model", messages=[msg]))
+
+    session_path = store.auto_save(chat_id="huge_session")
+    assert session_path is not None
+    raw = json.loads(session_path.read_text(encoding="utf-8"))
+    saved_msg = raw["events"][0]["messages"][0]
+    assert "external_file" in saved_msg
+    assert "full_content" not in saved_msg
+
+    loaded = EventStore.load_from_json(session_path.parent)
+    assert len(loaded.events) == 1
+    assert loaded.events[0].messages[0].full_content == huge
+
+
 def test_list_history_scans_directories(tmp_path, monkeypatch):
     """Verify list_history detects session directories and legacy json files."""
     monkeypatch.setenv("CLAWAGENTS_WORKSPACE", str(tmp_path))

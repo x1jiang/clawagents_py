@@ -182,13 +182,25 @@ def create_app() -> tuple:
                 import time
                 from clawagents.context_observatory.hooks import ContextObserverHooks
                 from clawagents.context_observatory.store import EventStore
+                from clawagents.graph.model_profiles import resolve_model_profile
 
                 chat_id = payload.get("chat_id") or payload.get("session_id") or payload.get("chatId")
+                model_name = getattr(llm, "model", None) or active_model
+                profile = resolve_model_profile(str(model_name))
+                context_window = int(
+                    payload.get("context_window")
+                    or (profile["max_input_tokens"] if profile else 128_000)
+                )
                 store = EventStore()
-                store.set_session_meta(model=str(llm), started_at=time.time())
+                store.set_session_meta(
+                    model=str(model_name),
+                    context_window=context_window,
+                    started_at=time.time(),
+                )
                 observer = ContextObserverHooks(
                     store=store,
-                    model=str(llm),
+                    model=str(model_name),
+                    context_window=context_window,
                     event_sink=lambda event: sse("observatory", event.to_dict()),
                 )
 
