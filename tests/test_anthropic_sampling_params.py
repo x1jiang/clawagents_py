@@ -26,6 +26,8 @@ from clawagents.providers.llm import (
         ("claude-opus-4-5", False),
         ("claude-sonnet-4-5", False),
         ("anthropic.claude-sonnet-4-5", False),
+        ("anthropic.claude-sonnet-5", True),
+        ("anthropic.claude-fable-5", True),
         ("gpt-4o", False),
     ],
 )
@@ -79,6 +81,8 @@ async def test_anthropic_provider_omits_temperature_for_opus_48():
         ("gpt-5.6-luna", True),
         ("openai.gpt-5.5", True),
         ("o3-mini", True),
+        ("xai.grok-4.3", True),
+        ("grok-4.3", True),
         ("gpt-4o", False),
         ("openai.gpt-oss-20b", False),
     ],

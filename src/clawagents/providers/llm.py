@@ -690,9 +690,12 @@ def _bare_openai_model_id(model: str) -> str:
 def openai_model_rejects_temperature(model: str) -> bool:
     """True when OpenAI / Mantle Responses reject an explicit ``temperature``.
 
-    GPT-5.5 / 5.6 (incl. ``openai.gpt-5.6-luna``), o-series, and similar
-    reasoning models return 400 if ``temperature`` is present. Omit the field.
+    GPT-5.5 / 5.6 (incl. ``openai.gpt-5.6-luna``), o-series, xAI Grok, and
+    similar reasoning models return 400 if ``temperature`` is present. Omit it.
     """
+    raw = (model or "").strip().lower()
+    if raw.startswith("xai.") or "grok-" in raw or raw.startswith("grok-"):
+        return True
     m = _bare_openai_model_id(model)
     if m.startswith(("o1", "o3", "o4")):
         return True
@@ -719,9 +722,10 @@ def _with_temperature(
 def anthropic_model_rejects_sampling_params(model: str) -> bool:
     """True when the Anthropic API rejects ``temperature`` / ``top_p`` / ``top_k``.
 
-    Claude Opus 4.7+ (including Mantle ``anthropic.claude-opus-4-8``) return
-    HTTP 400 ``temperature is deprecated for this model`` if those fields are
-    present. Omit them and guide behavior via prompting instead.
+    Claude Opus 4.7+ (including Mantle ``anthropic.claude-opus-4-8``) and
+    Mantle Claude Sonnet 5 / Fable 5 return HTTP 400
+    ``temperature is deprecated for this model`` if those fields are present.
+    Omit them and guide behavior via prompting instead.
     """
     import re
 
@@ -733,6 +737,11 @@ def anthropic_model_rejects_sampling_params(model: str) -> bool:
         return int(hit.group(1)) >= 7
     # Future Opus 5+ generations inherit the same restriction.
     if re.search(r"opus-([5-9]|[1-9]\d+)(?:-|\b)", m):
+        return True
+    # Mantle Claude Sonnet 5 / Fable 5 (not Sonnet 4.x).
+    if re.search(r"claude-sonnet-5(?:-|\b)", m) or re.search(
+        r"claude-fable-5(?:-|\b)", m
+    ):
         return True
     return False
 
@@ -3512,6 +3521,9 @@ def create_provider(
     ref = parse_model_ref(model_name)
     # Never send ``anthropic/…`` / ``openai/…`` / ``bedrock/…`` literals to SDKs.
     model_name = ref.bare_id
+    # Mantle catalog uses ``moonshotai.*`` (not ``moonshot.*``).
+    if model_name.lower().startswith("moonshot."):
+        model_name = "moonshotai." + model_name.split(".", 1)[1]
     lower = model_name.lower()
     kind = classify_model(
         ref.raw or model_name,
