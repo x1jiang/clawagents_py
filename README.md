@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.20.46-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.20.47-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -23,7 +23,7 @@ This repo is the **Python framework** (`pip install clawagents`). Ready-made cli
 |---------|--------|------------|------|
 | **ClawAgents Desktop** | **v0.4.26** | Native macOS app — project chats, file editor, SSH remotes, Settings (incl. AWS Bedrock), Developer ID signed + notarized | [Repo](https://github.com/x1jiang/clawagents-desktop) · [Download DMG](https://github.com/x1jiang/clawagents-desktop/releases/tag/v0.4.26) |
 | **ClawAgents for VS Code / Cursor** | **v1.0.138** | Editor extension — fork hardening, Mantle Kimi ids, companion lockstep | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Releases](https://github.com/x1jiang/clawagents-vscode/releases) |
-| **Python package** | **v6.20.46** | This library — Mantle sampling/Kimi/Fable fixes · `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/) · [Release](https://github.com/x1jiang/clawagents_py/releases) |
+| **Python package** | **v6.20.47** | This library — Context Observatory, modular agent loop · `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/) · [Release](https://github.com/x1jiang/clawagents_py/releases) |
 | **TypeScript package** | **v6.12.13** | Node/TS sibling — `npm install git+https://github.com/x1jiang/clawagents.git` | [Repo](https://github.com/x1jiang/clawagents) |
 
 ## Installation
@@ -36,6 +36,8 @@ pip install -U 'clawagents[bedrock]'   # + Amazon Bedrock (Claude via IAM + Nova
 pip install -U 'clawagents[all]'       # All providers + tiktoken
 ```
 
+> **Version 6.20.47** — Context Observatory, modular RunBootstrapper & ContextLayer pipeline, aiohttp → httpx migration (July 2026).
+>
 > **Version 6.20.46** — Mantle Grok/Sonnet-5 omit temperature; Kimi `moonshotai.*`; Fable retention hint (July 2026).
 >
 > **Version 6.20.45** — Mantle Claude via `AsyncAnthropicBedrockMantle` (Bearer) (July 2026).
@@ -61,6 +63,13 @@ pip install -U 'clawagents[all]'       # All providers + tiktoken
 > **Version 6.19.0** — Companion lockstep (July 2026).
 
 > **Version 6.18.0** — Grok-inspired edit/execute harness (July 2026).
+
+### New In v6.20.47
+- **Context Observatory:** real-time LLM context inspector with token analytics, message timeline, budget visualization, session export/import (.zip), and auto-saved history browser
+- **RunBootstrapper:** extracted 800+ lines of initialization from `agent_loop.py` into a 7-phase ordered bootstrapper — agent_loop.py reduced from 1382 to 676 lines (−51%)
+- **ContextLayer pipeline:** pluggable system-prompt injection with 9 built-in layers (Lessons, Goal, CoreMemory, ContextLedger, MemoryBank, FactStore, Plan, RepoMap, WorkspaceEnv)
+- **Gateway Observatory toggle:** `POST /observatory/toggle` endpoint to enable/disable context event streaming at runtime
+- **aiohttp → httpx:** eliminated `aiohttp` dependency in SSE client (httpx already present via openai)
 
 ### New In v6.20.46
 - Omit `temperature` for Mantle Grok and Claude Sonnet 5 / Fable 5 (models reject sampling params)
@@ -825,9 +834,36 @@ clawagents/
 │   ├── validate.py        # JSON Schema param validation + lenient coercion
 │   └── permissions.py     # Declarative permission rules (glob-based)
 ├── graph/
-│   ├── agent_loop.py      # Core ReAct loop, HookResult, context management (v6.0)
+│   ├── agent_loop.py      # Core ReAct loop — pure control flow (676 lines, v6.20.47)
+│   ├── run_bootstrapper.py # 7-phase initialization (RunBootstrapper, RunSession, AdvisorController)
+│   ├── context_layers.py  # Pluggable system-prompt injection (ContextLayer protocol + 9 impls)
+│   ├── run_config.py      # AgentRunConfig — stable parameter object
+│   ├── run_runtime.py     # RunEvents, HookDispatcher, SessionMessageJournal
+│   ├── run_finalizer.py   # Output guardrails, output type coercion, session flush
+│   ├── turn_driver.py     # IncrementalTokenLedger, per-turn LLM orchestration
+│   ├── turn_llm.py        # LLM call wrapper with usage tracking + TTFT
+│   ├── turn_response.py   # Response parsing (native tool calls, text extraction)
+│   ├── round_scheduler.py # Iteration budget, timeout, cancel checks
+│   ├── round_dispatcher.py # Per-round dispatch (LLM → tools → handoff decision)
+│   ├── tool_batch.py      # ToolBatchSafety, ToolCallRunner, ToolPolicyGate, RethinkController
+│   ├── tool_turn.py       # ToolTurnExecutor — serial/parallel tool execution
+│   ├── tool_observation.py # Tool result formatting, truncation, side effects
+│   ├── completion_handler.py # Final-answer detection + output post-processing
+│   ├── handoff_router.py  # Agent handoff dispatch (v6.4)
+│   ├── context_management.py # Context window GC — compaction, trimming, WAL, history offload
+│   ├── loop_tracker.py    # Tool loop detection (soft + hard + ping-pong)
+│   ├── message_repair.py  # Dangling tool-call repair, orphan tool-result dropping
+│   ├── model_profiles.py  # Model-aware context budgets + long-context thresholds
 │   ├── coordinator.py     # Coordinator/swarm orchestration mode
 │   └── forked_agent.py    # Background forked agent pattern
+├── context_observatory/   # Real-time LLM context inspector (v6.20.47)
+│   ├── app.py             # Streamlit UI — chat panel, context inspector, token analytics
+│   ├── events.py          # Typed event dataclasses (LLMCallEvent, CompactionEvent, etc.)
+│   ├── store.py           # EventStore — in-memory event log with session export/import
+│   ├── hooks.py           # ContextObserverHooks — RunHooks bridge for context events
+│   ├── sse_client.py      # SSE client for sidecar gateway (httpx-based)
+│   ├── sse_hooks_bridge.py # SSE → EventStore translator
+│   └── components/        # Streamlit UI panels (history browser, etc.)
 ├── sandbox/
 │   ├── backend.py         # SandboxBackend protocol (15+ methods)
 │   ├── local.py           # LocalBackend (pathlib + asyncio)
