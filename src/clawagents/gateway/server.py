@@ -186,7 +186,11 @@ def create_app() -> tuple:
                 chat_id = payload.get("chat_id") or payload.get("session_id") or payload.get("chatId")
                 store = EventStore()
                 store.set_session_meta(model=str(llm), started_at=time.time())
-                observer = ContextObserverHooks(store=store, model=str(llm))
+                observer = ContextObserverHooks(
+                    store=store,
+                    model=str(llm),
+                    event_sink=lambda event: sse("observatory", event.to_dict()),
+                )
 
                 try:
                     result = await agent.invoke(task, on_event=on_event, hooks=observer)

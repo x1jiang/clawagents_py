@@ -10,6 +10,7 @@ Supports:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -153,7 +154,13 @@ async def _handle_chat_send(ws: WebSocket, msg: dict, llm: Any):
 
                 store = EventStore()
                 store.set_session_meta(model=str(llm), started_at=time.time())
-                observer = ContextObserverHooks(store=store, model=str(llm))
+                observer = ContextObserverHooks(
+                    store=store,
+                    model=str(llm),
+                    event_sink=lambda event: asyncio.create_task(
+                        send_event("observatory", event.to_dict())
+                    ),
+                )
 
                 try:
                     result = await agent.invoke(task, on_event=on_event, hooks=observer)
