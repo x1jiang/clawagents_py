@@ -66,14 +66,14 @@ def render_sidebar(store: EventStore) -> dict[str, Any]:
 
     st.sidebar.markdown("---")
 
-    # ── Sidecar Connection ──
-    st.sidebar.subheader("🔌 Sidecar Connection")
+    # ── Gateway Connection ──
+    st.sidebar.subheader("🔌 Gateway Connection")
 
     sidecar_host = st.sidebar.text_input(
         "Host",
         value=st.session_state.get("sidecar_host", "127.0.0.1"),
         key="sidecar_host_input",
-        help="Sidecar gateway hostname",
+        help="ClawAgents gateway hostname",
     )
     st.session_state["sidecar_host"] = sidecar_host
 
@@ -81,7 +81,7 @@ def render_sidebar(store: EventStore) -> dict[str, Any]:
         "Port",
         min_value=1,
         max_value=65535,
-        value=st.session_state.get("sidecar_port", 3002),
+        value=st.session_state.get("sidecar_port", 3000),
         step=1,
         key="sidecar_port_input",
     )
@@ -92,7 +92,7 @@ def render_sidebar(store: EventStore) -> dict[str, Any]:
         type="password",
         value=st.session_state.get("sidecar_token", ""),
         key="sidecar_token_input",
-        help="GATEWAY_API_KEY for the sidecar (leave empty if auth is disabled)",
+        help="GATEWAY_API_KEY (leave empty if auth is disabled)",
     )
     st.session_state["sidecar_token"] = sidecar_token
 

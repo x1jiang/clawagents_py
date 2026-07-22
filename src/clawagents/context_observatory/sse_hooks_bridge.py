@@ -28,7 +28,7 @@ from clawagents.context_observatory.events import (
     MessageSnapshot,
     ToolCallSnapshot,
 )
-from clawagents.context_observatory.store import EventStore
+from clawagents.context_observatory.store import EventStore, _deserialize_event
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +66,7 @@ class SseEventBridge:
         # Count streaming usage events (used only as fallback when done
         # event has no per_request data).
         self._usage_events: list[dict[str, Any]] = []
+        self._received_observatory_events = False
 
     def ingest(self, event: dict[str, Any]) -> None:
         """Process a single SSE event and update the EventStore."""
@@ -156,6 +157,21 @@ class SseEventBridge:
         """Buffer full context snapshot — will be consumed by _on_done."""
         self._context_snapshots.append(event)
 
+    def _on_observatory_event(self, event: dict[str, Any]) -> None:
+        raw = event.get("event")
+        if not isinstance(raw, dict):
+            return
+        observed = _deserialize_event(raw)
+        if observed is None:
+            return
+        self._received_observatory_events = True
+        if observed.kind == "llm_call":
+            for index, existing in enumerate(self.store._events):
+                if existing.kind == "llm_call" and existing.turn == observed.turn:
+                    self.store._events[index] = observed
+                    return
+        self.store.append(observed)
+
     def _on_usage(self, event: dict[str, Any]) -> None:
         """Buffer streaming usage events — will be consumed by _on_done."""
         self._usage_events.append(event)
@@ -195,6 +211,16 @@ class SseEventBridge:
         streaming ``usage`` events.
         """
         turn = max(self._turn, 1)
+
+        if self._received_observatory_events:
+            self.store.set_session_meta(
+                model=self.model,
+                context_window=self.context_window,
+                completed_at=time.time(),
+                iterations=event.get("iterations"),
+                status=event.get("status"),
+            )
+            return
 
         usage = event.get("usage") or {}
         per_request = usage.get("per_request") or []

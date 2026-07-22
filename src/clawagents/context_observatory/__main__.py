@@ -1,11 +1,8 @@
 """CLI entry point for the Context Observatory.
 
 Usage:
-    # Launch both the proxy server and the Streamlit dashboard
+    # Launch the Streamlit dashboard against an existing ClawAgents gateway
     python -m clawagents.context_observatory
-
-    # Launch only the proxy server (no UI)
-    python -m clawagents.context_observatory --server-only
 
     # Replay a previously exported session (UI only, no server)
     python -m clawagents.context_observatory --replay session.json
@@ -20,7 +17,6 @@ import argparse
 import os
 import subprocess
 import sys
-import threading
 from pathlib import Path
 
 
@@ -50,59 +46,16 @@ def _parse_args() -> argparse.Namespace:
         help="Port for the Streamlit UI server (default: 8501)",
     )
     parser.add_argument(
-        "--server-port",
-        type=int,
-        default=3002,
-        help="Port for the observatory proxy server (default: 3002)",
-    )
-    parser.add_argument(
         "--no-browser",
         action="store_true",
         default=False,
         help="Don't open the browser automatically",
     )
-    parser.add_argument(
-        "--server-only",
-        action="store_true",
-        default=False,
-        help="Launch only the proxy server, skip the Streamlit UI",
-    )
-    parser.add_argument(
-        "--no-server",
-        action="store_true",
-        default=False,
-        help="Launch only the Streamlit UI, skip the proxy server",
-    )
     return parser.parse_args()
-
-
-def _start_proxy_server(port: int) -> None:
-    """Start the observatory proxy server in a background thread."""
-    from clawagents.context_observatory.proxy_server import start_proxy
-
-    thread = threading.Thread(
-        target=start_proxy,
-        kwargs={"port": port, "host": "127.0.0.1"},
-        daemon=True,
-        name="observatory-proxy",
-    )
-    thread.start()
 
 
 def main() -> None:
     args = _parse_args()
-
-    # ── Server-only mode ─────────────────────────────────────────────
-    if args.server_only:
-        from clawagents.context_observatory.proxy_server import start_proxy
-
-        start_proxy(port=args.server_port)
-        return
-
-    # ── Launch proxy server in background ────────────────────────────
-    if not args.no_server and not args.replay and not args.compare:
-        print(f"🔭 Starting Observatory Proxy on port {args.server_port}...")
-        _start_proxy_server(args.server_port)
 
     # ── Launch Streamlit UI ──────────────────────────────────────────
     app_path = Path(__file__).parent / "app.py"
@@ -122,8 +75,6 @@ def main() -> None:
 
     # Pass args through environment variables
     env = os.environ.copy()
-    env["OBSERVATORY_PROXY_PORT"] = str(args.server_port)
-
     if args.replay:
         replay_path = Path(args.replay).resolve()
         if not replay_path.exists():
