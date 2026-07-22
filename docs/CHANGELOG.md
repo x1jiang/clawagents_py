@@ -1,3 +1,10 @@
+## v6.20.48 — Observatory HITL + gateway observability fixes (July 2026)
+
+- Keep Context Observatory SSE open across permission/ask-user prompts (background stream worker)
+- Clear chat busy state when a turn actually ends; ZIP import imports `io`
+- Hydrate `external_file` message bodies on session reload (auto_save round-trip)
+- Gateway/WS observatory hooks use model profile `context_window`; WS events are queued (no fire-and-forget drops)
+
 # ClawAgents Changelog
 
 ## Unreleased

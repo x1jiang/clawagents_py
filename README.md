@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.20.47-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.20.48-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -23,7 +23,7 @@ This repo is the **Python framework** (`pip install clawagents`). Ready-made cli
 |---------|--------|------------|------|
 | **ClawAgents Desktop** | **v0.4.26** | Native macOS app — project chats, file editor, SSH remotes, Settings (incl. AWS Bedrock), Developer ID signed + notarized | [Repo](https://github.com/x1jiang/clawagents-desktop) · [Download DMG](https://github.com/x1jiang/clawagents-desktop/releases/tag/v0.4.26) |
 | **ClawAgents for VS Code / Cursor** | **v1.0.138** | Editor extension — fork hardening, Mantle Kimi ids, companion lockstep | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Releases](https://github.com/x1jiang/clawagents-vscode/releases) |
-| **Python package** | **v6.20.47** | This library — Context Observatory, modular agent loop · `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/) · [Release](https://github.com/x1jiang/clawagents_py/releases) |
+| **Python package** | **v6.20.48** | This library — Context Observatory, modular agent loop · `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/) · [Release](https://github.com/x1jiang/clawagents_py/releases) |
 | **TypeScript package** | **v6.12.13** | Node/TS sibling — `npm install git+https://github.com/x1jiang/clawagents.git` | [Repo](https://github.com/x1jiang/clawagents) |
 
 ## Installation
@@ -36,6 +36,8 @@ pip install -U 'clawagents[bedrock]'   # + Amazon Bedrock (Claude via IAM + Nova
 pip install -U 'clawagents[all]'       # All providers + tiktoken
 ```
 
+> **Version 6.20.48** — Observatory HITL SSE fix, session reload, gateway context_window accuracy (July 2026).
+>
 > **Version 6.20.47** — Context Observatory, modular RunBootstrapper & ContextLayer pipeline, aiohttp → httpx migration (July 2026).
 >
 > **Version 6.20.46** — Mantle Grok/Sonnet-5 omit temperature; Kimi `moonshotai.*`; Fable retention hint (July 2026).
@@ -63,6 +65,11 @@ pip install -U 'clawagents[all]'       # All providers + tiktoken
 > **Version 6.19.0** — Companion lockstep (July 2026).
 
 > **Version 6.18.0** — Grok-inspired edit/execute harness (July 2026).
+
+### New In v6.20.48
+- **Observatory HITL:** keep the sidecar SSE connection open across permission / ask-user prompts (background stream worker) so approvals do not cancel the run
+- **Session reload:** hydrate large message bodies from `external_file` after `auto_save`; ZIP history import imports `io`
+- **Gateway accuracy:** observatory hooks use the model profile `context_window`; WebSocket observatory events are queued (no fire-and-forget drops)
 
 ### New In v6.20.47
 - **Context Observatory:** real-time LLM context inspector with token analytics, message timeline, budget visualization, session export/import (.zip), and auto-saved history browser
