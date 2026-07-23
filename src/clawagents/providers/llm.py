@@ -603,17 +603,59 @@ def _fire_first_token(cb: Any) -> None:
         pass
 
 
-def _openai_cached_tokens(usage: Any) -> int:
-    """Read prompt-cache hits from an OpenAI usage object, defaulting to 0.
-
-    ``usage.prompt_tokens_details.cached_tokens`` reports the portion of the
-    prompt served from OpenAI's automatic prompt cache (billed at a discount).
-    """
-    details = getattr(usage, "prompt_tokens_details", None) if usage else None
-    try:
-        return int(getattr(details, "cached_tokens", 0) or 0)
-    except (TypeError, ValueError):
+def _usage_detail_int(details: Any, *names: str) -> int:
+    """Read the first present int field from a usage-details object or dict."""
+    if details is None:
         return 0
+    for name in names:
+        if isinstance(details, dict):
+            raw = details.get(name)
+        else:
+            raw = getattr(details, name, None)
+        if raw is None:
+            continue
+        try:
+            return int(raw or 0)
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
+def _openai_cache_tokens(usage: Any) -> tuple[int, int]:
+    """Return ``(cache_read_tokens, cache_write_tokens)`` from OpenAI usage.
+
+    Chat Completions expose ``usage.prompt_tokens_details``; Responses API
+    exposes ``usage.input_tokens_details``. Both may include:
+
+    - ``cached_tokens`` — prompt-cache *hits* (typically ~10% of input rate)
+    - ``cache_write_tokens`` — prompt-cache *loads/writes* (typically 1.25×)
+
+    Alternate names (``cache_creation_tokens``, etc.) are accepted for
+    OpenAI-compatible proxies. Missing details → ``(0, 0)``.
+    """
+    if not usage:
+        return 0, 0
+    if isinstance(usage, dict):
+        details = usage.get("prompt_tokens_details") or usage.get(
+            "input_tokens_details"
+        )
+    else:
+        details = getattr(usage, "prompt_tokens_details", None) or getattr(
+            usage, "input_tokens_details", None
+        )
+    read = _usage_detail_int(details, "cached_tokens", "cache_read_tokens")
+    write = _usage_detail_int(
+        details,
+        "cache_write_tokens",
+        "cache_creation_tokens",
+        "cache_creation_input_tokens",
+    )
+    return read, write
+
+
+def _openai_cached_tokens(usage: Any) -> int:
+    """Read prompt-cache hits from an OpenAI usage object, defaulting to 0."""
+    return _openai_cache_tokens(usage)[0]
 
 
 def _parse_openai_tool_calls(
@@ -1027,8 +1069,8 @@ def _messages_to_responses_input(
 
 def _parse_responses_result(
     resp: Any,
-) -> tuple[str, list[NativeToolCall] | None, int, int, int]:
-    """Return (text, tool_calls, total_tokens, prompt_tokens, cached_tokens)."""
+) -> tuple[str, list[NativeToolCall] | None, int, int, int, int]:
+    """Return (text, tool_calls, total, prompt, cache_read, cache_write)."""
     content_parts: list[str] = []
     calls: list[NativeToolCall] = []
     for item in getattr(resp, "output", None) or []:
@@ -1054,14 +1096,8 @@ def _parse_responses_result(
     usage = getattr(resp, "usage", None)
     total = int(getattr(usage, "total_tokens", 0) or 0) if usage else 0
     prompt = int(getattr(usage, "input_tokens", 0) or 0) if usage else 0
-    cached = 0
-    if usage:
-        details = getattr(usage, "input_tokens_details", None)
-        try:
-            cached = int(getattr(details, "cached_tokens", 0) or 0) if details else 0
-        except (TypeError, ValueError):
-            cached = 0
-    return text, (calls or None), total, prompt, cached
+    cached, cache_write = _openai_cache_tokens(usage)
+    return text, (calls or None), total, prompt, cached, cache_write
 
 
 def _sanitize_openai_tool_pairs(formatted: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1350,7 +1386,7 @@ class OpenAIProvider(LLMProvider):
             create_kwargs["extra_headers"] = affinity["extra_headers"]
         resp = await self.client.chat.completions.create(**create_kwargs)
         _prompt_tokens = (resp.usage.prompt_tokens or 0) if resp.usage else 0
-        _cached_tokens = _openai_cached_tokens(resp.usage)
+        _cached_tokens, _cache_write_tokens = _openai_cache_tokens(resp.usage)
         if not resp.choices:
             # Azure content filters and some OpenAI-compatible proxies return
             # 200 with an empty ``choices`` array; don't IndexError on it.
@@ -1358,6 +1394,7 @@ class OpenAIProvider(LLMProvider):
                                tokens_used=resp.usage.total_tokens if resp.usage else 0,
                                prompt_tokens=_prompt_tokens,
                                cache_read_tokens=_cached_tokens,
+                               cache_creation_tokens=_cache_write_tokens,
                                partial=True)
         msg = resp.choices[0].message
         native_calls = _parse_openai_tool_calls(getattr(msg, "tool_calls", None))
@@ -1367,6 +1404,7 @@ class OpenAIProvider(LLMProvider):
             tokens_used=resp.usage.total_tokens if resp.usage else 0,
             prompt_tokens=_prompt_tokens,
             cache_read_tokens=_cached_tokens,
+            cache_creation_tokens=_cache_write_tokens,
             tool_calls=native_calls,
         )
 
@@ -1472,6 +1510,7 @@ class OpenAIProvider(LLMProvider):
             final_tokens = 0
             final_prompt_tokens = 0
             final_cached_tokens = 0
+            final_cache_write_tokens = 0
             first_token_fired = False
             # Key by call_id when present so a duplicated/colliding output_index
             # cannot merge two tool calls' arguments. Fall back to idx:* keys.
@@ -1548,6 +1587,7 @@ class OpenAIProvider(LLMProvider):
                             tokens_used=final_tokens,
                             prompt_tokens=final_prompt_tokens,
                             cache_read_tokens=final_cached_tokens,
+                            cache_creation_tokens=final_cache_write_tokens,
                             partial=True,
                             tool_calls=_accumulated_calls(),
                         )
@@ -1601,10 +1641,13 @@ class OpenAIProvider(LLMProvider):
                         elif etype == "response.completed":
                             resp = getattr(event, "response", None)
                             if resp is not None:
-                                _t, _c, total, prompt, cached = _parse_responses_result(resp)
+                                _t, _c, total, prompt, cached, cache_write = (
+                                    _parse_responses_result(resp)
+                                )
                                 final_tokens = total
                                 final_prompt_tokens = prompt
                                 final_cached_tokens = cached
+                                final_cache_write_tokens = cache_write
                                 if _t and not chunks:
                                     if not first_token_fired:
                                         first_token_fired = True
@@ -1637,6 +1680,7 @@ class OpenAIProvider(LLMProvider):
                     tokens_used=final_tokens,
                     prompt_tokens=final_prompt_tokens,
                     cache_read_tokens=final_cached_tokens,
+                    cache_creation_tokens=final_cache_write_tokens,
                     tool_calls=_accumulated_calls(),
                 )
 
@@ -1665,6 +1709,7 @@ class OpenAIProvider(LLMProvider):
                         tokens_used=final_tokens,
                         prompt_tokens=final_prompt_tokens,
                         cache_read_tokens=final_cached_tokens,
+                        cache_creation_tokens=final_cache_write_tokens,
                         partial=True,
                         tool_calls=_accumulated_calls(),
                     )
@@ -1715,6 +1760,7 @@ class OpenAIProvider(LLMProvider):
             final_tokens = 0
             final_prompt_tokens = 0
             final_cached_tokens = 0
+            final_cache_write_tokens = 0
             tools_accumulation: dict[int, dict[str, Any]] = {}
 
             def _accumulated_calls() -> list[NativeToolCall] | None:
@@ -1767,6 +1813,7 @@ class OpenAIProvider(LLMProvider):
                             tokens_used=final_tokens,
                             prompt_tokens=final_prompt_tokens,
                             cache_read_tokens=final_cached_tokens,
+                            cache_creation_tokens=final_cache_write_tokens,
                             partial=True,
                             tool_calls=_accumulated_calls(),
                         )
@@ -1801,7 +1848,9 @@ class OpenAIProvider(LLMProvider):
                         if chunk.usage:
                             final_tokens = chunk.usage.total_tokens
                             final_prompt_tokens = chunk.usage.prompt_tokens or 0
-                            final_cached_tokens = _openai_cached_tokens(chunk.usage)
+                            final_cached_tokens, final_cache_write_tokens = (
+                                _openai_cache_tokens(chunk.usage)
+                            )
                     except Exception:
                         pass  # malformed chunk — skip
 
@@ -1812,6 +1861,7 @@ class OpenAIProvider(LLMProvider):
                     tokens_used=final_tokens,
                     prompt_tokens=final_prompt_tokens,
                     cache_read_tokens=final_cached_tokens,
+                    cache_creation_tokens=final_cache_write_tokens,
                     tool_calls=_accumulated_calls(),
                 )
 
@@ -1842,6 +1892,7 @@ class OpenAIProvider(LLMProvider):
                         tokens_used=final_tokens,
                         prompt_tokens=final_prompt_tokens,
                         cache_read_tokens=final_cached_tokens,
+                        cache_creation_tokens=final_cache_write_tokens,
                         partial=True,
                         tool_calls=_accumulated_calls(),
                     )
