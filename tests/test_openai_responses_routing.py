@@ -129,7 +129,10 @@ def test_parse_responses_result_text_and_tools():
         usage=SimpleNamespace(
             total_tokens=42,
             input_tokens=10,
-            input_tokens_details=SimpleNamespace(cached_tokens=3),
+            input_tokens_details=SimpleNamespace(
+                cached_tokens=3,
+                cache_write_tokens=7,
+            ),
         ),
         output=[
             SimpleNamespace(
@@ -145,11 +148,12 @@ def test_parse_responses_result_text_and_tools():
             ),
         ],
     )
-    text, calls, total, prompt, cached = _parse_responses_result(resp)
+    text, calls, total, prompt, cached, cache_write = _parse_responses_result(resp)
     assert text == "hello"
     assert total == 42
     assert prompt == 10
     assert cached == 3
+    assert cache_write == 7
     assert calls is not None
     assert len(calls) == 1
     assert calls[0].tool_name == "echo"
