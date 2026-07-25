@@ -42,6 +42,9 @@ import streamlit as st
 logger = logging.getLogger(__name__)
 
 
+_EVENT_QUEUE_MAX = 256
+
+
 class _SseStreamSession:
     """Background SSE reader that keeps the sidecar connection open for HITL.
 
@@ -62,7 +65,14 @@ class _SseStreamSession:
         reasoning_effort: str | None,
         interaction: str,
     ) -> None:
-        self.events: queue.Queue[dict[str, Any] | None] = queue.Queue()
+        # Bounded: observatory events carry full LLM context snapshots (~MBs
+        # per LLM call). An unbounded queue behind a Streamlit UI that stops
+        # draining — tab backgrounded, browser closed — grows the sidecar's RSS
+        # for the whole run. Shed the oldest instead and report the count.
+        self.events: queue.Queue[dict[str, Any] | None] = queue.Queue(
+            maxsize=_EVENT_QUEUE_MAX
+        )
+        self.dropped = 0
         self.done = False
         self.waiting_prompt = False
         self.error: str | None = None
@@ -85,11 +95,11 @@ class _SseStreamSession:
         except Exception as exc:
             logger.exception("Background SSE stream failed")
             self.error = str(exc)
-            self.events.put({"type": "error", "message": f"Connection failed: {exc}"})
+            self._put({"type": "error", "message": f"Connection failed: {exc}"})
         finally:
             self.done = True
             self.waiting_prompt = False
-            self.events.put(None)
+            self._put(None)
             loop.close()
 
     async def _collect(self) -> None:
@@ -107,7 +117,25 @@ class _SseStreamSession:
                 self.waiting_prompt = True
             elif et in ("done", "error", "cancelled"):
                 self.waiting_prompt = False
-            self.events.put(event)
+            self._put(event)
+
+    def _put(self, event: dict[str, Any] | None) -> None:
+        """Enqueue, shedding the oldest event when the consumer falls behind.
+
+        Drop-oldest (rather than refusing the write) keeps the newest state
+        visible, which is what a monitoring view wants, and guarantees the
+        terminal marker always lands so the reader cannot hang.
+        """
+        while True:
+            try:
+                self.events.put_nowait(event)
+                return
+            except queue.Full:
+                try:
+                    self.events.get_nowait()
+                    self.dropped += 1
+                except queue.Empty:  # pragma: no cover - racing consumer
+                    return
 
 
 def _configure_page() -> None:

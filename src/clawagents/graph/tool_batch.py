@@ -307,6 +307,7 @@ class ToolTranscriptWriter:
         thinking: str | None,
         gemini_parts: Any,
         use_native_tools: bool,
+        added_tool_names: list[str] | None = None,
     ) -> None:
         if use_native_tools and native_call and native_call.tool_call_id:
             messages.append(
@@ -326,7 +327,15 @@ class ToolTranscriptWriter:
             )
             content = output if isinstance(output, str) else json.dumps(output)
             messages.append(
-                LLMMessage(role="tool", content=content, tool_call_id=native_call.tool_call_id)
+                LLMMessage(
+                    role="tool",
+                    content=content,
+                    tool_call_id=native_call.tool_call_id,
+                    # Carries tools this result activated so the provider layer
+                    # can reference them from the transcript instead of
+                    # rewriting the cached tool-list prefix.
+                    added_tool_names=added_tool_names,
+                )
             )
             return
         messages.append(

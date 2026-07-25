@@ -103,4 +103,55 @@ def tool_reference_blocks(
     return blocks
 
 
-__all__ = ["split_deferred_tools", "tool_reference_blocks"]
+# Models that reject client-side ``tool_reference`` blocks. Pi excludes Haiku
+# for the same reason; keep this list conservative and additive.
+_NO_TOOL_REFERENCE_SUBSTRINGS: tuple[str, ...] = ("haiku",)
+
+# Substrings that identify a provider rejection *caused by* the deferred-tool
+# wire shape, as opposed to any other 400. Used to self-heal exactly once.
+_DEFERRED_REJECTION_MARKERS: tuple[str, ...] = (
+    # Anthropic Messages
+    "defer_loading",
+    "tool_reference",
+    "tool_name",
+    # OpenAI Responses — the same mechanism, different wire nouns. Both
+    # providers must be represented here or one path silently loses its
+    # fail-soft retry.
+    "tool_search_call",
+    "tool_search_output",
+    "tool_search",
+)
+
+
+def model_supports_tool_references(model: str) -> bool:
+    """True when ``model`` accepts ``defer_loading`` / ``tool_reference``."""
+    m = (model or "").strip().lower()
+    if not m:
+        return False
+    return not any(bad in m for bad in _NO_TOOL_REFERENCE_SUBSTRINGS)
+
+
+def is_deferred_tool_rejection(exc: BaseException) -> bool:
+    """True when an exception looks like the API rejecting the deferred shape.
+
+    The wire format for ``defer_loading`` / ``tool_reference`` cannot be
+    verified offline, so callers use this to disable deferral and retry once
+    with the ordinary full tool list rather than failing the turn. A false
+    negative just surfaces the original error; a false positive costs one
+    harmless retry with a shape that always works.
+    """
+    status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+    if status is not None and int(status or 0) not in (400, 422):
+        return False
+    text = f"{type(exc).__name__}: {exc}".lower()
+    if status is None and "400" not in text and "invalid_request" not in text:
+        return False
+    return any(marker in text for marker in _DEFERRED_REJECTION_MARKERS)
+
+
+__all__ = [
+    "is_deferred_tool_rejection",
+    "model_supports_tool_references",
+    "split_deferred_tools",
+    "tool_reference_blocks",
+]

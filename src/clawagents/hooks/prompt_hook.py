@@ -61,11 +61,20 @@ class PromptHook:
         Max seconds to wait for a verdict. On timeout, the hook FAILS OPEN
         (allows the action) and emits a warn event — a noisy hook must not
         deadlock the agent.
+    fail_closed:
+        Invert every degraded path (no model, timeout, empty/unparseable
+        response) from allow to BLOCK. Default ``False`` preserves
+        availability, which is right for advisory hooks but wrong for a
+        *deny-shaped* guardrail: "block writes outside the project root"
+        expressed as a PromptHook otherwise stops applying whenever the cheap
+        model hiccups, and the bypass is silent. Set this for any hook whose
+        prompt describes something that must not happen.
     """
 
     prompt: str
     model: Optional[str] = None
     timeout_s: float = 8.0
+    fail_closed: bool = False
 
     def __post_init__(self) -> None:
         if not self.prompt or not self.prompt.strip():
@@ -101,7 +110,7 @@ class PromptHook:
                 return PromptHookVerdict(
                     ok=False, reason=f"failed-closed (no model): {e}"
                 )
-            return PromptHookVerdict(ok=True, reason=f"failed-open (no model): {e}")
+            return self._degraded(f"no model: {e}")
 
         full_prompt = self._render_prompt(payload)
 
@@ -119,12 +128,18 @@ class PromptHook:
             )
         except asyncio.TimeoutError:
             logger.warning("PromptHook: timed out after %.1fs — failing open", self.timeout_s)
-            return PromptHookVerdict(ok=True, reason="failed-open (timeout)")
+            return self._degraded("timeout")
         except Exception as e:
             logger.warning("PromptHook: llm error %s — failing open", e)
-            return PromptHookVerdict(ok=True, reason=f"failed-open (error): {e}")
+            return self._degraded(f"error: {e}")
 
-        return _parse_verdict(response.content or "")
+        return _parse_verdict(response.content or "", fail_closed=self.fail_closed)
+
+    def _degraded(self, why: str) -> "PromptHookVerdict":
+        """Verdict for a path where no real judgement was obtained."""
+        if self.fail_closed:
+            return PromptHookVerdict(ok=False, reason=f"failed-closed ({why})")
+        return PromptHookVerdict(ok=True, reason=f"failed-open ({why})")
 
     async def _resolve_llm(self, llm_resolver: Any):
         if llm_resolver is not None:
@@ -176,7 +191,7 @@ _VERDICT_SYSTEM = (
 _JSON_OBJ_RE = re.compile(r"\{[\s\S]*\}")
 
 
-def _parse_verdict(text: str) -> PromptHookVerdict:
+def _parse_verdict(text: str, *, fail_closed: bool = False) -> PromptHookVerdict:
     """Parse the model's text into a :class:`PromptHookVerdict`.
 
     Tolerates code fences, leading/trailing prose, and missing fields. If we
@@ -184,7 +199,11 @@ def _parse_verdict(text: str) -> PromptHookVerdict:
     response in the reason so users can debug their hook.
     """
     if not text:
-        return PromptHookVerdict(ok=True, reason="failed-open (empty response)", raw_response=text)
+        return PromptHookVerdict(
+            ok=not fail_closed,
+            reason=f"failed-{'closed' if fail_closed else 'open'} (empty response)",
+            raw_response=text,
+        )
 
     # Strip code fences, take the largest JSON object substring.
     candidate = text.strip()
@@ -194,11 +213,19 @@ def _parse_verdict(text: str) -> PromptHookVerdict:
 
     match = _JSON_OBJ_RE.search(candidate)
     if not match:
-        return PromptHookVerdict(ok=True, reason="failed-open (no JSON found)", raw_response=text)
+        return PromptHookVerdict(
+            ok=not fail_closed,
+            reason=f"failed-{'closed' if fail_closed else 'open'} (no JSON found)",
+            raw_response=text,
+        )
     try:
         obj = json.loads(match.group(0))
     except Exception:
-        return PromptHookVerdict(ok=True, reason="failed-open (bad JSON)", raw_response=text)
+        return PromptHookVerdict(
+            ok=not fail_closed,
+            reason=f"failed-{'closed' if fail_closed else 'open'} (bad JSON)",
+            raw_response=text,
+        )
 
     ok = bool(obj.get("ok", True))
     reason = obj.get("reason")

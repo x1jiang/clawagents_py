@@ -20,6 +20,7 @@ class ErrorClass(str, enum.Enum):
     CONTEXT_WINDOW = "context_window"
     PROVIDER_AUTH = "provider_auth"
     PROVIDER_RATE_LIMIT = "provider_rate_limit"
+    PROVIDER_QUOTA = "provider_quota"
     PROVIDER_RETRY_EXHAUSTED = "provider_retry_exhausted"
     PROVIDER_INTERNAL = "provider_internal"
     PROVIDER_TRANSPORT = "provider_transport"
@@ -77,6 +78,16 @@ RECOVERY_RECIPES: dict[ErrorClass, RecoveryRecipe] = {
         max_retries=5,
         recovery_hint="Rate limited by provider. Backing off and retrying.",
         backoff_base_s=2.0,
+    ),
+    ErrorClass.PROVIDER_QUOTA: RecoveryRecipe(
+        # Credit/billing exhaustion arrives as HTTP 429 but is permanent —
+        # retrying just adds ~60s of backoff before the wrong message.
+        retryable=False,
+        max_retries=0,
+        recovery_hint=(
+            "Provider quota or credit exhausted (not a transient rate limit). "
+            "Check billing/usage limits for this account, or switch provider/model."
+        ),
     ),
     ErrorClass.PROVIDER_RETRY_EXHAUSTED: RecoveryRecipe(
         retryable=False,
@@ -196,9 +207,18 @@ def classify_error(err: BaseException, provider: str = "") -> ErrorDescriptor:
         )
 
     # 3. Rate limit
+    # Permanent exhaustion first: these also arrive as 429, so a plain
+    # status check would misclassify "out of credit" as "slow down".
+    if any(tok in msg for tok in (
+        "insufficient_quota", "insufficient quota", "quota exceeded",
+        "exceeded your current quota", "billing", "out of budget",
+        "usage limit reached", "credit balance is too low",
+        "usagelimiterror", "payment required",
+    )):
+        return ErrorClass.PROVIDER_QUOTA
     if status == 429 or any(tok in msg for tok in (
         "rate limit", "too many requests", "rate_limit_exceeded",
-        "quota exceeded", "resource_exhausted",
+        "resource_exhausted",
     )):
         recipe = RECOVERY_RECIPES[ErrorClass.PROVIDER_RATE_LIMIT]
         return ErrorDescriptor(

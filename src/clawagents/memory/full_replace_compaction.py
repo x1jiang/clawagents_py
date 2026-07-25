@@ -17,11 +17,14 @@ Algorithm (mirrors ``xai-grok-compaction`` code_compaction):
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any, Optional, Sequence
 
 from clawagents.providers.llm import LLMMessage, LLMProvider
+
+logger = logging.getLogger(__name__)
 
 MIN_SUMMARY_SEED_CHARS = 500
 DEFAULT_MAX_SUMMARY_ATTEMPTS = 3
@@ -406,6 +409,24 @@ def sanitize_compacted_history(messages: list[LLMMessage]) -> list[LLMMessage]:
     return out
 
 
+# Opt-in floor (0 = off). Grok ships 5_000, but clawagents already gates
+# compaction upstream on ``current_tokens > compaction_budget``, which is far
+# above any such floor — so enabling it by default would only reject small
+# direct calls without preventing a single wasted summarization in the real
+# path. Callers who summarize outside the budget gate can pass their own.
+MIN_COMPACTABLE_TOKENS = 0
+# A summary must shed at least this fraction of what it replaced. A summary
+# that is nearly as long as the history is a wasted LLM call *and* a lossy
+# swap — keep the real transcript instead.
+MAX_REDUCTION_RATIO = 0.8
+# A summary carries fixed overhead (preamble, section scaffolding), so below
+# this the ratio says more about that overhead than about the compaction.
+# Only compare sizes once there is enough history for the ratio to mean
+# something — the case the guard actually exists for is a *large* history
+# being swapped for an equally large summary.
+REDUCTION_CHECK_MIN_TOKENS = 1_000
+
+
 def _rough_message_tokens(messages: Sequence[LLMMessage]) -> int:
     total = 0
     for m in messages:
@@ -426,6 +447,7 @@ async def apply_full_replace_compaction(
     transcript_hint: str | None = None,
     lossy: bool = False,
     history_then_steps: bool | None = None,
+    min_compactable_tokens: int = MIN_COMPACTABLE_TOKENS,
 ) -> list[LLMMessage] | None:
     """Run full-replace compaction. Returns None when not applicable."""
     system_msgs = [m for m in messages if m.role == "system"]
@@ -486,9 +508,33 @@ async def apply_full_replace_compaction(
     if not conv.strip():
         return None
 
+    # Guard 1 (opt-in): nothing meaningful to reclaim — skip the LLM call.
+    older_tokens = _rough_message_tokens(older)
+    if min_compactable_tokens and older_tokens < min_compactable_tokens:
+        logger.debug(
+            "compaction skipped: only ~%d tokens of history (< %d)",
+            older_tokens,
+            min_compactable_tokens,
+        )
+        return None
+
     raw_summary = await sample_full_replace_summary(
         llm, conv, task_context=task_context
     )
+
+    # Guard 2: the summary must actually be smaller than what it replaces.
+    summary_tokens = max(1, len(str(raw_summary or "").encode("utf-8")) // 4)
+    if older_tokens >= REDUCTION_CHECK_MIN_TOKENS and summary_tokens > int(
+        older_tokens * MAX_REDUCTION_RATIO
+    ):
+        logger.warning(
+            "compaction discarded: summary ~%d tokens vs ~%d replaced "
+            "(< %.0f%% reduction) — keeping the original history",
+            summary_tokens,
+            older_tokens,
+            (1 - MAX_REDUCTION_RATIO) * 100,
+        )
+        return None
     agents = agents_md if agents_md is not None else load_agents_md_reminder(workspace)
 
     parts = CompactedHistoryParts(
@@ -507,6 +553,9 @@ async def apply_full_replace_compaction(
 
 
 __all__ = [
+    "MAX_REDUCTION_RATIO",
+    "REDUCTION_CHECK_MIN_TOKENS",
+    "MIN_COMPACTABLE_TOKENS",
     "MIN_SUMMARY_SEED_CHARS",
     "CONTINUATION_PREAMBLE",
     "format_compact_summary",
