@@ -1,3 +1,12 @@
+## v6.20.52 — Deferred tools, background notices, and guardrail hardening (July 2026)
+
+- Deferred / cache-preserving mid-run tool activation is now fully wired for both Anthropic (`defer_loading` / `tool_reference`) and OpenAI Responses (`tool_search_call` / `tool_search_output`). Fail-soft: a provider rejection of the wire shape disables deferral for that provider and replays the request with the ordinary tool list, so it can never cost a turn (still opt-in via `deferred_tool_loading`).
+- Background job completions are announced on the next tool result, scoped per registry so concurrent agents/subagents never see each other's jobs.
+- `PromptHook(fail_closed=True)` for deny-shaped guardrails: degraded paths (no model, timeout, empty/unparseable response) now BLOCK instead of silently allowing.
+- New `PROVIDER_QUOTA` error class: credit/billing exhaustion (HTTP 429) is no longer retried as a transient rate limit.
+- Full-replace compaction reduction guard: discard a summary that fails to meaningfully shrink the history, plus an opt-in minimum-tokens floor.
+- Context Observatory SSE queue is bounded (drop-oldest) to cap sidecar memory when the UI stops draining.
+
 ## v6.20.51 — xAI Grok API provider + pricing profiles (July 2026)
 
 - Route bare `grok-*` / `xai/…` models through `https://api.x.ai/v1` chat completions with `XAI_API_KEY` / `GROK_API_KEY`.

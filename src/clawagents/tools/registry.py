@@ -353,6 +353,11 @@ class ToolRegistry:
         result_cache: Any = None,
     ):
         self.tools: Dict[str, Tool] = {}
+        # Background jobs started through this registry, and which of their
+        # completions have already been announced to the model. Per-registry
+        # so concurrent agents/subagents never see each other's jobs.
+        self._owned_jobs: set[str] = set()
+        self._announced_jobs: set[str] = set()
         self._description_cache: Optional[str] = None
         self._tool_timeout_s = tool_timeout_s
         self._validate_args = validate_args
@@ -620,6 +625,56 @@ class ToolRegistry:
             )
             return banner + "\n\n".join(pages), None
 
+    def _note_owned_job(self, tool_name: str, result: "ToolResult") -> None:
+        """Remember jobs started through *this* registry, for completion notices."""
+        if tool_name != "task_create" or not result.success:
+            return
+        try:
+            payload = json.loads(result.raw_output if isinstance(result.raw_output, str) else "{}")
+            job_id = str(payload.get("job_id") or "")
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return
+        if job_id:
+            self._owned_jobs.add(job_id)
+
+    def _append_background_notice(self, tool_name: str, result: "ToolResult") -> "ToolResult":
+        """Surface finished background jobs on the next tool result.
+
+        Scoped to jobs this registry started: a process can host several
+        concurrent agents/subagents sharing one job manager, and announcing
+        another agent's completion here would be both wrong and confusing.
+
+        Skipped for the background tools themselves — they already report job
+        state, so a notice inside ``task_status`` output is redundant.
+        """
+        if tool_name in ("task_create", "task_status", "task_cancel", "task_wait"):
+            return result
+        if not self._owned_jobs:
+            return result
+        try:
+            from clawagents.tools.background_task import background_completion_notice
+
+            # Ask the manager these jobs were actually started on, rather than
+            # assuming the process-default one — embedders and tests can wire
+            # their own, and querying the wrong manager silently finds nothing.
+            creator = self.tools.get("task_create")
+            notice = background_completion_notice(
+                self._owned_jobs,
+                self._announced_jobs,
+                manager=getattr(creator, "_manager", None),
+            )
+        except Exception:  # noqa: BLE001 - never break a tool call over a notice
+            return result
+        if not notice or not isinstance(result.output, str):
+            return result
+        return ToolResult(
+            success=result.success,
+            output=result.output + notice,
+            error=result.error,
+            raw_output=result.raw_output,
+            added_tool_names=result.added_tool_names,
+        )
+
     async def execute_tool(
         self,
         tool_name: str,
@@ -848,6 +903,7 @@ class ToolRegistry:
         if is_cacheable:
             cached = self._result_cache.get(tool_name, effective_args)
             if cached is not None:
+                cached = self._append_background_notice(tool_name, cached)
                 if auto_skill_prefix and isinstance(cached.output, str):
                     return ToolResult(
                         success=cached.success,
@@ -960,9 +1016,15 @@ class ToolRegistry:
                 raw_output=full_output,
             )
 
-            # Cache successful results for cacheable tools
+            # Cache successful results for cacheable tools.
+            # Cache BEFORE appending completion notices: a notice is a one-shot
+            # announcement about *this* moment, and baking it into a cached
+            # entry would replay a stale "job finished" on every future hit.
             if is_cacheable and wrapped.success:
                 self._result_cache.set(tool_name, effective_args, wrapped)
+
+            self._note_owned_job(tool_name, wrapped)
+            wrapped = self._append_background_notice(tool_name, wrapped)
 
             if wrapped.success and tool_name in _WRITE_TOOLS:
                 prompt_idx = None

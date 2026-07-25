@@ -216,6 +216,7 @@ class ToolTurnExecutor:
             thinking=thinking,
             gemini_parts=getattr(response, "gemini_parts", None),
             use_native_tools=self._use_native_tools,
+            added_tool_names=getattr(tool_result, "added_tool_names", None),
         )
         await self._maybe_rethink(messages, state, round_index)
 

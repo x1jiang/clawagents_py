@@ -267,6 +267,22 @@ class BackgroundJobManager:
         """Return all known jobs (running + completed)."""
         return list(self._jobs.values())
 
+    def completed_jobs(self, job_ids: "set[str] | None" = None) -> list[BackgroundJob]:
+        """Finished jobs, oldest first. Non-destructive.
+
+        ``job_ids`` restricts the result to jobs the caller owns. That matters
+        because one process can host several concurrent agents/subagents over a
+        shared manager — draining globally would let one agent consume (and be
+        told about) another's job completions.
+        """
+        ready = [
+            job
+            for job in self._jobs.values()
+            if not job.running and (job_ids is None or job.id in job_ids)
+        ]
+        ready.sort(key=lambda j: j.ended_at or 0.0)
+        return ready
+
     async def await_complete(
         self,
         job_id: str,
