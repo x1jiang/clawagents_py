@@ -7,6 +7,7 @@ and ``RunContext.usage`` so callers and tools can read real-time stats.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field, asdict
 from typing import Any
 
@@ -25,6 +26,10 @@ class RequestUsage:
     cache_creation_tokens: int = 0
     time_to_first_token_ms: float | None = None
     peak_memory_bytes: int = 0
+    # Wall-clock of the call. Prompt caches expire on idle (Anthropic's default
+    # TTL is 5 minutes), so attributing a cache miss to "you were idle" rather
+    # than "your context changed" needs the gap between calls.
+    started_at: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -92,6 +97,7 @@ class Usage:
             cache_creation_tokens=cache_creation_tokens,
             time_to_first_token_ms=time_to_first_token_ms,
             peak_memory_bytes=peak_memory_bytes,
+            started_at=time.time(),
         )
         self.requests += 1
         self.prompt_tokens += prompt_tokens

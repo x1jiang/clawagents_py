@@ -71,6 +71,7 @@ class RunFinalizer:
         await self._finish_hooks(state)
         await self._run_dream(state)
         await self._notify_taxonomy(state)
+        self._emit_cache_waste()
         self._events.emit(
             "agent_done",
             {
@@ -82,6 +83,34 @@ class RunFinalizer:
         )
         self._flush_stranded_interjects()
         return state
+
+    def _emit_cache_waste(self) -> None:
+        """Report prompt-cache re-billing, with a cause, when it is material.
+
+        Silent by default: emits nothing on a healthy run, on a provider that
+        does not report cache reads, or when the shortfall is under the block
+        granularity floor.
+        """
+        try:
+            from clawagents.cache_waste import analyze_cache_waste
+
+            meta = getattr(self._run_context, "_metadata", None)
+            exempt = (
+                meta.get("cache_context_change_rounds") or ()
+                if isinstance(meta, dict)
+                else ()
+            )
+            report = analyze_cache_waste(
+                self._run_context.usage.per_request,
+                context_change_rounds=exempt,
+            )
+            if report.significant:
+                self._events.emit(
+                    "cache_waste",
+                    {"message": report.summary(), **report.to_dict()},
+                )
+        except Exception:
+            logger.debug("cache waste analysis failed", exc_info=True)
 
     def _write_session_completion(self, state: Any) -> None:
         if self._session_writer is None:

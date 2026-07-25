@@ -155,6 +155,11 @@ def map_agent_event(kind: str, data: dict[str, Any]) -> dict[str, Any] | None:
         }
 
     if kind == "usage":
+        # Single mapper for both usage shapes: the agent-loop `usage` event and
+        # the `on_stream_event` forward. A second `kind == "usage"` block used to
+        # sit further down carrying the cache/reasoning fields, but this branch
+        # returns unconditionally so that one was unreachable — prompt-cache
+        # benefit never reached the dashboard. Keep every field in one place.
         return {
             "type": "usage",
             "promptTokens": _num(
@@ -177,6 +182,16 @@ def map_agent_event(kind: str, data: dict[str, Any]) -> dict[str, Any] | None:
                 or data.get("prompt_tokens")
                 or data.get("input_tokens")
             ),
+            "cachedInputTokens": _num(
+                data.get("cached_input_tokens") or data.get("cachedInputTokens")
+            ),
+            "cacheCreationTokens": _num(
+                data.get("cache_creation_tokens") or data.get("cacheCreationTokens")
+            ),
+            "reasoningTokens": _num(
+                data.get("reasoning_tokens") or data.get("reasoningTokens")
+            ),
+            "model": data.get("model"),
         }
 
     if kind == "compact_progress":
@@ -200,23 +215,6 @@ def map_agent_event(kind: str, data: dict[str, Any]) -> dict[str, Any] | None:
 
     if kind == "observatory":
         return {"type": "observatory_event", "event": data}
-
-    if kind == "usage":
-        # Usage event forwarded from on_stream_event
-        return {
-            "type": "usage",
-            "promptTokens": _num(
-                data.get("input_tokens") or data.get("prompt_tokens")
-            ),
-            "completionTokens": _num(
-                data.get("output_tokens") or data.get("completion_tokens")
-            ),
-            "totalTokens": _num(data.get("total_tokens")),
-            "cachedInputTokens": _num(data.get("cached_input_tokens")),
-            "cacheCreationTokens": _num(data.get("cache_creation_tokens")),
-            "reasoningTokens": _num(data.get("reasoning_tokens")),
-            "model": data.get("model"),
-        }
 
     if kind == "context":
         return {"type": "status", "message": str(data.get("message") or "context")}

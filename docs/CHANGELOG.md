@@ -1,3 +1,11 @@
+## v6.20.51 — xAI Grok API provider + pricing profiles (July 2026)
+
+- Route bare `grok-*` / `xai/…` models through `https://api.x.ai/v1` chat completions with `XAI_API_KEY` / `GROK_API_KEY`.
+- Clamp Grok reasoning effort to levels xAI accepts (`none`/`minimal` → `low`, `max` → `xhigh`).
+- Model profiles from [xAI pricing](https://docs.x.ai/developers/pricing): Grok 4.5 (500K), 4.3 / 4.20 (1M), Build 0.1 (256K) with ≥200K long-context cliff.
+- Protect host-injected `XAI_API_KEY` / `GROK_API_KEY` across dotenv load.
+- Also ships: prompt-cache waste attribution, deferred tools, marketplace pinning, and worktree replication fixes.
+
 ## v6.20.48 — Observatory HITL + gateway observability fixes (July 2026)
 
 - Keep Context Observatory SSE open across permission/ask-user prompts (background stream worker)

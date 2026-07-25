@@ -33,6 +33,8 @@ LITELLM_PROVIDER_PREFIXES: tuple[str, ...] = (
     "openai/",
     "gemini/",
     "azure/",
+    "xai/",
+    "grok/",
 )
 
 ProviderKind = Literal[
@@ -138,6 +140,19 @@ def strip_bedrock_prefix(model: str) -> str:
     return (model or "").strip()
 
 
+# xAI serves Grok over an OpenAI-compatible API, so these route through the
+# OpenAI client with a base_url override rather than a bespoke provider.
+XAI_BASE_URL = "https://api.x.ai/v1"
+
+
+def is_grok_model(model: str) -> bool:
+    """True for xAI Grok model ids (``grok-4.5``, ``xai/grok-4.5``, …)."""
+    ref = parse_model_ref(model)
+    if ref.prefix_hint in ("xai", "grok"):
+        return True
+    return ref.bare_id.strip().lower().startswith("grok")
+
+
 def is_ollama_model(model: str) -> bool:
     ref = parse_model_ref(model)
     if ref.prefix_hint == "ollama":
@@ -154,6 +169,9 @@ def normalize_provider_hint(hint: str | None) -> Optional[str]:
     if h in ("google", "google-genai"):
         return "gemini"
     if h in ("azure", "azure-openai"):
+        return "openai"
+    # xAI is OpenAI-wire-compatible; create_provider supplies the base_url/key.
+    if h in ("xai", "grok"):
         return "openai"
     if h in ("openai", "anthropic", "gemini", "bedrock", "ollama"):
         return h

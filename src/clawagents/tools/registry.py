@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Protocol
 
 
 class ToolResult:
-    __slots__ = ("success", "output", "error", "raw_output")
+    __slots__ = ("success", "output", "error", "raw_output", "added_tool_names")
 
     def __init__(
         self,
@@ -24,10 +24,15 @@ class ToolResult:
         error: Optional[str] = None,
         *,
         raw_output: str | list[dict[str, Any]] | None = None,
+        added_tool_names: Optional[list[str]] = None,
     ):
         self.success = success
         self.output = output
         self.error = error
+        # Tools this result activated. Carried onto the tool message so the
+        # provider layer can introduce them from the transcript rather than by
+        # rewriting the cached tool-list prefix.
+        self.added_tool_names = added_tool_names
         # Full pre-truncation payload for artifact archival / retrieve_tool_result.
         # ``output`` may be a UI/model preview; ``raw_output`` keeps the original.
         self.raw_output = output if raw_output is None else raw_output

@@ -220,8 +220,7 @@ class EventStore:
 
         # Handle .zip file or package
         if p.is_file() and p.suffix.lower() == ".zip":
-            history_dir = get_history_dir()
-            history_dir.mkdir(parents=True, exist_ok=True)
+            history_dir = ensure_history_dir()
             extract_dir = history_dir / p.stem
             extract_dir.mkdir(parents=True, exist_ok=True)
             with zipfile.ZipFile(p, "r") as zf:
@@ -274,8 +273,7 @@ class EventStore:
         import datetime
         import logging
 
-        history_dir = get_history_dir()
-        history_dir.mkdir(parents=True, exist_ok=True)
+        history_dir = ensure_history_dir()
 
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         slug = (chat_id or "session").replace("/", "_")[:40]
@@ -457,6 +455,30 @@ def get_history_dir() -> Path:
         return get_context_observatory_dir(create=False)
     except Exception:
         return Path.cwd() / ".clawagents" / "context-observatory"
+
+
+def ensure_history_dir(history_dir: Path | None = None) -> Path:
+    """Create the observatory dir and make it self-ignoring for git.
+
+    Saved sessions embed complete LLM context — every message, tool result and
+    pasted file. ``.clawagents/`` is otherwise a *committed* directory (it holds
+    ``vscode_settings.json``), so without this an API key or a chunk of patient
+    data pasted into chat lands in a path a routine ``git add .`` will stage.
+    """
+    target = history_dir if history_dir is not None else get_history_dir()
+    target.mkdir(parents=True, exist_ok=True)
+    marker = target / ".gitignore"
+    if not marker.exists():
+        try:
+            marker.write_text(
+                "# Context Observatory sessions embed full LLM context\n"
+                "# (messages, tool results, pasted file contents). Never commit.\n"
+                "*\n",
+                encoding="utf-8",
+            )
+        except OSError:
+            pass  # best-effort: a read-only dir must not break saving
+    return target
 
 
 

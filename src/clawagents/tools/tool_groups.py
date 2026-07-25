@@ -232,4 +232,5 @@ class ActivateToolGroupTool:
                     "active_count": len(self._registry.active_tool_names() or []),
                 }
             ),
+            added_tool_names=list(added),
         )

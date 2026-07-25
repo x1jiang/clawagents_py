@@ -167,3 +167,69 @@ def test_identical_and_overlapping_read_reuse():
 def test_core_tool_names_cover_coding_basics():
     for n in ("read_file", "execute", "grep", "activate_tool_group"):
         assert n in CORE_TOOL_NAMES
+
+
+def test_turn_driver_soft_trim_gate_respects_long_context_cliff():
+    """TurnDriver's outer gate must not shadow the economic soft-trim trigger.
+
+    ``_soft_trim_messages`` caps its own budget at 0.95 x the pricing cliff
+    (258K for Luna), but ``TurnDriver._prepare_messages`` gates the call on
+    0.75 x the compaction budget (669K). Without the same clamp on the gate,
+    soft-trim was never invoked in the 258K-669K band — exactly the range
+    where Luna bills the 2x/1.5x long-context premium.
+
+    Uses ``apply_patch`` results because micro-compact only sheds tools in
+    ``_COMPACTABLE_TOOLS``; soft-trim is the only thing that can reclaim these.
+    """
+    import asyncio
+
+    from clawagents.graph.turn_driver import TurnDriver
+
+    messages = [LLMMessage(role="system", content="sys")]
+    for i in range(650):
+        messages.append(
+            LLMMessage(
+                role="assistant",
+                content="",
+                tool_calls_meta=[{"id": f"c{i}", "name": "apply_patch", "args": {}}],
+            )
+        )
+        messages.append(
+            LLMMessage(role="tool", tool_call_id=f"c{i}", content="x" * 6_000)
+        )
+
+    emitted: list[str] = []
+
+    class _Events:
+        def emit(self, kind, data=None):
+            msg = (data or {}).get("message")
+            if msg:
+                emitted.append(msg)
+
+    async def _passthrough_compact(msgs):
+        return msgs
+
+    async def _noop_external(msgs):
+        return None
+
+    driver = TurnDriver.__new__(TurnDriver)
+    driver._token_ledger = None
+    driver._run_context = None  # cache-waste bookkeeping no-ops without one
+    driver._resolved_model_name = "gpt-5.6-luna"
+    driver._context_window = 1_050_000
+    driver._token_multiplier = 1.0
+    driver._events = _Events()
+    driver._external_hooks = None
+    driver._before_llm = None
+    driver._cached_system_tokens = 0
+    driver._compact = _passthrough_compact
+    driver._apply_external_pre_llm = _noop_external
+    driver._apply_before_llm = lambda msgs: msgs
+
+    out = asyncio.run(driver._prepare_messages(list(messages)))
+
+    assert any("soft-trim" in m for m in emitted), (
+        "soft-trim never fired inside the long-context pricing band; "
+        f"emitted={emitted}"
+    )
+    assert len(out) == len(messages)  # trims content, never drops pairs
