@@ -38,6 +38,7 @@ class LLMMessage:
         tool_calls_meta: list[dict[str, Any]] | None = None,
         gemini_parts: list[dict[str, Any]] | None = None,
         thinking: str | None = None,
+        added_tool_names: list[str] | None = None,
     ):
         self.role = role
         self.content = content
@@ -45,6 +46,10 @@ class LLMMessage:
         self.tool_calls_meta = tool_calls_meta    # For role="assistant": list of {id, name, args}
         self.gemini_parts = gemini_parts          # Preserved Gemini response parts (thought/thought_signature)
         self.thinking = thinking                  # Feature H: preserved <think> block content
+        # For role="tool": tools this result activated. Lets the provider layer
+        # reference them from the transcript instead of appending them to the
+        # tool list, which would rewrite the cached prompt prefix.
+        self.added_tool_names = added_tool_names
 
 
 class NativeToolSchema:
@@ -824,11 +829,33 @@ def normalize_reasoning_effort(value: str | None) -> str | None:
     return v if v in _REASONING_EFFORT_VALUES else None
 
 
+# xAI Grok offers exactly these levels; `none` / `minimal` are rejected by the
+# server (xai-grok-pager/src/slash/commands/effort_levels.rs), so an unsupported
+# level must be mapped rather than forwarded.
+_GROK_EFFORT_LEVELS: frozenset[str] = frozenset({"low", "medium", "high", "xhigh"})
+
+
+def clamp_reasoning_effort_for_model(model: str, effort: str | None) -> str | None:
+    """Map an effort level onto what ``model`` actually accepts."""
+    if not effort:
+        return effort
+    from clawagents.providers.model_classify import is_grok_model
+
+    if not is_grok_model(model):
+        return effort
+    if effort in _GROK_EFFORT_LEVELS:
+        return effort
+    # `none`/`minimal` would 400; `max` is not offered. Pick the nearest level.
+    return "low" if effort in ("none", "minimal") else "xhigh"
+
+
 def model_supports_reasoning_effort(model: str) -> bool:
     """Heuristic: models that accept ``reasoning_effort`` / Responses ``reasoning``."""
     m = _bare_openai_model_id(model)
     if not m:
         return False
+    if m.startswith("grok"):
+        return True
     if m.startswith(("o1", "o3", "o4")):
         return True
     if m.startswith(("gpt-5.5", "gpt-5.6")):
@@ -922,7 +949,9 @@ def _apply_tool_reasoning_compat(
     preferred: str | None = None,
 ) -> None:
     """Chat Completions reasoning_effort (forces none for GPT-5.5/5.6 + tools)."""
-    effort = normalize_reasoning_effort(preferred)
+    effort = clamp_reasoning_effort_for_model(
+        model, normalize_reasoning_effort(preferred)
+    )
     if effort:
         kwargs["reasoning_effort"] = effort
     # Chat Completions + tools on GPT-5.5/5.6 still requires none.
@@ -3581,6 +3610,28 @@ def create_provider(
         base_url=config.openai_base_url,
         provider_hint=provider_hint or ref.prefix_hint,
     )
+
+    # ── xAI Grok (OpenAI-compatible wire at https://api.x.ai/v1) ────────
+    # Handled before the generic OpenAI path so a bare ``grok-4.5`` works with
+    # no base_url configured. An explicit base_url still wins (proxies/gateways).
+    from clawagents.providers.model_classify import XAI_BASE_URL, is_grok_model
+
+    if is_grok_model(ref.raw or model_name):
+        if not (config.openai_base_url or "").strip():
+            config.openai_base_url = XAI_BASE_URL
+        if not (config.openai_api_key or "").strip():
+            config.openai_api_key = (
+                os.environ.get("XAI_API_KEY")
+                or os.environ.get("GROK_API_KEY")
+                or config.openai_api_key
+            )
+        # xAI's documented surface is /v1/chat/completions. Left on "auto" the
+        # unknown-gateway heuristic can pick Responses, which api.x.ai does not
+        # serve the same way; an explicit wire_api still wins.
+        if _normalize_wire_api(config.openai_wire_api) == "auto":
+            config.openai_wire_api = "chat_completions"
+        config.openai_model = model_name
+        return OpenAIProvider(config)
 
     if kind == "gemini" or lower.startswith("gemini"):
         if not _HAS_GEMINI:

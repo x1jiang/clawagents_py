@@ -91,6 +91,11 @@ _FEATURE_DEFAULTS: dict[str, str] = {
     "execute_background":   "1",   # Optional is_background on execute tool
     "rtk_wrap":             "1",   # Auto-wrap noisy execute cmds with rtk (if installed)
     "aggressive_tool_crush": "1",  # Lower crush thresholds in agent_loop (not hooks)
+    # Off until the Anthropic `defer_loading` / `tool_reference` wire shape has
+    # been smoke-tested against the live API — an incorrect block shape 400s
+    # every request that activates a tool. The partition logic it gates
+    # (providers/deferred_tools.py) is provider-agnostic and already covered.
+    "deferred_tool_loading": "0",
     "execute_shell_session": "1",  # Persist cwd across execute (Grok shell-state slice)
     "execute_shell_env":    "1",   # Sticky env overlay across execute (with shell_session)
     "execute_auto_background": "1",  # On FG timeout, adopt process as background job

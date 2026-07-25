@@ -15,6 +15,9 @@ from urllib.parse import urlparse
 Kind = Literal["skill", "plugin"]
 
 
+_SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
+
+
 @dataclass(frozen=True)
 class InstallResult:
     ok: bool
@@ -22,6 +25,7 @@ class InstallResult:
     name: str
     path: str
     error: str | None = None
+    commit: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -30,7 +34,53 @@ class InstallResult:
             "name": self.name,
             "path": self.path,
             "error": self.error,
+            "commit": self.commit,
         }
+
+
+def _git(args: list[str], *, timeout: int = 180) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args], capture_output=True, text=True, timeout=timeout
+    )
+
+
+def _clone_pinned(
+    source: str, dest: Path, ref: str | None
+) -> tuple[bool, str]:
+    """Clone *source* into *dest*, pinned to *ref* when given.
+
+    Returns ``(ok, error)``. A full-SHA ref cannot be passed to
+    ``--branch``, so fall back to init + fetch of the exact object.
+    """
+    if not ref:
+        proc = _git(["clone", "--depth", "1", source, str(dest)])
+        return proc.returncode == 0, proc.stderr.strip() or "git clone failed"
+
+    proc = _git(["clone", "--depth", "1", "--branch", ref, source, str(dest)])
+    if proc.returncode == 0:
+        return True, ""
+
+    # `--branch` rejects raw commit SHAs; fetch the object directly instead.
+    if dest.exists():
+        shutil.rmtree(dest, ignore_errors=True)
+    dest.mkdir(parents=True, exist_ok=True)
+    for step in (
+        ["init", "--quiet", str(dest)],
+        ["-C", str(dest), "remote", "add", "origin", source],
+        ["-C", str(dest), "fetch", "--depth", "1", "origin", ref],
+        ["-C", str(dest), "checkout", "--quiet", "FETCH_HEAD"],
+    ):
+        step_proc = _git(step)
+        if step_proc.returncode != 0:
+            return False, (
+                step_proc.stderr.strip() or f"git {step[0]} failed for ref {ref!r}"
+            )
+    return True, ""
+
+
+def _resolve_commit(repo: Path) -> str:
+    proc = _git(["-C", str(repo), "rev-parse", "HEAD"], timeout=30)
+    return proc.stdout.strip() if proc.returncode == 0 else ""
 
 
 def marketplace_root(workspace: str | Path | None = None) -> Path:
@@ -103,8 +153,18 @@ def install_from_source(
     kind: Kind | None = None,
     workspace: str | Path | None = None,
     name: str | None = None,
+    ref: str | None = None,
+    expect_sha: str | None = None,
 ) -> InstallResult:
-    """Install a skill or plugin from a local path or git URL."""
+    """Install a skill or plugin from a local path or git URL.
+
+    ``ref`` pins the checkout to a branch, tag, or commit SHA. ``expect_sha``
+    additionally *verifies* the resolved commit and refuses the install on
+    mismatch — so a moved tag or a compromised upstream cannot silently swap
+    third-party instruction content that will later be fed to the model. The
+    resolved commit is recorded in ``installed.json`` either way, which is what
+    makes a later re-install reproducible.
+    """
     from clawagents.config.features import is_enabled
 
     if not is_enabled("marketplace"):
@@ -113,27 +173,43 @@ def install_from_source(
     ws = Path(workspace or Path.cwd()).resolve()
     src_path: Path | None = None
     tmp: tempfile.TemporaryDirectory[str] | None = None
+    commit: str | None = None
+
+    expected = (expect_sha or "").strip().lower()
+    if expected and not _SHA_RE.match(expected):
+        return InstallResult(
+            False, kind or "skill", "", "", f"expect_sha is not a commit SHA: {expect_sha!r}"
+        )
 
     try:
         if _is_git_url(source):
             tmp = tempfile.TemporaryDirectory(prefix="claw-mkt-")
             dest = Path(tmp.name) / "repo"
-            proc = subprocess.run(
-                ["git", "clone", "--depth", "1", source, str(dest)],
-                capture_output=True,
-                text=True,
-                timeout=180,
-            )
-            if proc.returncode != 0:
-                return InstallResult(
-                    False,
-                    kind or "skill",
-                    "",
-                    "",
-                    proc.stderr.strip() or "git clone failed",
-                )
+            ok, err = _clone_pinned(source, dest, ref)
+            if not ok:
+                return InstallResult(False, kind or "skill", "", "", err)
+            commit = _resolve_commit(dest) or None
+            if expected:
+                if not commit:
+                    return InstallResult(
+                        False, kind or "skill", "", "",
+                        "cannot verify expect_sha: unable to resolve HEAD",
+                    )
+                # Allow an abbreviated expect_sha, but only as a prefix of the
+                # full resolved commit — never the other way around.
+                if not commit.lower().startswith(expected):
+                    return InstallResult(
+                        False, kind or "skill", "", "",
+                        f"commit mismatch: expected {expected}, got {commit}",
+                        commit,
+                    )
             src_path = dest
         else:
+            if ref or expected:
+                return InstallResult(
+                    False, kind or "skill", "", "",
+                    "ref/expect_sha pinning only applies to git sources",
+                )
             src_path = Path(source).expanduser().resolve()
             if not src_path.exists():
                 return InstallResult(False, kind or "skill", "", "", f"not found: {source}")
@@ -156,8 +232,8 @@ def install_from_source(
                 return InstallResult(
                     False, "plugin", pkg_name, str(target), "invalid plugin.json"
                 )
-            _record_install(ws, resolved_kind, loaded.name, str(target), source)
-            return InstallResult(True, "plugin", loaded.name, str(target))
+            _record_install(ws, resolved_kind, loaded.name, str(target), source, commit)
+            return InstallResult(True, "plugin", loaded.name, str(target), None, commit)
 
         # skill
         target_dir = skills_install_dir(ws) / slug
@@ -177,8 +253,8 @@ def install_from_source(
                         False, "skill", pkg_name, "", "no SKILL.md in source"
                     )
                 _copy_tree(found.parent, target_dir)
-        _record_install(ws, "skill", pkg_name, str(target_dir), source)
-        return InstallResult(True, "skill", pkg_name, str(target_dir))
+        _record_install(ws, "skill", pkg_name, str(target_dir), source, commit)
+        return InstallResult(True, "skill", pkg_name, str(target_dir), None, commit)
     finally:
         if tmp is not None:
             tmp.cleanup()
@@ -190,6 +266,7 @@ def _record_install(
     name: str,
     path: str,
     source: str,
+    commit: str | None = None,
 ) -> None:
     root = marketplace_root(workspace)
     index = root / "installed.json"
@@ -203,7 +280,12 @@ def _record_install(
         p for p in data.get("packages", [])
         if not (p.get("kind") == kind and p.get("name") == name)
     ]
-    packages.append({"kind": kind, "name": name, "path": path, "source": source})
+    entry: dict[str, Any] = {"kind": kind, "name": name, "path": path, "source": source}
+    if commit:
+        # Pin the exact upstream state so a re-install is reproducible and a
+        # later drift is detectable (pass it back as expect_sha).
+        entry["commit"] = commit
+    packages.append(entry)
     data["packages"] = packages
     index.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 

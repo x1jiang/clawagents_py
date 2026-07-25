@@ -61,6 +61,55 @@ MODEL_PROFILES: dict[str, dict[str, int | float]] = {
     "o1-pro": {"max_input_tokens": 200_000, "budget_ratio": 0.80},
     "o1-mini": {"max_input_tokens": 128_000, "budget_ratio": 0.80},
     "o1": {"max_input_tokens": 200_000, "budget_ratio": 0.80},
+    # ── xAI — Grok (OpenAI-compatible API at https://api.x.ai/v1) ──────
+    # Context windows + long-context pricing cliff (≥200K prompt → 2× all
+    # token rates) from https://docs.x.ai/developers/pricing (Jul 2026).
+    "grok-4.20-multi-agent-0309": {
+        "max_input_tokens": 1_000_000,
+        "budget_ratio": 0.85,
+        "long_context_threshold": 200_000,
+    },
+    "grok-4.20-0309-reasoning": {
+        "max_input_tokens": 1_000_000,
+        "budget_ratio": 0.85,
+        "long_context_threshold": 200_000,
+    },
+    "grok-4.20-0309-non-reasoning": {
+        "max_input_tokens": 1_000_000,
+        "budget_ratio": 0.85,
+        "long_context_threshold": 200_000,
+    },
+    "grok-4.20": {
+        "max_input_tokens": 1_000_000,
+        "budget_ratio": 0.85,
+        "long_context_threshold": 200_000,
+    },
+    "grok-build-0.1": {
+        "max_input_tokens": 256_000,
+        "budget_ratio": 0.85,
+        "long_context_threshold": 200_000,
+    },
+    "grok-build": {
+        "max_input_tokens": 256_000,
+        "budget_ratio": 0.85,
+        "long_context_threshold": 200_000,
+    },
+    "grok-4.5": {
+        "max_input_tokens": 500_000,
+        "budget_ratio": 0.85,
+        "long_context_threshold": 200_000,
+    },
+    "grok-4.3": {
+        "max_input_tokens": 1_000_000,
+        "budget_ratio": 0.85,
+        "long_context_threshold": 200_000,
+    },
+    "grok-4": {
+        "max_input_tokens": 256_000,
+        "budget_ratio": 0.85,
+        "long_context_threshold": 200_000,
+    },
+    "grok": {"max_input_tokens": 131_072, "budget_ratio": 0.85},
     # ── Google — Gemini 3.x (1M–2M context) ────────────────────────────
     "gemini-3.6-flash": {"max_input_tokens": 1_000_000, "budget_ratio": 0.90},
     "gemini-3.6": {"max_input_tokens": 1_000_000, "budget_ratio": 0.90},
@@ -136,6 +185,7 @@ def resolve_model_profile(model_name: str | None) -> dict[str, int | float] | No
         "openai.",
         "anthropic.",
         "amazon.",
+        "xai.",
     ):
         if name.startswith(prefix):
             name = name[len(prefix) :]

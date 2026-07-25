@@ -168,6 +168,13 @@ class TurnDriver:
             return await self._recover_from_error(messages, state, round_index, exc)
 
         self._resolved_model_name = result.resolved_model_name
+        # Calibrate the ledger against the provider's exact input count. Without
+        # this the "incremental" half runs forever on heuristic estimates and
+        # drift is only ever corrected by the overflow-retry path.
+        if self._token_ledger is not None:
+            prompt_tokens = int(getattr(result.response, "prompt_tokens", 0) or 0)
+            if prompt_tokens > 0:
+                self._token_ledger.record_provider_usage(messages, prompt_tokens)
         if result.response.partial and not result.response.content.strip():
             self._events.emit("warn", {"message": "interrupted — no content received"})
             state.status = "done"
@@ -191,6 +198,14 @@ class TurnDriver:
         )
         compaction_budget = int(context_budget_window * context_budget_ratio)
         soft_trim_budget = int(compaction_budget * _SOFT_TRIM_BUDGET_FRACTION)
+        # Mirror the economic cap inside ``_soft_trim_messages``: on models with
+        # a pricing long-context cliff (e.g. Luna 272K) the trim must fire below
+        # the cliff, not at 75% of the far-larger compaction budget. Without this
+        # the outer gate shadows the inner threshold and soft-trim never runs in
+        # the band between them (GPT-5.6: 258K–669K).
+        long_ctx = resolve_long_context_threshold(self._resolved_model_name)
+        if long_ctx:
+            soft_trim_budget = min(soft_trim_budget, max(8_000, int(long_ctx * 0.95)))
 
         messages, current_tokens = self._micro_compact(
             messages, current_tokens
@@ -207,13 +222,32 @@ class TurnDriver:
             if trimmed is not messages:
                 messages = trimmed
                 current_tokens = self._rebase_ledger(messages)
+                self._note_context_change()
         if current_tokens > compaction_budget:
             messages = await self._compact(messages)
             self._rebase_ledger(messages)
+            self._note_context_change()
         # Compaction / trim can still leave pairs inconsistent — sanitize again.
         messages = _patch_dangling_tool_calls(messages)
         await self._apply_external_pre_llm(messages)
         return self._apply_before_llm(messages)
+
+    def _note_context_change(self) -> None:
+        """Mark the next request as having a legitimately-rewritten prefix.
+
+        Compaction / trimming rewrites the cached prompt prefix on purpose, so
+        the resulting cache miss is expected rather than waste. Recording the
+        upcoming request index lets cache-waste attribution exempt it instead
+        of reporting it as an unexplained miss.
+        """
+        rc = self._run_context
+        if rc is None or not isinstance(getattr(rc, "_metadata", None), dict):
+            return
+        try:
+            next_index = len(rc.usage.per_request)
+        except Exception:
+            return
+        rc._metadata.setdefault("cache_context_change_rounds", set()).add(next_index)
 
     def _rebase_ledger(self, messages: list[LLMMessage]) -> int:
         """Rebase the token ledger after a context mutation."""
@@ -246,6 +280,7 @@ class TurnDriver:
             if compacted is not messages:
                 messages = compacted
                 current_tokens = self._rebase_ledger(messages)
+                self._note_context_change()
         return messages, current_tokens
 
     async def _compact(self, messages: list[LLMMessage]) -> list[LLMMessage]:

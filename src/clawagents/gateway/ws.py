@@ -11,6 +11,7 @@ Supports:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import time
@@ -24,6 +25,11 @@ from clawagents.agent import create_claw_agent
 from clawagents.process.command_queue import enqueue_command_in_lane, get_queue_size
 from clawagents.process.lanes import CommandLane
 from clawagents.gateway.protocol import is_valid_request, make_response, make_event
+
+# Upper bound on buffered outbound WS events. Observatory payloads run ~1.5 MB
+# per LLM call, so an unbounded queue behind a slow client retains hundreds of
+# MB over a long run. Shed past this and report the count once at the end.
+_WS_EVENT_QUEUE_MAX = 10_000
 
 VALID_LANES = {"main", "cron", "subagent", "nested"}
 
@@ -138,8 +144,62 @@ async def _handle_chat_send(ws: WebSocket, msg: dict, llm: Any):
             await send_event("started", {"lane": lane})
             agent = create_claw_agent(model=llm)
 
-            async def on_event(kind, data):
-                await send_event("agent", {"kind": kind, **(data if isinstance(data, dict) else {"data": data})})
+            # One ordered queue for BOTH agent and observatory events.
+            #
+            # ``on_event`` must be sync: the OnEvent contract is
+            # ``Callable[[EventKind, dict], None]`` and RunEvents.emit discards
+            # the return value, so an ``async def`` here produced a coroutine
+            # per event that was never awaited — every agent stream event was
+            # silently dropped and the WS client saw only queued/started/final.
+            # Sharing one queue with the observatory pump also keeps the two
+            # streams in their true emission order.
+            event_queue: asyncio.Queue[tuple[str, dict] | None] = asyncio.Queue(
+                maxsize=_WS_EVENT_QUEUE_MAX
+            )
+            dropped = 0
+
+            def _enqueue(event: str, payload: dict) -> None:
+                nonlocal dropped
+                try:
+                    event_queue.put_nowait((event, payload))
+                except asyncio.QueueFull:
+                    # A client too slow to drain must not grow the queue without
+                    # bound; shed instead and report the count once at the end.
+                    dropped += 1
+
+            def on_event(kind, data):
+                _enqueue(
+                    "agent",
+                    {"kind": kind, **(data if isinstance(data, dict) else {"data": data})},
+                )
+
+            async def _pump() -> None:
+                while True:
+                    item = await event_queue.get()
+                    if item is None:
+                        break
+                    event, payload = item
+                    await send_event(event, payload)
+
+            pump = asyncio.create_task(_pump())
+
+            async def _drain() -> None:
+                await event_queue.put(None)
+                try:
+                    await pump
+                except Exception:
+                    pass
+                if dropped:
+                    with contextlib.suppress(Exception):
+                        await send_event(
+                            "warning",
+                            {
+                                "message": (
+                                    f"dropped {dropped} event(s): client could not "
+                                    "keep up with the stream"
+                                )
+                            },
+                        )
 
             # Check if Context Observatory recording is enabled by params setting or env
             enable_obs = bool(
@@ -165,21 +225,11 @@ async def _handle_chat_send(ws: WebSocket, msg: dict, llm: Any):
                     context_window=context_window,
                     started_at=time.time(),
                 )
-                # Serialize observatory publishes on the event loop so bursts
-                # cannot drop/reorder via fire-and-forget create_task.
-                obs_queue: asyncio.Queue[Any | None] = asyncio.Queue()
-
+                # Observatory publishes ride the same ordered queue as agent
+                # events, so bursts cannot reorder relative to the stream.
                 def _obs_sink(event: Any) -> None:
-                    obs_queue.put_nowait(event)
+                    _enqueue("observatory", event.to_dict())
 
-                async def _pump_obs() -> None:
-                    while True:
-                        item = await obs_queue.get()
-                        if item is None:
-                            break
-                        await send_event("observatory", item.to_dict())
-
-                pump = asyncio.create_task(_pump_obs())
                 observer = ContextObserverHooks(
                     store=store,
                     model=str(model_name),
@@ -197,13 +247,12 @@ async def _handle_chat_send(ws: WebSocket, msg: dict, llm: Any):
                     store.auto_save(chat_id=session_id)
                     raise
                 finally:
-                    await obs_queue.put(None)
-                    try:
-                        await pump
-                    except Exception:
-                        pass
+                    await _drain()
             else:
-                return await agent.invoke(task, on_event=on_event)
+                try:
+                    return await agent.invoke(task, on_event=on_event)
+                finally:
+                    await _drain()
 
         result = await enqueue_command_in_lane(lane, _execute)
 
