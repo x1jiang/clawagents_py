@@ -120,6 +120,9 @@ class ExitPlanModeTool:
         "Request changes / Reject before writes unlock."
     )
     parameters: Dict[str, Dict[str, Any]] = {}
+    # Reviewing a plan is reading, not computing. Under the default tool
+    # timeout this fails while the reviewer is still on the first section.
+    waits_for_human = True
 
     def __init__(self, on_exit_plan_mode: Optional[PlanApprovalCallback] = None):
         self._on_exit_plan_mode = on_exit_plan_mode

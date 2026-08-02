@@ -2022,7 +2022,28 @@ def _build_skill_catalog_prompt(
 
 
 _DEFAULT_MEMORY_FILES = ["AGENTS.md", "CLAWAGENTS.md", "CLAUDE.md"]
-_DEFAULT_SKILL_DIRS = ["skills", ".skills", "skill", ".skill", "Skills"]
+# Ordered lowest→highest precedence (SkillStore gives later dirs precedence).
+#
+# The agent-shell layouts matter because real projects rarely keep a bare
+# `skills/`: Cursor, Claude Code and the rest each own a dotted directory, and
+# an agent started in such a project found nothing and re-derived work the
+# installed skills already do.
+#
+# `.clawagents/skills` is where `marketplace.skills_install_dir()` writes, so
+# without it `marketplace_install` placed skills that were never loaded —
+# the install appeared to succeed and changed nothing.
+_DEFAULT_SKILL_DIRS = [
+    "skills",
+    ".skills",
+    "skill",
+    ".skill",
+    "Skills",
+    ".agents/skills",
+    ".agent/skills",
+    ".cursor/skills",
+    ".claude/skills",
+    ".clawagents/skills",
+]
 
 
 def _auto_discover_memory() -> list:

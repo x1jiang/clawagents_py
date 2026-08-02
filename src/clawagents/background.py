@@ -39,6 +39,17 @@ JobNotifier = Callable[["BackgroundJob"], Optional[Awaitable[None]]]
 """Callback signature. Returning a coroutine awaits it; otherwise sync."""
 
 
+def _filtered(text: str, fn: Optional[Callable[[str], str]]) -> str:
+    """Apply an optional output filter, keeping the raw text if it misbehaves."""
+    if fn is None or not text:
+        return text
+    try:
+        cleaned = fn(text)
+    except Exception:  # noqa: BLE001
+        return text
+    return cleaned if isinstance(cleaned, str) else text
+
+
 @dataclass
 class BackgroundJob:
     """Snapshot-style record describing a background job.
@@ -66,6 +77,7 @@ class BackgroundJob:
     stdout: str = ""
     stderr: str = ""
     cancelled: bool = False
+    label: Optional[str] = None
     _process: Optional[asyncio.subprocess.Process] = field(default=None, repr=False)
     _watcher: Optional[asyncio.Task[None]] = field(default=None, repr=False)
     _done_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
@@ -74,6 +86,18 @@ class BackgroundJob:
     def running(self) -> bool:
         """True while the process is alive."""
         return self.exit_code is None and not self._done_event.is_set()
+
+    @property
+    def display_command(self) -> str:
+        """What a human (or the model) should be shown for this job.
+
+        ``command`` is the real argv, which by the time it reaches here may be
+        a sandbox/shell-session wrapper: a ``cd``, the actual command, and
+        trailers that echo cwd and env back. Truncating *that* for a status
+        line tends to cut off before the part anyone cares about, so callers
+        that know the original command pass it as ``label``.
+        """
+        return self.label or " ".join(self.command)
 
 
 class BackgroundJobManager:
@@ -99,6 +123,8 @@ class BackgroundJobManager:
         notify_on_complete: Optional[JobNotifier] = None,
         capture_output: bool = True,
         job_id: Optional[str] = None,
+        label: Optional[str] = None,
+        output_filter: Optional[Callable[[str], str]] = None,
     ) -> BackgroundJob:
         """Launch a subprocess and return the live :class:`BackgroundJob`.
 
@@ -115,6 +141,12 @@ class BackgroundJobManager:
                 inherited from the parent — useful for very chatty
                 processes whose output you don't want in memory.
             job_id: Override the auto-generated id (mainly for tests).
+            label: Human-facing command text, when ``command`` is a wrapper
+                around what the caller actually asked to run.
+            output_filter: Applied to captured stdout once the process exits.
+                Lets a caller that wrapped the command strip whatever
+                bookkeeping the wrapper appended, without this class needing
+                to know anything about that wrapper.
 
         Raises:
             FileNotFoundError: If the program isn't on PATH.
@@ -146,6 +178,7 @@ class BackgroundJobManager:
             cwd=cwd,
             pid=proc.pid,
             started_at=time.time(),
+            label=label,
             _process=proc,
         )
         self._jobs[jid] = job
@@ -154,7 +187,10 @@ class BackgroundJobManager:
             try:
                 if capture_output and proc.stdout and proc.stderr:
                     out_bytes, err_bytes = await proc.communicate()
-                    job.stdout = (out_bytes or b"").decode("utf-8", errors="replace")
+                    job.stdout = _filtered(
+                        (out_bytes or b"").decode("utf-8", errors="replace"),
+                        output_filter,
+                    )
                     job.stderr = (err_bytes or b"").decode("utf-8", errors="replace")
                 else:
                     await proc.wait()
@@ -195,6 +231,8 @@ class BackgroundJobManager:
         communicate_task: Optional[asyncio.Task] = None,
         job_id: Optional[str] = None,
         notify_on_complete: Optional[JobNotifier] = None,
+        label: Optional[str] = None,
+        output_filter: Optional[Callable[[str], str]] = None,
     ) -> BackgroundJob:
         """Adopt a still-running process (Grok auto-background-on-timeout).
 
@@ -212,6 +250,7 @@ class BackgroundJobManager:
             cwd=cwd,
             pid=proc.pid,
             started_at=time.time(),
+            label=label,
             _process=proc,
         )
         self._jobs[jid] = job
@@ -220,11 +259,17 @@ class BackgroundJobManager:
             try:
                 if communicate_task is not None:
                     out_bytes, err_bytes = await communicate_task
-                    job.stdout = (out_bytes or b"").decode("utf-8", errors="replace")
+                    job.stdout = _filtered(
+                        (out_bytes or b"").decode("utf-8", errors="replace"),
+                        output_filter,
+                    )
                     job.stderr = (err_bytes or b"").decode("utf-8", errors="replace")
                 elif proc.stdout is not None or proc.stderr is not None:
                     out_bytes, err_bytes = await proc.communicate()
-                    job.stdout = (out_bytes or b"").decode("utf-8", errors="replace")
+                    job.stdout = _filtered(
+                        (out_bytes or b"").decode("utf-8", errors="replace"),
+                        output_filter,
+                    )
                     job.stderr = (err_bytes or b"").decode("utf-8", errors="replace")
                 else:
                     await proc.wait()
@@ -331,6 +376,14 @@ class BackgroundJobManager:
                 await proc.wait()
             except ProcessLookupError:
                 pass
+        # The process is gone, but ``exit_code`` / ``_done_event`` are set by
+        # the watcher task, which has not been scheduled yet. Without this a
+        # caller that awaits cancel() still observes ``job.running is True``.
+        # Bounded so a dead watcher cannot hang the caller.
+        try:
+            await asyncio.wait_for(job._done_event.wait(), timeout=self._kill_grace)
+        except asyncio.TimeoutError:
+            pass
         return job
 
     async def shutdown(self) -> None:
@@ -347,6 +400,16 @@ class BackgroundJobManager:
     # Keep file-handle leakage diagnostics easy to chase in tests.
     def __len__(self) -> int:
         return len(self._jobs)
+
+    def __bool__(self) -> bool:
+        """A manager is always a usable manager, empty or not.
+
+        Without this, ``__len__`` makes a fresh manager falsy, so the common
+        ``manager or default`` fallback silently discards the caller's manager
+        until its first job — and jobs then get started on one manager while
+        being looked up on another.
+        """
+        return True
 
 
 __all__ = [

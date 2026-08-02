@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from dataclasses import asdict
@@ -112,9 +113,37 @@ class RunFinalizer:
         except Exception:
             logger.debug("cache waste analysis failed", exc_info=True)
 
+    def _last_persisted_assistant(self) -> str | None:
+        """Content of the last assistant_message already in the session log."""
+        path = getattr(self._session_writer, "path", None)
+        if path is None:
+            return None
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return None
+        for line in reversed(lines):
+            if '"assistant_message"' not in line:
+                continue
+            try:
+                event = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if event.get("type") == "assistant_message":
+                return str(event.get("content") or "")
+        return None
+
     def _write_session_completion(self, state: Any) -> None:
         if self._session_writer is None:
             return
+        # Only the tool-calling path writes an assistant_message, so a run that
+        # ends in plain prose — the common shape — persisted no answer at all.
+        # Record it here, skipping the case where the run stopped straight
+        # after a tool round whose content was already stored.
+        final = getattr(state, "result", "")
+        if isinstance(final, str) and final.strip():
+            if self._last_persisted_assistant() != final:
+                self._session_writer.write_assistant_message(final)
         self._session_writer.write_turn_completed(
             state.iterations,
             state.tool_calls,

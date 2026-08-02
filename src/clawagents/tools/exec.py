@@ -706,6 +706,7 @@ async def _exec_foreground_with_autobg(
     mgr: Any,
     on_chunk: Any | None = None,
     streaming: bool = False,
+    label: Optional[str] = None,
 ) -> tuple[ExecResult, bool, Optional[str]]:
     """Run shell; on timeout adopt the process into ``mgr``.
 
@@ -786,7 +787,16 @@ async def _exec_foreground_with_autobg(
     except asyncio.TimeoutError:
         argv = _shell_argv(command)
         comm = asyncio.create_task(_finish_comm())
-        job = await mgr.adopt(proc, argv, cwd=cwd, communicate_task=comm)
+        from clawagents.tools.shell_session import strip_session_trailers
+
+        job = await mgr.adopt(
+            proc,
+            argv,
+            cwd=cwd,
+            communicate_task=comm,
+            label=label,
+            output_filter=strip_session_trailers,
+        )
         return (ExecResult(stdout="", stderr="", exit_code=0), True, job.id)
     except (asyncio.CancelledError, Exception):
         try:
@@ -897,8 +907,11 @@ class ExecTool:
         "git_diff tools (they report clearly when there is no .git). "
         "Use block_until_ms (alias of timeout) for the foreground wait; "
         "block_until_ms=0 or is_background=true returns a job_id immediately. "
-        "Foreground deadlines may auto-background — use task_status / task_output / "
-        "task_stop. Not for interactive TTY apps (vim, ssh prompts, REPLs that need "
+        "Foreground deadlines may auto-background — the process keeps running and "
+        "you get a job_id. When the job's result is what was asked for, call "
+        "task_wait on that job_id rather than ending your turn; task_status / "
+        "task_output / task_stop are also available. "
+        "Not for interactive TTY apps (vim, ssh prompts, REPLs that need "
         "a screen) — use pty_start / pty_keys / pty_wait / pty_screen / pty_stop."
     )
     parameters: Dict[str, Dict[str, Any]] = {
@@ -939,7 +952,7 @@ class ExecTool:
 
     async def execute(self, args: Dict[str, Any], run_context: Any = None) -> ToolResult:
         from clawagents.config.features import is_enabled
-        from clawagents.tools.shell_session import session_for
+        from clawagents.tools.shell_session import session_for, strip_session_trailers
 
         sb = self._sb
         command = str(args.get("command", ""))
@@ -1043,6 +1056,8 @@ class ExecTool:
                         _shell_argv(bg_command),
                         cwd=run_cwd,
                         env=_child_env(),
+                        label=str(args.get("command", "")),
+                        output_filter=strip_session_trailers,
                     )
                 except Exception as e:
                     return ToolResult(
@@ -1056,7 +1071,11 @@ class ExecTool:
                 "command": str(args.get("command", "")),
                 "cwd": run_cwd,
                 "description": desc or None,
-                "hint": "Use task_status / task_output / task_stop with this job_id.",
+                "hint": (
+                    "If this job's result is part of what was asked for, call "
+                    "task_wait with this job_id before ending your turn. "
+                    "task_status / task_output / task_stop also take this job_id."
+                ),
             }
             return ToolResult(
                 success=True,
@@ -1109,6 +1128,7 @@ class ExecTool:
                         mgr=mgr,
                         on_chunk=on_chunk,
                         streaming=streaming,
+                        label=str(args.get("command", "")),
                     )
                 except Exception as e:
                     progress.flush()
@@ -1157,8 +1177,11 @@ class ExecTool:
                     "cwd": run_cwd,
                     "description": desc or None,
                     "hint": (
-                        "Foreground wait timed out; process kept running in the "
-                        "background. Use task_status / task_output / task_stop."
+                        "Foreground wait timed out; the process was NOT killed and "
+                        "is still running. Do not re-run the command and do not end "
+                        "your turn on this — call task_wait with this job_id to get "
+                        "the real exit code and output. task_status / task_output / "
+                        "task_stop also take this job_id."
                     ),
                 }
                 return ToolResult(

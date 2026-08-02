@@ -84,7 +84,14 @@ TOOL_GROUPS: dict[str, frozenset[str]] = {
     "pty": frozenset({"pty_start", "pty_keys", "pty_screen", "pty_wait", "pty_stop"}),
     "marketplace": frozenset({"marketplace_install", "marketplace_list"}),
     "background": frozenset(
-        {"task_create", "task_status", "task_output", "task_stop", "task_list"}
+        {
+            "task_create",
+            "task_status",
+            "task_output",
+            "task_wait",
+            "task_stop",
+            "task_list",
+        }
     ),
     "memory": frozenset(
         {

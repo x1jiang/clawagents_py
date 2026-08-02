@@ -11,7 +11,7 @@ import json
 import os
 import re
 import traceback
-from typing import Any, Dict, List, Optional, Protocol
+from typing import Any, Dict, Iterable, List, Optional, Protocol
 
 
 class ToolResult:
@@ -103,6 +103,15 @@ _TRUNCATION_HEAD = 5_000
 _TRUNCATION_TAIL = 2_000
 DEFAULT_TOOL_TIMEOUT_S = 120
 
+# Tools that block on a person, not a machine, get their own ceiling. The
+# default is sized for commands and API calls; applied to a human decision it
+# turns "still reading the plan" into a tool failure, and whatever the model was
+# waiting on -- an approval, an answer -- is lost. This stays finite so a host
+# whose callback never resolves still fails eventually rather than wedging the
+# run; hosts that want a tighter bound should time out their own prompt, which
+# lets them report *why* instead of surfacing a generic tool timeout.
+HUMAN_TOOL_TIMEOUT_S = 3600
+
 
 # ─── Parallel-execution policy (learned from Hermes) ──────────────────────
 # A tool is run concurrently with siblings only when it is parallel-safe AND
@@ -143,6 +152,14 @@ _DEFAULT_PATH_SCOPED_ARGS: Dict[str, str] = {
 }
 
 MAX_PARALLEL_TOOL_WORKERS = 8
+
+
+def _waits_for_human(tool: "Tool") -> bool:
+    """Whether this tool's runtime is a person's reading speed.
+
+    Opt-in via a ``waits_for_human = True`` class attribute.
+    """
+    return getattr(tool, "waits_for_human", False) is True
 
 
 def _is_parallel_safe(tool: "Tool") -> bool:
@@ -343,6 +360,32 @@ class LazyTool:
         return await self._resolved.execute(args)
 
 
+_JOB_ID_RE = re.compile(r'"job_id"\s*:\s*"([^"]+)"')
+
+
+def _extract_job_id(payload: Any) -> Optional[str]:
+    """Pull a background ``job_id`` out of a tool result body.
+
+    ``task_create`` returns bare JSON, but ``execute`` prefixes its payload
+    with sandbox/shell-session warning lines, so a plain ``json.loads`` of the
+    whole body fails. Parse from the first brace, and fall back to a regex for
+    bodies that output truncation has already clipped.
+    """
+    if not isinstance(payload, str) or "job_id" not in payload:
+        return None
+    start = payload.find("{")
+    if start != -1:
+        try:
+            obj = json.loads(payload[start:])
+        except (json.JSONDecodeError, TypeError, ValueError):
+            obj = None
+        if isinstance(obj, dict):
+            job_id = str(obj.get("job_id") or "").strip()
+            return job_id or None
+    match = _JOB_ID_RE.search(payload)
+    return match.group(1).strip() or None if match else None
+
+
 class ToolRegistry:
     def __init__(
         self,
@@ -370,6 +413,16 @@ class ToolRegistry:
         else:
             from clawagents.tools.cache import ResultCacheManager
             self._result_cache = ResultCacheManager(max_size=cache_max_size, default_ttl_s=cache_ttl_s)
+
+    def _timeout_for(self, tool: "Tool") -> float:
+        """Seconds to allow this tool before giving up on it.
+
+        A caller that raised the default above the human ceiling meant it, so
+        take whichever is larger rather than shortening their budget.
+        """
+        if _waits_for_human(tool):
+            return max(self._tool_timeout_s, HUMAN_TOOL_TIMEOUT_S)
+        return self._tool_timeout_s
 
     @property
     def result_cache(self):
@@ -626,16 +679,42 @@ class ToolRegistry:
             return banner + "\n\n".join(pages), None
 
     def _note_owned_job(self, tool_name: str, result: "ToolResult") -> None:
-        """Remember jobs started through *this* registry, for completion notices."""
-        if tool_name != "task_create" or not result.success:
+        """Remember jobs started through *this* registry, for completion notices.
+
+        Covers both ways a job can appear: ``task_create``, and ``execute``
+        going to the background — either explicitly (``is_background``) or by
+        being adopted after its foreground wait timed out. The auto-background
+        case is the one that matters most: nobody *asked* for a job there, so
+        without tracking it the model is the only thing that could remember to
+        poll, and a run that ends on "started it, log is at …" loses the result
+        for good.
+        """
+        if not result.success or tool_name not in ("task_create", "execute"):
             return
-        try:
-            payload = json.loads(result.raw_output if isinstance(result.raw_output, str) else "{}")
-            job_id = str(payload.get("job_id") or "")
-        except (json.JSONDecodeError, TypeError, ValueError):
-            return
+        job_id = _extract_job_id(result.raw_output)
+        if job_id is None and isinstance(result.output, str):
+            # execute prefixes its JSON with sandbox/session warnings, and a
+            # truncated preview can outlive the raw payload.
+            job_id = _extract_job_id(result.output)
         if job_id:
             self._owned_jobs.add(job_id)
+
+    def adopt_owned_jobs(self, job_ids: "Iterable[str]") -> None:
+        """Claim pre-existing jobs so their completions still get announced.
+
+        A host that rebuilds the agent (and this registry) per turn would
+        otherwise drop ownership at every turn boundary, and a job that
+        finished while the agent was idle would never be mentioned. The job
+        manager outlives the registry, so replaying the ids is enough.
+        """
+        for jid in job_ids:
+            text = str(jid).strip()
+            if text:
+                self._owned_jobs.add(text)
+
+    def owned_job_ids(self) -> "set[str]":
+        """Background job ids this registry started or adopted."""
+        return set(self._owned_jobs)
 
     def _append_background_notice(self, tool_name: str, result: "ToolResult") -> "ToolResult":
         """Surface finished background jobs on the next tool result.
@@ -647,7 +726,7 @@ class ToolRegistry:
         Skipped for the background tools themselves — they already report job
         state, so a notice inside ``task_status`` output is redundant.
         """
-        if tool_name in ("task_create", "task_status", "task_cancel", "task_wait"):
+        if tool_name in ("task_create", "task_status", "task_list", "task_stop", "task_wait"):
             return result
         if not self._owned_jobs:
             return result
@@ -913,6 +992,8 @@ class ToolRegistry:
                     )
                 return cached
 
+        effective_timeout_s = self._timeout_for(tool)
+
         try:
             # Persist uncertainty before an external side effect begins. A
             # timeout, process crash, or nonzero exit can still leave partial
@@ -937,7 +1018,7 @@ class ToolRegistry:
             execute_awaitable = _call_tool_execute(tool, effective_args, run_context)
             result = await asyncio.wait_for(
                 execute_awaitable,
-                timeout=self._tool_timeout_s,
+                timeout=effective_timeout_s,
             )
             invariant_note = ""
             if run_context is not None:
@@ -1042,11 +1123,19 @@ class ToolRegistry:
 
             return wrapped
         except asyncio.TimeoutError:
+            # Advice has to match the tool: nothing the model does to its
+            # arguments makes a person answer faster.
+            advice = (
+                "Nobody responded. Do not silently proceed as if they had — "
+                "say so, and state what you still need from them."
+                if _waits_for_human(tool)
+                else "For long-running commands, consider using a timeout parameter."
+            )
             return ToolResult(
                 success=False, output="",
                 error=(
-                    f'Tool "{tool_name}" timed out after {self._tool_timeout_s}s. '
-                    "For long-running commands, consider using a timeout parameter."
+                    f'Tool "{tool_name}" timed out after {effective_timeout_s}s. '
+                    f"{advice}"
                 ),
             )
         except Exception as err:

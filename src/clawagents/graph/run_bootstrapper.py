@@ -615,6 +615,11 @@ class RunBootstrapper:
 
         if self._session_writer:
             self._session_writer.write_system_prompt(system_content)
+            # The prompt arrives as the ``task`` argument, so nothing else in
+            # the run will record it. A log without it cannot be resumed: the
+            # reader has no user turn to reconstruct, and ``get_task()``
+            # returns "".
+            self._session_writer.write_user_message(first_user_content)
 
         # Preflight context check
         messages, self._tool_desc, self._native_schemas = _preflight_context_check(
