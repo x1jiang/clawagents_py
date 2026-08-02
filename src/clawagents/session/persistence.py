@@ -43,27 +43,62 @@ class SessionInfo:
 class SessionWriter:
     """Append-only JSONL writer for session events."""
 
-    def __init__(self, session_id: str | None = None):
+    def __init__(
+        self,
+        session_id: str | None = None,
+        *,
+        session_dir: Path | None = None,
+    ):
+        """Open a session log.
+
+        ``session_dir`` overrides the default ``<cwd>/.clawagents/sessions``.
+        A host running several conversations in one process needs each to own
+        its own file, and it keeps tests off the working directory. Omitted, the
+        behaviour is unchanged.
+        """
         self.session_id = session_id or _generate_session_id()
-        self.dir = _sessions_path()
+        self.dir = Path(session_dir) if session_dir is not None else _sessions_path()
         self.dir.mkdir(parents=True, exist_ok=True)
         self.path = self.dir / f"{self.session_id}.jsonl"
         self._turn_count = 0
 
     def append(self, event_type: str, data: dict[str, Any] | None = None) -> None:
+        """Append one event.
+
+        A real append, not a read-modify-write. This used to load the whole log
+        and rewrite it through a temp file for every event, which made writing a
+        session quadratic in its own size — measurably ~2s of pure I/O by the
+        time a log reached a few MB, all of it on the turn's critical path.
+
+        Rewriting also gave a *worse* crash window than appending: a failure
+        during the rename risks the entire log, where a failure mid-append can
+        only tear the final line. ``SessionReader`` skips a torn trailing line.
+        """
         event = {"type": event_type, "ts": time.time()}
         if data:
             event.update(data)
-        from clawagents.utils.atomic_write import atomic_write_text
-        existing = ""
+        line = json.dumps(event, default=str) + "\n"
         try:
-            existing = self.path.read_text(encoding="utf-8")
+            with open(self.path, "a", encoding="utf-8") as handle:
+                handle.write(line)
         except FileNotFoundError:
-            pass
-        atomic_write_text(self.path, existing + json.dumps(event, default=str) + "\n")
+            # The session directory can be removed underneath a long run.
+            self.dir.mkdir(parents=True, exist_ok=True)
+            with open(self.path, "a", encoding="utf-8") as handle:
+                handle.write(line)
 
     def write_system_prompt(self, content: str) -> None:
         self.append("system_prompt", {"content": content})
+
+    def write_user_message(self, content: str) -> None:
+        """Record the prompt that started a turn.
+
+        Without this the log holds the agent's half of the conversation only,
+        so a resumed session cannot see what it was asked — and ``get_task()``,
+        which searches the reconstructed messages for a user turn, can never
+        find one.
+        """
+        self.append("user_message", {"content": content})
 
     def write_turn_started(self, iteration: int) -> None:
         self._turn_count += 1
@@ -125,11 +160,18 @@ class SessionReader:
         self._load()
 
     def _load(self) -> None:
-        with open(self.path) as f:
+        with open(self.path, encoding="utf-8", errors="replace") as f:
             for line in f:
                 line = line.strip()
-                if line:
+                if not line:
+                    continue
+                try:
                     self.events.append(json.loads(line))
+                except (json.JSONDecodeError, ValueError):
+                    # A process killed mid-append leaves a partial final line.
+                    # Losing the last event beats refusing to read the session
+                    # at all, which is what raising here used to do.
+                    continue
 
     def reconstruct_messages(self) -> list[LLMMessage]:
         """Rebuild LLMMessage list from session events."""
@@ -140,6 +182,9 @@ class SessionReader:
 
             if ev_type == "system_prompt":
                 messages.append(LLMMessage(role="system", content=ev["content"]))
+
+            elif ev_type == "user_message":
+                messages.append(LLMMessage(role="user", content=ev.get("content", "")))
 
             elif ev_type == "assistant_message":
                 tool_calls_meta = None

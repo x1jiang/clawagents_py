@@ -20,6 +20,16 @@ if TYPE_CHECKING:
 # ─── Tool Loop Detection ──────────────────────────────────────────────────
 
 
+# Tools whose answer depends on wall-clock time, not just their arguments.
+# Serving these from the duplicate-suppression cache would be wrong rather
+# than merely wasteful: "wait for this job again" is the *intended* way to keep
+# waiting past one wait budget, and replaying the earlier "still running"
+# answer would make the job look permanently stuck.
+TIME_DEPENDENT_TOOLS: frozenset[str] = frozenset(
+    {"task_wait", "task_status", "task_output", "task_list"}
+)
+
+
 class _ToolCallTracker:
     def __init__(
         self,
@@ -66,6 +76,8 @@ class _ToolCallTracker:
 
     def cache_result_output(self, tool_name: str, args: dict, output: str) -> None:
         """Store truncated output for identical/overlapping reuse stubs."""
+        if tool_name in TIME_DEPENDENT_TOOLS:
+            return
         key = self._key(tool_name, args)
         text = output if isinstance(output, str) else str(output or "")
         self._result_outputs[key] = text[:2_000]
@@ -78,6 +90,8 @@ class _ToolCallTracker:
         """Return a short stub if this call (or an overlapping read) already ran."""
         from clawagents.loop_detection import detect_overlapping_read
 
+        if tool_name in TIME_DEPENDENT_TOOLS:
+            return None
         key = self._key(tool_name, args)
         prior = self._result_outputs.get(key)
         if prior is not None:
@@ -134,9 +148,18 @@ class _ToolCallTracker:
         return self._history.count(key)
 
     def is_soft_looping(self, tool_name: str, args: dict) -> bool:
+        if tool_name in TIME_DEPENDENT_TOOLS:
+            return False
         return self._count_occurrences(tool_name, args) >= self._soft_limit
 
     def is_hard_looping(self, tool_name: str, args: dict) -> bool:
+        # Repeat count is the wrong signal for a wait: a job that outlives the
+        # per-call wait budget legitimately needs more calls than the hard
+        # limit, and stopping the batch there would abandon it. Stalls are
+        # still caught by the no-progress circuit breaker, which keys off
+        # changing results rather than call count.
+        if tool_name in TIME_DEPENDENT_TOOLS:
+            return False
         return self._count_occurrences(tool_name, args) >= self._hard_limit
 
     def is_soft_looping_batch(self, calls: list[ParsedToolCall]) -> bool:

@@ -682,10 +682,23 @@ async def cmd_resume(session_id: str, timeout_s: int = 0):
 
     sys.stderr.write(f"Resuming session {session_id} ({len(initial_messages)} messages, task: {task[:60]})\n")
 
+    # Replay the prior turns into a session the agent actually reads. This used
+    # to reconstruct the messages, report the count, and then discard them —
+    # "resume" started a blank agent holding nothing but a sentence claiming it
+    # had context. Drop the stored system prompt: the new run builds its own.
+    prior = [m for m in initial_messages if m.role != "system"]
+    session = None
+    if prior:
+        from clawagents.session.backends import InMemorySession
+
+        session = InMemorySession(session_id=session_id)
+        await session.add_items(prior)
+
     agent = create_claw_agent()
     result = await agent.invoke(
         task=f"[Resumed session] Continue from where you left off. Original task: {task}",
         timeout_s=timeout_s,
+        session=session,
     )
     if result.result:
         sys.stdout.write(result.result + "\n")

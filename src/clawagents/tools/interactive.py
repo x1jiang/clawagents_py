@@ -26,6 +26,9 @@ class AskUserTool:
     parameters = {
         "question": {"type": "string", "description": "The question to ask the user", "required": True},
     }
+    # Blocks on a person typing an answer, so the default tool timeout would
+    # cut them off mid-thought.
+    waits_for_human = True
 
     def __init__(self, ask_fn: AskFn | None = None):
         self._ask_fn = ask_fn

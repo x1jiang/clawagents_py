@@ -249,13 +249,16 @@ print({ENV_MARKER!r} + json.dumps(o, separators=(",", ":")))
         """
         if not stdout:
             return stdout
+        original = stdout
         # The bookkeeping trailer follows the command directly. If the command
         # did not print a newline, peel the marker suffix as its own block.
         marker_at = stdout.rfind(PWD_MARKER)
         prefix = ""
+        mid_line_split = False
         if marker_at > 0 and "\n" not in stdout[marker_at:marker_at + len(PWD_MARKER)]:
             prefix = stdout[:marker_at]
             stdout = stdout[marker_at:]
+            mid_line_split = True
 
         lines = stdout.splitlines(keepends=True)
         if not lines:
@@ -282,6 +285,13 @@ print({ENV_MARKER!r} + json.dumps(o, separators=(",", ":")))
                 peeled += 1
                 continue
             break
+
+        # A marker in the middle of a line is only a trailer if what follows it
+        # is a path -- the wrapper prints `pwd -P`, which is always absolute.
+        # Otherwise the command simply echoed the marker text, and splitting
+        # there would silently drop the rest of its output.
+        if mid_line_split and not _looks_absolute(pwd_raw):
+            return original
 
         keep_end = idx + 1
         if pwd_raw is not None and pwd_raw and os.path.isdir(pwd_raw):
@@ -315,6 +325,37 @@ print({ENV_MARKER!r} + json.dumps(o, separators=(",", ":")))
             return False
 
 
+def _looks_absolute(path: str | None) -> bool:
+    """Whether a marker payload could plausibly be a ``pwd -P`` result.
+
+    Deliberately not ``isdir``: a job whose cwd was removed while it ran still
+    printed a real trailer, and failing to strip that is worse than accepting
+    a path that no longer exists.
+    """
+    if not path:
+        return False
+    return path.startswith("/") or bool(re.match(r"^[A-Za-z]:[\\/]", path))
+
+
+def strip_session_trailers(stdout: str) -> str:
+    """Remove the bookkeeping trailer block without adopting its state.
+
+    ``consume_stdout`` is the right call for a foreground command: the cwd and
+    env it reports become the session's. A background job is different — it
+    finishes whenever it finishes, so folding its trailer into the live session
+    would retroactively move the user's shell. Here we only want the noise gone
+    before the output is shown, so parse against a throwaway session.
+    """
+    if not stdout or PWD_MARKER not in stdout:
+        return stdout
+    scratch = ShellSession(cwd=os.getcwd())
+    try:
+        return scratch.consume_stdout(stdout)
+    except Exception:  # noqa: BLE001
+        # Cosmetic cleanup must never cost someone their job output.
+        return stdout
+
+
 def session_for(
     run_context: object | None,
     sb: object | None = None,
@@ -341,6 +382,7 @@ __all__ = [
     "ShellSession",
     "PWD_MARKER",
     "ENV_MARKER",
+    "strip_session_trailers",
     "session_for",
     "filter_sticky_env",
 ]
