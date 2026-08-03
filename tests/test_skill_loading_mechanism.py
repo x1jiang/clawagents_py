@@ -1246,3 +1246,105 @@ def test_list_skills_shows_quarantined_section(tmp_path):
     assert "ok-skill" in result.output
     assert "Quarantined" in result.output
     assert "installer" in result.output
+
+
+def test_drained_pages_survive_plan_mode_refusal(tmp_path):
+    """Gates that fire AFTER the auto-drain must carry the drained pages.
+
+    The drain commits the skill's remaining pages to "active" state before the
+    plan-mode / invariant / permission / validation gates run. A refusal that
+    returned ``output=""`` discarded those pages irrecoverably: the model was
+    left with an active skill whose tail it never saw, and no pending state to
+    re-request it with.
+    """
+    from clawagents.permissions.mode import PermissionMode
+
+    root = tmp_path / "skills"
+    _write_skill(
+        root,
+        "long-open",
+        body=("first rules\n\n" + "A" * 10_000 + "\n\nTAIL-MARKER rules\n"),
+        frontmatter="name: long-open\ndescription: long skill",
+    )
+    store = SkillStore()
+    store.add_directory(root)
+    _load(store)
+    use_tool = [t for t in create_skill_tools(store) if t.name == "use_skill"][0]
+
+    class WriteTool:
+        name = "write_file"
+        description = "write"
+        parameters = {}
+
+        async def execute(self, args):
+            return ToolResult(success=True, output="wrote")
+
+    registry = ToolRegistry()
+    registry.register(use_tool)
+    registry.register(WriteTool())
+    context = RunContext()
+    first = asyncio.run(
+        registry.execute_tool(
+            "use_skill", {"name": "long-open", "max_chars": 4_000}, run_context=context
+        )
+    )
+    assert first.success
+    assert context.pending_skill_next_offset is not None
+
+    # Plan mode + a write-class tool: the drain runs, then the gate refuses.
+    context.permission_mode = PermissionMode.PLAN
+    refused = asyncio.run(
+        registry.execute_tool("write_file", {}, run_context=context)
+    )
+    assert not refused.success
+    assert "plan mode" in (refused.error or "")
+    assert "TAIL-MARKER" in (refused.output or ""), (
+        "drained skill pages were discarded by the plan-mode refusal"
+    )
+    # And the drain did commit the skill, so the pages truly had no other path.
+    assert "long-open" in context.active_skills
+
+
+def test_drained_pages_survive_validation_refusal(tmp_path):
+    """Same guarantee for the parameter-validation early return."""
+    root = tmp_path / "skills"
+    _write_skill(
+        root,
+        "long-open2",
+        body=("first rules\n\n" + "B" * 10_000 + "\n\nTAIL2-MARKER rules\n"),
+        frontmatter="name: long-open2\ndescription: long skill",
+    )
+    store = SkillStore()
+    store.add_directory(root)
+    _load(store)
+    use_tool = [t for t in create_skill_tools(store) if t.name == "use_skill"][0]
+
+    class StrictTool:
+        name = "strict_tool"
+        description = "needs a param"
+        parameters = {
+            "needed": {"type": "string", "description": "required", "required": True}
+        }
+
+        async def execute(self, args):
+            return ToolResult(success=True, output="ran")
+
+    registry = ToolRegistry()
+    registry.register(use_tool)
+    registry.register(StrictTool())
+    context = RunContext()
+    first = asyncio.run(
+        registry.execute_tool(
+            "use_skill", {"name": "long-open2", "max_chars": 4_000}, run_context=context
+        )
+    )
+    assert first.success
+
+    refused = asyncio.run(
+        registry.execute_tool("strict_tool", {}, run_context=context)
+    )
+    assert not refused.success
+    assert "Invalid parameters" in (refused.error or "")
+    assert "TAIL2-MARKER" in (refused.output or ""), (
+        "drained skill pages were discarded by the validation refusal"
+    )
