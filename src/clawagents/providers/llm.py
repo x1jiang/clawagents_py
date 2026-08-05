@@ -20,6 +20,7 @@ except ImportError:
     _HAS_GEMINI = False
 
 from clawagents.config.config import EngineConfig
+from clawagents.errors.taxonomy import MantleCredentialsError
 
 logger = logging.getLogger(__name__)
 
@@ -3359,6 +3360,27 @@ _OLLAMA_PREFIXES: tuple[str, ...] = (
 )
 _OLLAMA_DEFAULT_BASE_URL = "http://localhost:11434/v1"
 
+# Stand-ins callers pass when a gateway ignores the key (Ollama, local BAG).
+# Mantle does not ignore it — treat these as "no key".
+_GATEWAY_KEY_PLACEHOLDERS = frozenset({"bedrock", "mantle", "ollama", "none", "n/a"})
+
+
+def _mantle_gateway_key(config: EngineConfig) -> str:
+    """Bearer token usable on Mantle, or ``""`` when only unusable ones exist.
+
+    Mantle takes a Bedrock API key. Gateway placeholders and vendor keys
+    (``sk-…`` for OpenAI, ``sk-ant-…`` for Anthropic) all fail there with an
+    opaque 401, so they are rejected here rather than sent. Each field is
+    judged on its own so an ambient ``OPENAI_API_KEY`` cannot shadow a Mantle
+    key the caller passed explicitly.
+    """
+    for candidate in (config.openai_api_key, config.anthropic_api_key):
+        key = (candidate or "").strip()
+        if not key or key.lower() in _GATEWAY_KEY_PLACEHOLDERS or key.startswith("sk-"):
+            continue
+        return key
+    return ""
+
 
 def _aws_region(config: EngineConfig) -> str:
     return (
@@ -3438,27 +3460,43 @@ class MantleAnthropicProvider(AnthropicProvider):
             raise ImportError(
                 "anthropic package not installed. Install with: pip install clawagents[anthropic]"
             )
-        key = (config.anthropic_api_key or config.openai_api_key or "").strip()
+        # Sending a placeholder or vendor key as the bearer earns a bare 401
+        # "Invalid bearer token" that reads like a bad key, not a missing one.
+        key = _mantle_gateway_key(config)
+        if not key:
+            raise MantleCredentialsError(
+                "Bedrock Mantle requires an API key. Set BEDROCK_API_KEY (or "
+                "MANTLE_API_KEY) to a Bedrock API key for the Mantle region, then "
+                "restart. Native AWS IAM credentials are not used for Mantle, and "
+                "ANTHROPIC_API_KEY / OPENAI_API_KEY are not valid there."
+            )
         base = (getattr(config, "anthropic_base_url", None) or "").strip().rstrip("/")
         if not base and config.openai_base_url:
             base = mantle_anthropic_base_url(config.openai_base_url)
         region = _mantle_region_from_url(base or config.openai_base_url)
         mantle_cls = getattr(_anthropic_mod, "AsyncAnthropicBedrockMantle", None)
         if mantle_cls is not None:
-            client_kwargs: dict[str, Any] = {"aws_region": region}
-            if key:
-                client_kwargs["api_key"] = key
+            client_kwargs: dict[str, Any] = {"aws_region": region, "api_key": key}
             if base:
                 client_kwargs["base_url"] = base
             self.client = mantle_cls(**client_kwargs)
         else:
-            # Older anthropic: Bearer via auth_token (avoid X-Api-Key).
-            client_kwargs = {}
-            if key:
-                client_kwargs["auth_token"] = key
+            # anthropic < 0.95: no Mantle client. Bearer via auth_token so the
+            # SDK does not fall back to X-Api-Key, which Mantle rejects.
+            logger.warning(
+                "anthropic %s has no AsyncAnthropicBedrockMantle; using the legacy "
+                "auth_token fallback. Upgrade with: pip install -U 'anthropic>=0.95.0'",
+                getattr(_anthropic_mod, "__version__", "?"),
+            )
+            client_kwargs = {"auth_token": key}
             if base:
                 client_kwargs["base_url"] = base
-            self.client = _anthropic_mod.AsyncAnthropic(**client_kwargs)
+            client = _anthropic_mod.AsyncAnthropic(**client_kwargs)
+            # auth_headers merges X-Api-Key with the Bearer, and api_key
+            # defaults to ANTHROPIC_API_KEY from the environment. Mantle must
+            # see the Bearer alone.
+            client.api_key = None
+            self.client = client
         self.model = (config.anthropic_model or "").strip()
         self._max_tokens = config.max_tokens
         self._temperature = config.temperature
@@ -3897,10 +3935,19 @@ def create_provider(
     # openai.gpt-5.* / xai.grok-* → /openai/v1 (responses);
     # chat-ok catalog (gpt-oss, deepseek, qwen, …) → /v1/chat/completions.
     if config.openai_base_url and _is_mantle_url(config.openai_base_url):
-        mantle_key = config.openai_api_key or config.anthropic_api_key
+        # Every Mantle path is Bearer-authenticated; none accept a placeholder
+        # or a vendor key, so fail here instead of on an opaque 401.
+        mantle_key = _mantle_gateway_key(config)
+        if not mantle_key:
+            raise MantleCredentialsError(
+                "Bedrock Mantle requires an API key. Set BEDROCK_API_KEY (or "
+                "MANTLE_API_KEY) to a Bedrock API key for the Mantle region, then "
+                "restart. Native AWS IAM credentials are not used for Mantle, and "
+                "ANTHROPIC_API_KEY / OPENAI_API_KEY are not valid there."
+            )
+        config.openai_api_key = mantle_key
         if is_mantle_anthropic_model(model_name):
-            if mantle_key:
-                config.anthropic_api_key = mantle_key
+            config.anthropic_api_key = mantle_key
             config.anthropic_model = model_name
             config.anthropic_base_url = mantle_anthropic_base_url(config.openai_base_url)
             # Must use Mantle client (Bearer), not plain AsyncAnthropic (X-Api-Key).
@@ -3909,10 +3956,6 @@ def create_provider(
             rewritten = mantle_openai_base_url(config.openai_base_url)
             if rewritten:
                 config.openai_base_url = rewritten
-            if not config.openai_api_key and mantle_key:
-                config.openai_api_key = mantle_key
-            if not config.openai_api_key:
-                config.openai_api_key = "bedrock"
             # Frontier Mantle models reject plain …/v1 (Berm access_denied for
             # xAI; 404/validation for GPT-5.x) even when wire_api was saved as
             # chat_completions from an older Mantle default.

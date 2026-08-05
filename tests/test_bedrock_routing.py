@@ -153,6 +153,52 @@ def test_mantle_anthropic_provider_uses_bearer_auth():
 
 
 @pytest.mark.parametrize(
+    "openai_key,anthropic_key",
+    [
+        ("", ""),                      # nothing configured
+        ("bedrock", ""),               # gateway placeholder
+        ("", "sk-ant-api03-example"),  # Anthropic key picked up from env
+        ("sk-proj-example", ""),       # OpenAI key picked up from env
+    ],
+)
+@pytest.mark.parametrize(
+    "model",
+    ["anthropic.claude-opus-4-8", "openai.gpt-5.6-sol", "openai.gpt-oss-20b"],
+)
+def test_mantle_without_usable_key_raises_instead_of_401(
+    model: str, openai_key: str, anthropic_key: str
+):
+    """Mantle rejects placeholders and vendor keys with an opaque 401.
+
+    Every Mantle route must say the key is missing before the request.
+    """
+    from clawagents.errors.taxonomy import MantleCredentialsError
+    from clawagents.providers import llm as llm_mod
+
+    cfg = EngineConfig(
+        openai_base_url="https://bedrock-mantle.us-east-1.api.aws/v1",
+        openai_api_key=openai_key,
+        anthropic_api_key=anthropic_key,
+    )
+    with pytest.raises(MantleCredentialsError, match="BEDROCK_API_KEY"):
+        llm_mod.create_provider(model, cfg)
+
+
+def test_mantle_credentials_error_classifies_as_auth_with_own_message():
+    from clawagents.errors.taxonomy import (
+        ErrorClass,
+        MantleCredentialsError,
+        classify_error,
+    )
+
+    err = MantleCredentialsError("Bedrock Mantle requires an API key. Set BEDROCK_API_KEY.")
+    descriptor = classify_error(err)
+    assert descriptor.error_class is ErrorClass.PROVIDER_AUTH
+    assert descriptor.retryable is False
+    assert descriptor.recovery_hint == str(err)
+
+
+@pytest.mark.parametrize(
     "model,kind,base_suffix,wire",
     [
         ("openai.gpt-oss-20b", "openai", "/v1", "chat_completions"),
