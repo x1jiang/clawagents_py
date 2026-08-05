@@ -15,6 +15,15 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+class MantleCredentialsError(RuntimeError):
+    """Bedrock Mantle selected with no usable API key.
+
+    Raised before the request so the user sees the missing-key cause instead of
+    Mantle's opaque 401 ``Invalid bearer token``. The message is surfaced
+    verbatim as the recovery hint.
+    """
+
+
 class ErrorClass(str, enum.Enum):
     """Discrete error failure classes."""
     CONTEXT_WINDOW = "context_window"
@@ -132,6 +141,9 @@ def classify_error(err: BaseException, provider: str = "") -> ErrorDescriptor:
     """
     msg = str(err).lower()
     err_type = type(err).__name__.lower()
+    # Auth bodies rarely name the host, so gateway-specific hints also match
+    # against the URL the SDK actually called.
+    target = f"{msg} {_extract_request_url(err)}"
 
     # 1. Context window / token overflow
     # Note: no bare "max_tokens" here — it appears in unrelated validation
@@ -154,6 +166,15 @@ def classify_error(err: BaseException, provider: str = "") -> ErrorDescriptor:
 
     # 2. Auth errors
     status = _extract_status(err)
+    # Pre-flight credential checks already explain themselves.
+    if isinstance(err, MantleCredentialsError):
+        return ErrorDescriptor(
+            error_class=ErrorClass.PROVIDER_AUTH,
+            retryable=False,
+            recovery_hint=str(err),
+            max_retries=0,
+            original=err,
+        )
     # Mantle frontier mis-route (xAI Grok on …/v1 instead of …/openai/v1).
     if "berm is not enabled" in msg or (
         "access_denied" in msg and "berm" in msg
@@ -170,22 +191,38 @@ def classify_error(err: BaseException, provider: str = "") -> ErrorDescriptor:
             max_retries=0,
             original=err,
         )
+    on_mantle = "bedrock-mantle" in target
     # Mantle Claude with plain Anthropic client (X-Api-Key) instead of Bearer.
-    if "bedrock-mantle" in msg and any(
-        tok in msg
-        for tok in (
-            "invalid x-api-key",
-            "x-api-key",
-            "authentication_error",
-            "invalid api key",
-        )
-    ):
+    if on_mantle and "x-api-key" in msg:
         return ErrorDescriptor(
             error_class=ErrorClass.PROVIDER_AUTH,
             retryable=False,
             recovery_hint=(
                 "Mantle Claude needs Authorization Bearer (AsyncAnthropicBedrockMantle), "
-                "not X-Api-Key. Upgrade clawagents>=6.20.45 and restart the sidecar."
+                "not X-Api-Key. Upgrade anthropic>=0.95.0 and restart the sidecar."
+            ),
+            max_retries=0,
+            original=err,
+        )
+    # Bearer rejected: missing / placeholder / expired / wrong-region key.
+    if (on_mantle and status in (401, 403)) or "invalid bearer token" in msg:
+        return ErrorDescriptor(
+            error_class=ErrorClass.PROVIDER_AUTH,
+            retryable=False,
+            recovery_hint=(
+                (
+                    "Bedrock Mantle rejected the bearer token. Set BEDROCK_API_KEY "
+                    "(or MANTLE_API_KEY) to a Bedrock API key for the same region as "
+                    "the Mantle URL, then restart the sidecar. ANTHROPIC_API_KEY and "
+                    "OPENAI_API_KEY are not valid on Mantle, and short-term Bedrock "
+                    "keys expire within 12 hours."
+                )
+                if on_mantle
+                else (
+                    "The provider rejected the Authorization: Bearer token. Check the "
+                    "key belongs to this endpoint — a Bedrock/Mantle gateway needs "
+                    "BEDROCK_API_KEY / MANTLE_API_KEY, not ANTHROPIC_API_KEY."
+                )
             ),
             max_retries=0,
             original=err,
@@ -215,7 +252,14 @@ def classify_error(err: BaseException, provider: str = "") -> ErrorDescriptor:
         "usage limit reached", "credit balance is too low",
         "usagelimiterror", "payment required",
     )):
-        return ErrorClass.PROVIDER_QUOTA
+        recipe = RECOVERY_RECIPES[ErrorClass.PROVIDER_QUOTA]
+        return ErrorDescriptor(
+            error_class=ErrorClass.PROVIDER_QUOTA,
+            retryable=recipe.retryable,
+            recovery_hint=recipe.recovery_hint,
+            max_retries=recipe.max_retries,
+            original=err,
+        )
     if status == 429 or any(tok in msg for tok in (
         "rate limit", "too many requests", "rate_limit_exceeded",
         "resource_exhausted",
@@ -338,6 +382,23 @@ def _coerce_status(value: object) -> int | None:
     if isinstance(value, str) and value.strip().isdigit():
         return int(value.strip())
     return None
+
+
+def _extract_request_url(err: BaseException) -> str:
+    """URL the failing request targeted, lowercased with the query stripped.
+
+    Empty when the exception carries no request/response (plain ``Exception``
+    from a non-SDK code path).
+    """
+    response = getattr(err, "response", None)
+    for url in (
+        getattr(getattr(err, "request", None), "url", None),
+        getattr(getattr(response, "request", None), "url", None),
+        getattr(response, "url", None),
+    ):
+        if url:
+            return str(url).split("?", 1)[0].lower()
+    return ""
 
 
 def _extract_status(err: BaseException) -> int | None:
