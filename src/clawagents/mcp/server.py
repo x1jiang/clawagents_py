@@ -23,6 +23,7 @@ import os
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from datetime import timedelta
+from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable, Optional, TypedDict, Union
 
@@ -44,6 +45,29 @@ def _http_timeout_seconds(value: Any) -> float:
     if isinstance(value, timedelta):
         return float(value.total_seconds())
     return float(value)
+
+
+def _client_session_read_timeout(
+    timeout_seconds: Optional[float], *, mcp_version: Optional[str] = None
+) -> float | timedelta | None:
+    """Return the timeout type expected by the installed MCP client SDK.
+
+    MCP 1.x expects a ``timedelta`` while MCP 2.x expects numeric seconds.
+    Accepting both keeps already-created sidecars working during upgrades;
+    the package constraint keeps fresh installs on the supported 1.x line.
+    """
+    if timeout_seconds is None or timeout_seconds <= 0:
+        return None
+    if mcp_version is None:
+        try:
+            mcp_version = package_version("mcp")
+        except PackageNotFoundError:
+            mcp_version = "1"
+    try:
+        major = int(mcp_version.split(".", 1)[0])
+    except (AttributeError, TypeError, ValueError):
+        major = 1
+    return float(timeout_seconds) if major >= 2 else timedelta(seconds=float(timeout_seconds))
 
 
 # ─── Environment scrubbing for stdio MCP servers ──────────────────────────
@@ -350,11 +374,7 @@ class MCPServer(abc.ABC):
         self._transition(MCPLifecyclePhase.CONNECTING)
         self._exit_stack = AsyncExitStack()
         timeout_s = self.client_session_timeout_seconds
-        read_timeout = (
-            timedelta(seconds=float(timeout_s))
-            if timeout_s is not None and float(timeout_s) > 0
-            else None
-        )
+        read_timeout = _client_session_read_timeout(timeout_s)
         # Handshake budget: session read timeout, or 30s floor so one hung
         # server cannot block agent construction forever.
         connect_budget = float(timeout_s) if timeout_s and float(timeout_s) > 0 else 30.0
