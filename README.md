@@ -315,7 +315,7 @@ CLAW_LEARN=1                       # Enable PTRL (lessons from past runs)
 ```env
 PROVIDER=openai
 OPENAI_API_KEY=sk-...
-OPENAI_MODEL=gpt-5-nano
+OPENAI_MODEL=gpt-5.6-terra
 STREAMING=1
 CONTEXT_WINDOW=1000000
 MAX_TOKENS=8192
@@ -1591,7 +1591,7 @@ All environment variables are **optional**. They serve as defaults when the corr
 |:---|:---|:---:|:---|
 | `PROVIDER` | auto-detect | No | Hint: `"openai"`, `"gemini"`, `"anthropic"`, or `"bedrock"` / `"aws"`. Auto-detected from keys / AWS region |
 | `OPENAI_API_KEY` | — | **Yes** *(for OpenAI/Azure)* | OpenAI or Azure API key. **Not needed for local models** — when `OPENAI_BASE_URL` is set, a placeholder is used automatically |
-| `OPENAI_MODEL` | `gpt-5-nano` | No | Model name, Azure deployment name, or local model ID (e.g. `llama3.1`) |
+| `OPENAI_MODEL` | `gpt-5.6-terra` | No | Model name, Azure deployment name, or local model ID (e.g. `llama3.1`) |
 | `OPENAI_BASE_URL` | *(unset)* | No | Custom endpoint for OpenAI-compatible APIs: Azure, Bedrock gateway, Ollama, vLLM, LM Studio. Omit to use `api.openai.com` |
 | `OPENAI_API_VERSION` | *(unset)* | No | **Azure only.** API version string (e.g. `2024-12-01-preview`). Ignored by all other providers |
 | `GEMINI_API_KEY` | — | **Yes** *(for Gemini)* | Google Gemini API key |

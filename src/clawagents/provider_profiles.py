@@ -35,7 +35,7 @@ class ResolvedProviderProfile:
 
 
 BUILTIN_PROVIDER_PROFILES: dict[str, ProviderProfile] = {
-    "openai": ProviderProfile("openai", "openai", "gpt-5-nano"),
+    "openai": ProviderProfile("openai", "openai", "gpt-5.6-terra"),
     "gemini": ProviderProfile("gemini", "gemini", "gemini-3-flash-preview"),
     "anthropic": ProviderProfile("anthropic", "anthropic", "claude-sonnet-4-5"),
     "ollama": ProviderProfile("ollama", "openai", "llama3.1", "http://localhost:11434/v1", "ollama"),
