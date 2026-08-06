@@ -1,3 +1,7 @@
+## v6.20.57 — MCP SSE timedelta HTTP timeouts (August 2026)
+
+- **Fix:** `MCPServerSse` / `MCPServerStreamableHttp` coerce `timeout` and `sse_read_timeout` to float seconds before calling the MCP SDK. Passing `datetime.timedelta` (as in `mcp.client.session_group.SseServerParameters`) into `sse_client` previously built an `httpx.Timeout` that `httpcore`/`anyio` rejected with `TypeError: unsupported operand type(s) for +: 'float' and 'datetime.timedelta'` on connect — often surfacing as a chat turn failing immediately after “Running…”.
+
 ## v6.20.52 — Deferred tools, background notices, and guardrail hardening (July 2026)
 
 - Deferred / cache-preserving mid-run tool activation is now fully wired for both Anthropic (`defer_loading` / `tool_reference`) and OpenAI Responses (`tool_search_call` / `tool_search_output`). Fail-soft: a provider rejection of the wire shape disables deferral for that provider and replays the request with the ordinary tool list, so it can never cost a turn (still opt-in via `deferred_tool_loading`).

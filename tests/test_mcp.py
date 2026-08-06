@@ -345,3 +345,89 @@ async def test_lifecycle_phase_progresses_through_states(stdio_server_fixture: P
         # list_tools transitions through DISCOVERING_TOOLS and back to READY.
         assert server.phase == MCPLifecyclePhase.READY
     assert server.phase == MCPLifecyclePhase.SHUTDOWN
+
+
+def test_http_timeout_seconds_coerces_timedelta_and_float() -> None:
+    from datetime import timedelta
+
+    from clawagents.mcp.server import _http_timeout_seconds
+
+    assert _http_timeout_seconds(30) == 30.0
+    assert _http_timeout_seconds(12.5) == 12.5
+    assert _http_timeout_seconds(timedelta(seconds=90)) == 90.0
+    assert _http_timeout_seconds(timedelta(minutes=1, seconds=5)) == 65.0
+
+
+@pytest.mark.skipif(not MCP_SDK_AVAILABLE, reason="mcp SDK not installed")
+def test_sse_create_streams_coerces_timedelta_timeouts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """timedelta HTTP timeouts must become floats before sse_client (httpx/anyio)."""
+    from datetime import timedelta
+    from contextlib import asynccontextmanager
+
+    from clawagents.mcp.server import MCPServerSse
+
+    captured: dict[str, Any] = {}
+
+    @asynccontextmanager
+    async def fake_sse_client(**kwargs: Any):
+        captured.update(kwargs)
+        yield (object(), object())
+
+    monkeypatch.setattr("mcp.client.sse.sse_client", fake_sse_client)
+
+    server = MCPServerSse(
+        {
+            "url": "http://127.0.0.1:9/sse",
+            "timeout": timedelta(seconds=5),
+            "sse_read_timeout": timedelta(seconds=300),
+        },
+        name="sse-timeout",
+    )
+    # _create_streams returns the context manager; entering it hits fake_sse_client.
+    cm = server._create_streams()
+
+    async def _enter() -> None:
+        async with cm:
+            pass
+
+    asyncio.run(_enter())
+    assert captured["timeout"] == 5.0
+    assert captured["sse_read_timeout"] == 300.0
+    assert isinstance(captured["timeout"], float)
+    assert isinstance(captured["sse_read_timeout"], float)
+
+
+@pytest.mark.skipif(not MCP_SDK_AVAILABLE, reason="mcp SDK not installed")
+def test_sse_timedelta_params_no_longer_raise_float_plus_timedelta() -> None:
+    """End-to-end: timedelta params must not surface the httpcore TypeError."""
+    from datetime import timedelta
+
+    from clawagents.mcp.server import MCPServerSse
+
+    server = MCPServerSse(
+        {
+            "url": "http://127.0.0.1:9/sse",
+            "timeout": timedelta(seconds=2),
+            "sse_read_timeout": timedelta(seconds=5),
+        },
+        name="sse-timedelta",
+        client_session_timeout_seconds=2.0,
+    )
+
+    with pytest.raises(Exception) as ei:
+        asyncio.run(server.connect())
+
+    # Flatten ExceptionGroup / nested causes and assert the old TypeError is gone.
+    msgs: list[str] = []
+    stack: list[BaseException] = [ei.value]
+    while stack:
+        exc = stack.pop()
+        msgs.append(f"{type(exc).__name__}: {exc}")
+        for sub in getattr(exc, "exceptions", ()) or ():
+            stack.append(sub)
+        if exc.__cause__ is not None:
+            stack.append(exc.__cause__)
+        if exc.__context__ is not None and exc.__context__ is not exc.__cause__:
+            stack.append(exc.__context__)
+    blob = "\n".join(msgs)
+    assert "unsupported operand type(s) for +: 'float' and 'datetime.timedelta'" not in blob
