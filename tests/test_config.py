@@ -26,6 +26,15 @@ def test_is_anthropic_model():
 
 
 def test_default_model_openai():
+    config = EngineConfig(openai_api_key="test-key")
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("PROVIDER", None)
+        os.environ.pop("OPENAI_MODEL", None)
+        assert config.openai_model == "gpt-5.6-terra"
+        assert get_default_model(config) == "gpt-5.6-terra"
+
+
+def test_default_model_openai_explicit_override():
     config = EngineConfig(openai_api_key="test-key", openai_model="gpt-5-nano")
     with patch.dict(os.environ, {}, clear=False):
         os.environ.pop("PROVIDER", None)
@@ -58,7 +67,7 @@ def test_engine_config_defaults():
     }
     with patch.dict(os.environ, env_override, clear=False):
         config = EngineConfig(
-            openai_api_key="", openai_model="gpt-5-nano",
+            openai_api_key="", openai_model="gpt-5.6-terra",
             gemini_api_key="", anthropic_api_key="",
             max_tokens=8192, temperature=0.0, context_window=1000000,
         )

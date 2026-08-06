@@ -139,7 +139,8 @@ class EngineConfig(BaseSettings):
     )
 
     openai_api_key: str = ""
-    openai_model: str = "gpt-5-nano"
+    # Prefer GPT-5.6 Terra when an OpenAI key is present (matches VS Code extension).
+    openai_model: str = "gpt-5.6-terra"
     openai_base_url: str = ""
     openai_api_version: str = ""
     openai_api_type: str = ""
