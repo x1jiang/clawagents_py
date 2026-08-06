@@ -1,3 +1,7 @@
+## v6.20.58 — Context Mode MCP 2.x session timeout compatibility (August 2026)
+
+- **Fix:** `MCPServerStdio` now passes numeric `read_timeout_seconds` to MCP 2.x `ClientSession` and keeps the `timedelta` contract for MCP 1.x. This prevents Context Mode stdio servers from failing immediately with `TypeError: unsupported operand type(s) for +: 'float' and 'datetime.timedelta'`. Fresh installs constrain the MCP extra to the supported `>=1.27.1,<2.0.0` range, while the runtime compatibility branch keeps existing MCP 2.x sidecars working until they are upgraded.
+
 ## v6.20.57 — MCP SSE timedelta HTTP timeouts (August 2026)
 
 - **Fix:** `MCPServerSse` / `MCPServerStreamableHttp` coerce `timeout` and `sse_read_timeout` to float seconds before calling the MCP SDK. Passing `datetime.timedelta` (as in `mcp.client.session_group.SseServerParameters`) into `sse_client` previously built an `httpx.Timeout` that `httpcore`/`anyio` rejected with `TypeError: unsupported operand type(s) for +: 'float' and 'datetime.timedelta'` on connect — often surfacing as a chat turn failing immediately after “Running…”.
