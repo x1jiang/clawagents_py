@@ -1326,16 +1326,27 @@ def create_claw_agent(
             )
 
         manager = MCPServerManager(mcp_servers)
-        # Start the manager: connect each server, list tools, register them.
-        # We run it in a fresh event loop the same way skill loading does, so
-        # the call works from sync, Streamlit, and Jupyter contexts.
+
+        async def _discover_and_release() -> None:
+            # Connect, list tools, register them — then close the transports
+            # before this temporary loop is torn down. A transport left open
+            # pins reader tasks to the loop, and `asyncio.run` then blocks
+            # forever cancelling them. Tools stay registered; the session is
+            # re-established on the loop that first invokes one.
+            await manager.start(registry)
+            await manager.release_transports()
+
+        # Run in a fresh event loop the same way skill loading does, so the
+        # call works from sync, Streamlit, and Jupyter contexts.
         try:
             asyncio.get_running_loop()
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                pool.submit(asyncio.run, manager.start(registry)).result()
         except RuntimeError:
-            asyncio.run(manager.start(registry))
+            asyncio.run(_discover_and_release())
+        else:
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                pool.submit(asyncio.run, _discover_and_release()).result()
 
         # Stash the manager on the agent so callers can shut it down. We also
         # register an atexit finaliser as a backstop for short-lived scripts.
