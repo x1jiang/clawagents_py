@@ -99,6 +99,27 @@ class MCPServerManager:
                         pass
         self._started = False
 
+    async def release_transports(self) -> None:
+        """Close every transport but keep the tools registered.
+
+        Tool discovery may run in a short-lived event loop (agent
+        construction). MCP transports are loop-affine: leaving them open
+        keeps that loop's reader tasks alive, so the loop can never finish
+        cancelling them and shutting down. Closing the transports here lets
+        the loop exit; :meth:`MCPServer._ensure_session` transparently
+        reconnects on whichever loop first invokes a tool.
+        """
+        for server in self.servers:
+            try:
+                await server.shutdown()
+            except Exception as exc:  # pragma: no cover — best-effort
+                with custom_span(
+                    "mcp.manager.release_error",
+                    server=server.name,
+                    error=str(exc),
+                ):
+                    pass
+
     def get_server_config(self, server_name: str) -> Any:
         """Return mutable transport params for a server when available."""
         for server in self.servers:
