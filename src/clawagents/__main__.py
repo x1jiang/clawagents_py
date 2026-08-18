@@ -33,7 +33,7 @@ _ENV_TEMPLATE = dedent("""\
     # ── Google Gemini ───────────────────────────────────────────────────
     # PROVIDER=gemini
     # GEMINI_API_KEY=AIza...
-    # GEMINI_MODEL=gemini-3-flash-preview
+    # GEMINI_MODEL=gemini-3.7-flash
 
     # ── Azure OpenAI ────────────────────────────────────────────────────
     # PROVIDER=openai

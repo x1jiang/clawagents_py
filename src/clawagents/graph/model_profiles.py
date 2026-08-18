@@ -111,6 +111,8 @@ MODEL_PROFILES: dict[str, dict[str, int | float]] = {
     },
     "grok": {"max_input_tokens": 131_072, "budget_ratio": 0.85},
     # ── Google — Gemini 3.x (1M–2M context) ────────────────────────────
+    "gemini-3.7-flash": {"max_input_tokens": 1_000_000, "budget_ratio": 0.90},
+    "gemini-3.7": {"max_input_tokens": 1_000_000, "budget_ratio": 0.90},
     "gemini-3.6-flash": {"max_input_tokens": 1_000_000, "budget_ratio": 0.90},
     "gemini-3.6": {"max_input_tokens": 1_000_000, "budget_ratio": 0.90},
     "gemini-3.5-flash-lite": {"max_input_tokens": 1_000_000, "budget_ratio": 0.90},
