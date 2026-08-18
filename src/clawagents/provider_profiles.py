@@ -36,7 +36,7 @@ class ResolvedProviderProfile:
 
 BUILTIN_PROVIDER_PROFILES: dict[str, ProviderProfile] = {
     "openai": ProviderProfile("openai", "openai", "gpt-5.6-terra"),
-    "gemini": ProviderProfile("gemini", "gemini", "gemini-3-flash-preview"),
+    "gemini": ProviderProfile("gemini", "gemini", "gemini-3.7-flash"),
     "anthropic": ProviderProfile("anthropic", "anthropic", "claude-sonnet-4-5"),
     "ollama": ProviderProfile("ollama", "openai", "llama3.1", "http://localhost:11434/v1", "ollama"),
     # Native Amazon Bedrock (IAM / instance role — HIPAA-friendly Claude path).

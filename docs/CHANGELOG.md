@@ -1,3 +1,8 @@
+## v6.20.60 — Gemini 3.7 Flash catalog (August 2026)
+
+- Add `gemini-3.7-flash` (1M context) as the latest Gemini Flash workhorse, released 13 August 2026.
+- Gemini provider default / `GEMINI_MODEL` fallback is now `gemini-3.7-flash` (was `gemini-3-flash-preview`). Existing explicit model settings are unchanged.
+
 ## v6.20.58 — Context Mode MCP 2.x session timeout compatibility (August 2026)
 
 - **Fix:** `MCPServerStdio` now passes numeric `read_timeout_seconds` to MCP 2.x `ClientSession` and keeps the `timedelta` contract for MCP 1.x. This prevents Context Mode stdio servers from failing immediately with `TypeError: unsupported operand type(s) for +: 'float' and 'datetime.timedelta'`. Fresh installs constrain the MCP extra to the supported `>=1.27.1,<2.0.0` range, while the runtime compatibility branch keeps existing MCP 2.x sidecars working until they are upgraded.
