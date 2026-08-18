@@ -1,3 +1,7 @@
+## v6.20.61 — Report the installed package version (August 2026)
+
+- `clawagents.__version__` now comes from the installed distribution metadata instead of a hardcoded string. 6.20.60 shipped Gemini 3.7 Flash but still advertised `6.20.59`, so the VS Code sidecar probe rejected a successful install.
+
 ## v6.20.60 — Gemini 3.7 Flash catalog (August 2026)
 
 - Add `gemini-3.7-flash` (1M context) as the latest Gemini Flash workhorse, released 13 August 2026.
