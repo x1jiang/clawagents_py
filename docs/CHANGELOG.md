@@ -1,3 +1,9 @@
+## v6.20.62 — Gemini 3.7 tool-loop answers (August 2026)
+
+- A history-400 flatten retry no longer dumps `[called write_file({…huge args…})]` into the chat. Flatten omits function-call arguments, keeps the tool result, and asks for a plain-language answer.
+- An empty STOP or a `[called …]` / `[used …]`-only reply after tools continues (up to two nudges) instead of finishing with **Done** and no answer.
+- Function responses send both `id` and `call_id`. Streaming keeps one function-call part per tool instead of appending a new `gemini_<uuid>` on every chunk (that mismatch triggered the 400 → flatten path).
+
 ## v6.20.61 — Report the installed package version (August 2026)
 
 - `clawagents.__version__` now comes from the installed distribution metadata instead of a hardcoded string. 6.20.60 shipped Gemini 3.7 Flash but still advertised `6.20.59`, so the VS Code sidecar probe rejected a successful install.
