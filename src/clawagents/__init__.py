@@ -4,7 +4,7 @@ try:
     __version__ = _pkg_version("clawagents")
 except PackageNotFoundError:
     # Source checkout / editable tree before the dist-info exists.
-    __version__ = "6.20.61"
+    __version__ = "6.20.62"
 
 from clawagents.agent import ClawAgent, create_claw_agent
 from clawagents.run_result import RunResult

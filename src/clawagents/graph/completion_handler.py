@@ -9,9 +9,41 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from clawagents.providers.llm import LLMMessage
+from clawagents.providers.llm import (
+    GEMINI_SUMMARIZE_MARKER,
+    LLMMessage,
+    looks_like_gemini_command_dump,
+)
 
 logger = logging.getLogger(__name__)
+
+_MAX_GEMINI_ANSWER_NUDGES = 2
+
+
+def _transcript_has_tool_work(messages: list[LLMMessage]) -> bool:
+    for msg in messages:
+        if msg.role == "tool":
+            return True
+        if msg.role == "assistant" and msg.tool_calls_meta:
+            return True
+        content = msg.content
+        if isinstance(content, str) and (
+            content.startswith("[used ")
+            or content.startswith("[called ")
+            or "[result " in content
+        ):
+            return True
+    return False
+
+
+def _gemini_nudge_count(messages: list[LLMMessage]) -> int:
+    return sum(
+        1
+        for msg in messages
+        if msg.role == "user"
+        and isinstance(msg.content, str)
+        and GEMINI_SUMMARIZE_MARKER in msg.content
+    )
 
 
 @dataclass(frozen=True)
@@ -79,6 +111,36 @@ class CompletionHandler:
             )
             return CompletionDecision("continue")
 
+        if use_native_tools and self._should_retry_empty_or_command_dump(
+            messages, response
+        ):
+            self._events.emit(
+                "warn",
+                {
+                    "message": (
+                        "Gemini returned no answer after tools — asking it to summarize"
+                    )
+                },
+            )
+            messages.extend(
+                [
+                    LLMMessage(
+                        role="assistant",
+                        content=response.content or "",
+                        thinking=thinking,
+                    ),
+                    LLMMessage(
+                        role="user",
+                        content=(
+                            f"{GEMINI_SUMMARIZE_MARKER} already collected. "
+                            "Write the answer in plain language. "
+                            "Do not print [called …] commands."
+                        ),
+                    ),
+                ]
+            )
+            return CompletionDecision("continue")
+
         codeact = await self._try_codeact(state, messages, response, thinking)
         if codeact is not None:
             return codeact
@@ -130,6 +192,17 @@ class CompletionHandler:
                 LLMMessage(role="assistant", content=response.content, thinking=thinking)
             )
         return CompletionDecision("done")
+
+    @staticmethod
+    def _should_retry_empty_or_command_dump(messages: list[LLMMessage], response: Any) -> bool:
+        if _gemini_nudge_count(messages) >= _MAX_GEMINI_ANSWER_NUDGES:
+            return False
+        content = (getattr(response, "content", None) or "").strip()
+        if looks_like_gemini_command_dump(content):
+            return True
+        if not content:
+            return _transcript_has_tool_work(messages)
+        return False
 
     async def _try_codeact(
         self,

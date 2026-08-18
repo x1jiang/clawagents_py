@@ -87,10 +87,13 @@ class ToolTurnExecutor:
         """Execute the requested calls and append the next model observation."""
         if record_assistant_message:
             if self._use_native_tools and response.content and response.content.strip():
-                self._events.typed(
-                    "assistant_message",
-                    {"content": response.content, "thinking": thinking},
-                )
+                from clawagents.providers.llm import looks_like_gemini_command_dump
+
+                if not looks_like_gemini_command_dump(response.content):
+                    self._events.typed(
+                        "assistant_message",
+                        {"content": response.content, "thinking": thinking},
+                    )
             self._write_assistant_tool_message(response, native_tool_calls, thinking)
 
         if len(tool_calls) == 1:

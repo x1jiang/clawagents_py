@@ -2250,16 +2250,13 @@ def _sanitize_gemini_contents(contents: list[dict[str, Any]]) -> list[dict[str, 
                     name = fc.get("name") or "unknown"
                     if name in have_names and len(fr_parts) >= len(fcs):
                         continue
-                    fr: dict[str, Any] = {
-                        "function_response": {
-                            "name": name,
-                            "response": {
-                                "result": "[tool call cancelled or skipped before a result was recorded]",
-                            },
-                        }
+                    fr = {
+                        "function_response": _gemini_function_response_body(
+                            name,
+                            "[tool call cancelled or skipped before a result was recorded]",
+                            fc.get("id"),
+                        )
                     }
-                    if fc.get("id"):
-                        fr["function_response"]["id"] = fc["id"]
                     fr_parts.append(fr)
                     have_names.add(name)
             elif len(fr_parts) > len(fcs):
@@ -2271,9 +2268,7 @@ def _sanitize_gemini_contents(contents: list[dict[str, Any]]) -> list[dict[str, 
                 fc = fcs[idx].get("function_call") or fcs[idx].get("functionCall") or {}
                 if fc.get("id"):
                     body = fr.get("function_response") or fr.get("functionResponse") or {}
-                    body = dict(body)
-                    body["id"] = fc["id"]
-                    fr["function_response"] = body
+                    fr["function_response"] = _stamp_function_response_ids(body, fc["id"])
                     fr.pop("functionResponse", None)
             if fr_parts:
                 out.append({"role": "user", "parts": fr_parts})
@@ -2342,14 +2337,153 @@ def _is_gemini_history_400(exc: BaseException) -> bool:
     )
 
 
+GEMINI_ANSWER_NUDGE = (
+    "The tools already ran. Answer the user's question from those results in "
+    "plain language. Do not reprint [called …] / [used …] commands, and do not "
+    "rewrite files unless asked."
+)
+
+GEMINI_SUMMARIZE_MARKER = "[Gemini] Please answer from the tool results"
+
+_GEMINI_DUMP_LINE_RE = _re.compile(r"^\[(?:called|used|result)\s+", _re.IGNORECASE)
+
+
+def looks_like_gemini_command_dump(text: str | None) -> bool:
+    """True when a model reply is only flatten-style ``[called …]`` / ``[used …]``.
+
+    Gemini 3.7 often echoes the flatten fallback as its "answer". That is never
+    a user-facing result.
+    """
+    if not text or not str(text).strip():
+        return False
+    s = str(text).strip()
+    if s.startswith("[called ") or s.startswith("[used "):
+        parts = _re.split(r"\n\s*\n", s, maxsplit=1)
+        if (
+            len(parts) == 2
+            and len(parts[1].strip()) >= 40
+            and not parts[1].lstrip().startswith("[")
+        ):
+            return False
+        return True
+    lines = [ln.strip() for ln in s.splitlines() if ln.strip()]
+    return bool(lines) and all(_GEMINI_DUMP_LINE_RE.match(ln) for ln in lines)
+
+
+def _gemini_function_response_body(
+    name: str,
+    result: Any,
+    call_id: str | None = None,
+) -> dict[str, Any]:
+    """Build a FunctionResponse dict. Gemini 3.7 pairs by ``id`` and ``call_id``."""
+    body: dict[str, Any] = {
+        "name": name,
+        "response": {"result": result},
+    }
+    if call_id:
+        cid = str(call_id)
+        body["id"] = cid
+        body["call_id"] = cid
+    return body
+
+
+def _stamp_function_response_ids(
+    body: dict[str, Any],
+    call_id: str | None,
+) -> dict[str, Any]:
+    out = dict(body)
+    if call_id:
+        cid = str(call_id)
+        out["id"] = cid
+        out["call_id"] = cid
+    return out
+
+
+def _flatten_gemini_fc_text(fc: dict[str, Any]) -> str:
+    # Never dump args — write_file/execute payloads become the visible "answer".
+    return f"[used {fc.get('name') or 'tool'}]"
+
+
+def _flatten_gemini_fr_text(fr: dict[str, Any], *, limit: int = 4000) -> str:
+    name = fr.get("name") or "tool"
+    resp = fr.get("response")
+    result = resp.get("result") if isinstance(resp, dict) else resp
+    text = str(result)
+    if len(text) > limit:
+        text = text[:limit] + "…"
+    return f"[result {name}: {text}]"
+
+
+def _upsert_gemini_stream_function_call(
+    fn_calls: list[NativeToolCall],
+    fc: Any,
+) -> NativeToolCall:
+    """Keep one NativeToolCall per streamed function_call (latest args win)."""
+    import uuid
+
+    name = getattr(fc, "name", None) or "unknown"
+    args = dict(fc.args) if getattr(fc, "args", None) else {}
+    fc_id = getattr(fc, "id", None)
+    if fc_id:
+        sid = str(fc_id)
+        for i, prev in enumerate(fn_calls):
+            if prev.tool_call_id == sid or (
+                prev.tool_name == name and str(prev.tool_call_id).startswith("gemini_")
+            ):
+                fn_calls[i] = NativeToolCall(name, args, sid)
+                return fn_calls[i]
+        call = NativeToolCall(name, args, sid)
+        fn_calls.append(call)
+        return call
+    for i, prev in enumerate(fn_calls):
+        if prev.tool_name == name:
+            fn_calls[i] = NativeToolCall(name, args, prev.tool_call_id)
+            return fn_calls[i]
+    call = NativeToolCall(name, args, f"gemini_{uuid.uuid4().hex[:8]}")
+    fn_calls.append(call)
+    return call
+
+
+def _absorb_gemini_stream_parts(all_parts: list[Any], new_parts: Any) -> None:
+    """Replace a streamed function_call part in place; append text/thought."""
+    for p in new_parts:
+        fc = getattr(p, "function_call", None)
+        if not fc:
+            all_parts.append(p)
+            continue
+        fc_id = getattr(fc, "id", None)
+        name = getattr(fc, "name", None)
+        replaced = False
+        for i, prev in enumerate(all_parts):
+            pfc = getattr(prev, "function_call", None)
+            if not pfc:
+                continue
+            pid = getattr(pfc, "id", None)
+            same_id = bool(fc_id and pid and str(pid) == str(fc_id))
+            same_name_pending_id = bool(
+                name
+                and getattr(pfc, "name", None) == name
+                and (not fc_id or not pid)
+            )
+            if same_id or same_name_pending_id:
+                all_parts[i] = p
+                replaced = True
+                break
+        if not replaced:
+            all_parts.append(p)
+
+
 def _flatten_gemini_tool_history(
     contents: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """Convert FC/FR turns into plain text so a poisoned transcript can recover.
 
     Used as a one-shot retry when Gemini rejects tool-turn ordering / signatures.
+    Function-call args are omitted so Gemini 3.7 cannot echo ``[called write_file(…)]``
+    as the user-visible answer.
     """
     flat: list[dict[str, Any]] = []
+    flattened_tool = False
     for turn in contents:
         role = turn.get("role")
         parts = list(turn.get("parts") or [])
@@ -2360,12 +2494,13 @@ def _flatten_gemini_tool_history(
             if "text" in p and p["text"]:
                 texts.append(str(p["text"]))
             elif _part_has_function_call(p):
+                flattened_tool = True
                 fc = p.get("function_call") or p.get("functionCall") or {}
-                texts.append(f"[called {fc.get('name', 'tool')}({fc.get('args') or {}})]")
+                texts.append(_flatten_gemini_fc_text(fc))
             elif _part_has_function_response(p):
+                flattened_tool = True
                 fr = p.get("function_response") or p.get("functionResponse") or {}
-                resp = fr.get("response")
-                texts.append(f"[result {fr.get('name', 'tool')}: {resp}]")
+                texts.append(_flatten_gemini_fr_text(fr))
         if not texts:
             continue
         # Map model→model, user/FR→user
@@ -2377,6 +2512,11 @@ def _flatten_gemini_tool_history(
             flat.append({"role": out_role, "parts": [{"text": blob}]})
     while flat and flat[0]["role"] == "model":
         flat.pop(0)
+    if flattened_tool:
+        if flat and flat[-1]["role"] == "user":
+            flat[-1]["parts"][0]["text"] += "\n\n" + GEMINI_ANSWER_NUDGE
+        else:
+            flat.append({"role": "user", "parts": [{"text": GEMINI_ANSWER_NUDGE}]})
     return flat
 
 
@@ -2453,12 +2593,9 @@ class GeminiProvider(LLMProvider):
                     system_parts.extend([p.get("text", "") for p in m.content if p.get("type") == "text"])
             elif m.role == "tool" and m.tool_call_id:
                 tool_name = tc_id_to_name.get(m.tool_call_id, "unknown")
-                fr_body: dict[str, Any] = {
-                    "name": tool_name,
-                    "response": {"result": m.content},
-                    # Gemini 3 pairs FR to FC by id — must echo the call id.
-                    "id": m.tool_call_id,
-                }
+                fr_body = _gemini_function_response_body(
+                    tool_name, m.content, m.tool_call_id
+                )
                 user_contents.append({"role": "user", "parts": [{"function_response": fr_body}]})
             elif m.role == "assistant" and m.tool_calls_meta:
                 # Prefer preserved gemini_parts (thought_signature + FC ids).
@@ -2710,20 +2847,14 @@ class GeminiProvider(LLMProvider):
                                     last_finish_reason = fr
                                 _cand_parts2 = getattr(getattr(candidate, "content", None), "parts", None)
                                 if _cand_parts2:
+                                    _absorb_gemini_stream_parts(all_stream_parts, _cand_parts2)
                                     for p in _cand_parts2:
-                                        all_stream_parts.append(p)
                                         fc = getattr(p, "function_call", None)
                                         if fc:
-                                            import uuid
                                             if not first_token_fired:
                                                 first_token_fired = True
                                                 _fire_first_token(on_first_token)
-                                            fc_id = getattr(fc, "id", None) or f"gemini_{uuid.uuid4().hex[:8]}"
-                                            fn_calls.append(NativeToolCall(
-                                                tool_name=fc.name,
-                                                args=dict(fc.args) if fc.args else {},
-                                                tool_call_id=str(fc_id),
-                                            ))
+                                            _upsert_gemini_stream_function_call(fn_calls, fc)
                         if hasattr(chunk, "usage_metadata") and chunk.usage_metadata:
                             _um = chunk.usage_metadata
                             final_prompt_tokens = getattr(_um, "prompt_token_count", 0) or 0
