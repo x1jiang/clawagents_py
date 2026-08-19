@@ -2192,6 +2192,87 @@ def _model_parts_from_tool_meta(
     return _restore_gemini_parts_for_api(parts)
 
 
+# google-genai FunctionResponse / FunctionCall / Part allow-lists.
+# Extra keys (e.g. call_id) raise pydantic extra_forbidden and abort the turn.
+_GEMINI_FR_KEYS = frozenset(
+    {"id", "name", "response", "will_continue", "scheduling", "parts"}
+)
+_GEMINI_FC_KEYS = frozenset({"id", "name", "args", "partial_args", "will_continue"})
+_GEMINI_PART_KEYS = frozenset(
+    {
+        "text",
+        "thought",
+        "thought_signature",
+        "function_call",
+        "function_response",
+        "inline_data",
+        "file_data",
+        "executable_code",
+        "code_execution_result",
+        "video_metadata",
+        "media_resolution",
+        "tool_call",
+        "tool_response",
+        "part_metadata",
+    }
+)
+
+
+def _is_gemini_sdk_shape_error(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return "extra_forbidden" in msg or (
+        "validation error" in msg and "generatecontentparameters" in msg
+    )
+
+
+def _scrub_gemini_function_response(fr: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in fr.items() if k in _GEMINI_FR_KEYS}
+
+
+def _scrub_gemini_function_call(fc: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in fc.items() if k in _GEMINI_FC_KEYS}
+
+
+def _scrub_gemini_part(part: dict[str, Any]) -> dict[str, Any] | None:
+    q = {k: v for k, v in part.items() if k in _GEMINI_PART_KEYS}
+    if isinstance(q.get("function_response"), dict):
+        q["function_response"] = _scrub_gemini_function_response(q["function_response"])
+    if isinstance(q.get("function_call"), dict):
+        q["function_call"] = _scrub_gemini_function_call(q["function_call"])
+    sig = q.get("thought_signature")
+    if isinstance(sig, str):
+        import base64
+
+        try:
+            q["thought_signature"] = base64.b64decode(sig)
+        except Exception:  # noqa: BLE001
+            q.pop("thought_signature", None)
+    if q.get("text") == "" and ("function_call" in q or "function_response" in q):
+        q.pop("text", None)
+    if set(q.keys()) <= {"text"} and not str(q.get("text") or "").strip():
+        return None
+    return q or None
+
+
+def _scrub_gemini_contents(contents: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop SDK-illegal keys so generate_content cannot fail extra_forbidden."""
+    out: list[dict[str, Any]] = []
+    for turn in contents:
+        if not isinstance(turn, dict):
+            continue
+        role = turn.get("role")
+        parts: list[dict[str, Any]] = []
+        for p in turn.get("parts") or []:
+            if not isinstance(p, dict):
+                continue
+            scrubbed = _scrub_gemini_part(p)
+            if scrubbed:
+                parts.append(scrubbed)
+        if role in ("user", "model") and parts:
+            out.append({"role": role, "parts": parts})
+    return out
+
+
 def _sanitize_gemini_contents(contents: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Rebuild a Gemini-legal transcript: strict alternation + FC→FR pairs.
 
@@ -2320,7 +2401,7 @@ def _sanitize_gemini_contents(contents: list[dict[str, Any]]) -> list[dict[str, 
     if out and out[-1]["role"] == "model" and not _parts_have_function_call(out[-1]["parts"]):
         # trailing model text without following user is ok for generateContent
         pass
-    return out
+    return _scrub_gemini_contents(out)
 
 
 def _is_gemini_history_400(exc: BaseException) -> bool:
@@ -2652,6 +2733,7 @@ class GeminiProvider(LLMProvider):
         gemini_config = types.GenerateContentConfig(**config_opts)
 
         async def _call(contents: list[dict[str, Any]]) -> LLMResponse:
+            contents = _scrub_gemini_contents(contents)
             if not on_chunk:
                 from clawagents.circuit_breaker import breaker_key as _bk
 
@@ -2690,11 +2772,25 @@ class GeminiProvider(LLMProvider):
         *,
         _malformed_retry: bool = False,
     ) -> LLMResponse:
-        resp = await self.client.aio.models.generate_content(
-            model=self.model,
-            contents=user_contents,
-            config=gemini_config,
-        )
+        user_contents = _scrub_gemini_contents(user_contents)
+        try:
+            resp = await self.client.aio.models.generate_content(
+                model=self.model,
+                contents=user_contents,
+                config=gemini_config,
+            )
+        except Exception as exc:
+            if not _is_gemini_sdk_shape_error(exc):
+                raise
+            cleaned = _scrub_gemini_contents(user_contents)
+            if cleaned == user_contents:
+                raise
+            logger.warning("  [gemini] SDK shape error — retrying after scrub")
+            resp = await self.client.aio.models.generate_content(
+                model=self.model,
+                contents=cleaned,
+                config=gemini_config,
+            )
         fn_calls: list[NativeToolCall] | None = None
         raw_parts = None
         finish_reason = None
@@ -2765,6 +2861,7 @@ class GeminiProvider(LLMProvider):
         *,
         on_first_token: Any | None = None,
     ) -> LLMResponse:
+        user_contents = _scrub_gemini_contents(user_contents)
         last_error: BaseException | None = None
         breaker = _get_stream_breaker("gemini", model=self.model)
 

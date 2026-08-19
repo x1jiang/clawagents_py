@@ -1,3 +1,7 @@
+## v6.20.64 — Gemini request-shape hardening (August 2026)
+
+- Scrub every Gemini turn to the google-genai allow-list before ``generate_content``. Illegal extras such as ``call_id`` are stripped even if a future change adds them back. The exact 6.20.62 crash transcript now validates against the SDK models.
+
 ## v6.20.63 — Gemini FunctionResponse shape (August 2026)
 
 - Stop sending ``call_id`` on Gemini function responses. google-genai's Pydantic model only allows ``id`` / ``name`` / ``response``; the extra field aborted the turn with 43 validation errors and was mislabeled as an API-key failure (`extra_forbidden` contains ``forbidden``).
