@@ -2425,6 +2425,7 @@ GEMINI_ANSWER_NUDGE = (
 )
 
 GEMINI_SUMMARIZE_MARKER = "[Gemini] Please answer from the tool results"
+GEMINI_EVIDENCE_MARKER = "[Gemini] No tool ran this turn — do not invent results"
 
 _GEMINI_DUMP_LINE_RE = _re.compile(r"^\[(?:called|used|result)\s+", _re.IGNORECASE)
 
