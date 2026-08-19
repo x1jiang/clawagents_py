@@ -1,3 +1,7 @@
+## v6.20.63 — Gemini FunctionResponse shape (August 2026)
+
+- Stop sending ``call_id`` on Gemini function responses. google-genai's Pydantic model only allows ``id`` / ``name`` / ``response``; the extra field aborted the turn with 43 validation errors and was mislabeled as an API-key failure (`extra_forbidden` contains ``forbidden``).
+
 ## v6.20.62 — Gemini 3.7 tool-loop answers (August 2026)
 
 - A history-400 flatten retry no longer dumps `[called write_file({…huge args…})]` into the chat. Flatten omits function-call arguments, keeps the tool result, and asks for a plain-language answer.

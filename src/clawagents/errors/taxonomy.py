@@ -227,13 +227,29 @@ def classify_error(err: BaseException, provider: str = "") -> ErrorDescriptor:
             max_retries=0,
             original=err,
         )
+    # Pydantic ``extra_forbidden`` contains the substring "forbidden" and used
+    # to be mislabeled as an API-key failure (Gemini FunctionResponse shape).
+    if "extra_forbidden" in msg or (
+        "validation error" in msg and "generatecontentparameters" in msg
+    ):
+        recipe = RECOVERY_RECIPES[ErrorClass.UNKNOWN]
+        return ErrorDescriptor(
+            error_class=ErrorClass.UNKNOWN,
+            retryable=False,
+            recovery_hint=(
+                "The Gemini request shape was rejected by the SDK "
+                "(not an API-key problem). Upgrade clawagents and retry."
+            ),
+            max_retries=0,
+            original=err,
+        )
     if status in (401, 403) or any(tok in msg for tok in (
-        "unauthorized", "forbidden", "invalid api key", "invalid_api_key",
+        "unauthorized", "invalid api key", "invalid_api_key",
         "authentication", "invalid x-api-key", "permission denied",
         "incorrect api key", "invalid auth",
         # google-genai: 400 INVALID_ARGUMENT / API_KEY_INVALID
         "api key not valid", "api_key_invalid",
-    )):
+    )) or ("forbidden" in msg and "extra_forbidden" not in msg):
         recipe = RECOVERY_RECIPES[ErrorClass.PROVIDER_AUTH]
         return ErrorDescriptor(
             error_class=ErrorClass.PROVIDER_AUTH,

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from clawagents.providers.llm import _sanitize_gemini_contents
 
 
@@ -23,9 +25,9 @@ def test_coalesce_merges_parallel_tool_responses_only():
     assert len(out[2]["parts"]) == 2
     assert all("function_response" in p for p in out[2]["parts"])
     assert out[2]["parts"][0]["function_response"]["id"] == "c1"
-    assert out[2]["parts"][0]["function_response"]["call_id"] == "c1"
+    assert "call_id" not in out[2]["parts"][0]["function_response"]
     assert out[2]["parts"][1]["function_response"]["id"] == "c2"
-    assert out[2]["parts"][1]["function_response"]["call_id"] == "c2"
+    assert "call_id" not in out[2]["parts"][1]["function_response"]
 
 
 def test_fr_not_mixed_with_following_user_text():
@@ -70,7 +72,7 @@ def test_ensure_pairs_inserts_synthetic_fr():
     assert out[-1]["role"] == "user"
     assert "function_response" in out[-1]["parts"][0]
     assert out[-1]["parts"][0]["function_response"]["id"] == "x1"
-    assert out[-1]["parts"][0]["function_response"]["call_id"] == "x1"
+    assert "call_id" not in out[-1]["parts"][0]["function_response"]
 
 
 def test_flatten_tool_history_drops_fc_fr_structure():
@@ -142,13 +144,24 @@ def test_looks_like_gemini_command_dump():
     assert not looks_like_gemini_command_dump("Here are the matching patients.")
 
 
-def test_function_response_includes_call_id():
+def test_function_response_uses_id_not_call_id():
     from clawagents.providers.llm import _gemini_function_response_body
 
     body = _gemini_function_response_body("ls", "ok", "call-1")
     assert body["id"] == "call-1"
-    assert body["call_id"] == "call-1"
+    assert "call_id" not in body
     assert body["name"] == "ls"
+
+
+def test_function_response_passes_google_genai_schema():
+    try:
+        from google.genai import types
+    except ImportError:
+        pytest.skip("google-genai not installed")
+    from clawagents.providers.llm import _gemini_function_response_body
+
+    body = _gemini_function_response_body("read_file", "ok", "call_8652019")
+    types.FunctionResponse(**body)
 
 
 def test_upsert_stream_function_call_dedupes_chunks():
