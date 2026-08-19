@@ -22,6 +22,7 @@ def test_model_identity_section_names_configured_model():
 def test_gemini_tool_use_section_only_for_gemini():
     block = gemini_tool_use_section("gemini", "gemini-3.7-flash")
     assert "Never invent SQL counts" in block
+    assert "this-turn `execute` output" in block
     assert gemini_tool_use_section("openai", "gpt-5.6-terra") == ""
 
 
