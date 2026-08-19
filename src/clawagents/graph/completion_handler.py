@@ -25,10 +25,30 @@ _MAX_GEMINI_EVIDENCE_NUDGES = 2
 _HARNESS_USER_MARKERS = (GEMINI_SUMMARIZE_MARKER, GEMINI_EVIDENCE_MARKER)
 
 _MD_TABLE_HEADER_RE = re.compile(r"(?m)^\s*\|.+\|\s*$\n^\s*\|[-:| ]+\|")
+_MD_TABLE_SEP_RE = re.compile(r"^\|[-:| ]+\|$")
 _CLAIMED_QUERY_RE = re.compile(
     r"(?i)(executed sql|ran (?:the )?sql|sql (?:was )?executed|"
     r"query returned|database output|from the database|"
     r"qualifying encounters|after executing|real (?:intraday|sql))"
+)
+_FLATTEN_EXECUTE_RESULT_RE = re.compile(
+    r"\[result\s+execute:\s*(.*?)\]",
+    re.IGNORECASE | re.DOTALL,
+)
+_FENCE_RE = re.compile(r"```[\w-]*\n?")
+_COHORT_COUNT_RE = re.compile(
+    r"(?i)\b(\d{2,6})\s+(patients?|encounters?|cases?|rows?|records?)\b"
+)
+_DAY_COUNT_RE = re.compile(
+    r"(?i)\b(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|"
+    r"fri(?:day)?|sat(?:urday)?|sun(?:day)?)\b[^.\n]{0,16}?(\d{1,6})"
+)
+_HTML_NUM_CELL_RE = re.compile(r"(?i)<t[dh][^>]*>\s*(\d{1,6})\s*</t[dh]>")
+_QUERY_EVIDENCE_TOOLS = frozenset({"execute"})
+_UNGROUNDED_REFUSAL = (
+    "Harness blocked an ungrounded count result. "
+    "This-turn `execute` output does not support the numbers in the draft, "
+    "so the table was not published. Re-run the query or use a stronger model."
 )
 
 
@@ -36,18 +56,20 @@ def _is_harness_user(content: str) -> bool:
     return any(marker in content for marker in _HARNESS_USER_MARKERS)
 
 
-def _this_turn_has_tool_work(messages: list[LLMMessage]) -> bool:
-    """True when a tool ran after the latest real user message."""
-    start = 0
+def _this_turn_start(messages: list[LLMMessage]) -> int:
     for index in range(len(messages) - 1, -1, -1):
         msg = messages[index]
         if msg.role != "user" or not isinstance(msg.content, str):
             continue
         if _is_harness_user(msg.content):
             continue
-        start = index + 1
-        break
-    for msg in messages[start:]:
+        return index + 1
+    return 0
+
+
+def _this_turn_has_tool_work(messages: list[LLMMessage]) -> bool:
+    """True when a tool ran after the latest real user message."""
+    for msg in messages[_this_turn_start(messages) :]:
         if msg.role == "tool":
             return True
         if msg.role == "assistant" and msg.tool_calls_meta:
@@ -62,16 +84,143 @@ def _this_turn_has_tool_work(messages: list[LLMMessage]) -> bool:
     return False
 
 
+def _this_turn_execute_output(messages: list[LLMMessage]) -> str:
+    """Verbatim this-turn `execute` results. `use_skill` is not query evidence."""
+    start = _this_turn_start(messages)
+    id_to_name: dict[str, str] = {}
+    parts: list[str] = []
+    execute_called = False
+    for msg in messages[start:]:
+        if msg.role == "assistant" and msg.tool_calls_meta:
+            for tc in msg.tool_calls_meta:
+                cid = str(tc.get("id") or "")
+                name = str(tc.get("name") or "")
+                if cid and name:
+                    id_to_name[cid] = name
+                if name in _QUERY_EVIDENCE_TOOLS:
+                    execute_called = True
+        if msg.role == "tool" and isinstance(msg.content, str):
+            name = id_to_name.get(str(msg.tool_call_id or ""), "")
+            if name in _QUERY_EVIDENCE_TOOLS:
+                parts.append(msg.content)
+            continue
+        content = msg.content if isinstance(msg.content, str) else ""
+        if "[used execute" in content or "[called execute" in content:
+            execute_called = True
+        parts.extend(_FLATTEN_EXECUTE_RESULT_RE.findall(content))
+    if not parts and execute_called:
+        for msg in messages[start:]:
+            if msg.role == "tool" and isinstance(msg.content, str):
+                parts.append(msg.content)
+    return "\n".join(part for part in parts if str(part).strip())
+
+
+def _plain_answer(text: str) -> str:
+    return _FENCE_RE.sub("\n", text or "")
+
+
 def _looks_like_ungrounded_query_result(text: str) -> bool:
-    """True when the reply presents query counts without this-turn tool output."""
-    blob = (text or "").strip()
+    """True when the reply presents query counts that need execute evidence."""
+    blob = _plain_answer(text).strip()
     if not blob:
         return False
-    if _MD_TABLE_HEADER_RE.search(blob) and len(re.findall(r"\b\d{1,6}\b", blob)) >= 4:
+    nums = re.findall(r"\b\d{1,6}\b", blob)
+    if _MD_TABLE_HEADER_RE.search(blob) and (
+        len(nums) >= 3 or any(int(item) >= 10 for item in nums)
+    ):
+        return True
+    if len(_HTML_NUM_CELL_RE.findall(blob)) >= 2:
+        return True
+    if len(_DAY_COUNT_RE.findall(blob)) >= 3:
+        return True
+    if _COHORT_COUNT_RE.search(blob):
         return True
     if _CLAIMED_QUERY_RE.search(blob) and re.search(r"\b\d{2,}\b", blob):
         return True
     return False
+
+
+def _evidence_numbers(text: str) -> set[int]:
+    found: set[int] = set()
+    for raw in re.findall(r"\b\d{1,3}(?:,\d{3})+\b|\b\d{1,6}\b", text or ""):
+        found.add(int(raw.replace(",", "")))
+    return found
+
+
+def _table_data_number_rows(text: str) -> list[list[int]]:
+    rows: list[list[int]] = []
+    seen_sep = False
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        if _MD_TABLE_SEP_RE.match(stripped):
+            seen_sep = True
+            continue
+        if not seen_sep:
+            continue
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        nums: list[int] = []
+        for cell in cells[1:]:
+            raw = cell.replace(",", "")
+            if re.fullmatch(r"\d{1,6}", raw):
+                nums.append(int(raw))
+        if nums:
+            rows.append(nums)
+    return rows
+
+
+def _ungrounded_count_tokens(answer: str, evidence: str) -> list[int]:
+    """Counts in the reply that are not in execute output and not a row sum."""
+    ev = _evidence_numbers(evidence)
+    bad: list[int] = []
+    rows = _table_data_number_rows(_plain_answer(answer))
+    if rows:
+        for row in rows:
+            for number in row:
+                if number in ev:
+                    continue
+                others = [item for item in row if item != number]
+                if others and all(item in ev for item in others) and number == sum(others):
+                    continue
+                bad.append(number)
+        return bad
+    for number in _evidence_numbers(answer):
+        if 1900 <= number <= 2100:
+            continue
+        if number not in ev:
+            bad.append(number)
+    return bad
+
+
+def _should_reject_ungrounded_counts(bad: list[int]) -> bool:
+    if any(number >= 10 for number in bad):
+        return True
+    return len(bad) >= 2
+
+
+def _ungrounded_query_reason(
+    messages: list[LLMMessage],
+    content: str,
+) -> str | None:
+    if not _looks_like_ungrounded_query_result(content):
+        return None
+    evidence = _this_turn_execute_output(messages)
+    if not evidence.strip():
+        return (
+            "Call `execute` now (`use_skill` is instructions, not a query). "
+            "Quote only that tool output. "
+            "Do not invent a table, matrix, or SQL result."
+        )
+    bad = _ungrounded_count_tokens(content, evidence)
+    if not _should_reject_ungrounded_counts(bad):
+        return None
+    shown = ", ".join(str(number) for number in bad[:8])
+    return (
+        f"This-turn `execute` output is missing counts you reported ({shown}). "
+        "Re-run `execute` or quote only numbers from that output. "
+        "Do not invent hour/day cells from a daily total."
+    )
 
 
 def _transcript_has_tool_work(messages: list[LLMMessage]) -> bool:
@@ -175,14 +324,47 @@ class CompletionHandler:
             )
             return CompletionDecision("continue")
 
-        if use_native_tools and self._should_retry_ungrounded_query_result(
-            messages, response
+        ungrounded = None
+        if use_native_tools:
+            ungrounded = _ungrounded_query_reason(
+                messages, (getattr(response, "content", None) or "").strip()
+            )
+        if ungrounded and _gemini_evidence_nudge_count(messages) >= (
+            _MAX_GEMINI_EVIDENCE_NUDGES
         ):
             self._events.emit(
                 "warn",
                 {
                     "message": (
-                        "Model reported query counts without running a tool — asking it to execute"
+                        "Model still reported ungrounded query counts after "
+                        "evidence nudges — blocking the table"
+                    )
+                },
+            )
+            state.result = _UNGROUNDED_REFUSAL
+            state.status = "done"
+            if self._recorder:
+                self._recorder.record_turn(
+                    response_text=state.result,
+                    model=getattr(response, "model", None),
+                    tokens_used=getattr(response, "tokens_used", 0),
+                    thinking=thinking,
+                )
+            self._events.emit("final_content", {"content": state.result})
+            self._events.typed(
+                "assistant_message", {"content": state.result, "thinking": thinking}
+            )
+            messages.append(
+                LLMMessage(role="assistant", content=state.result, thinking=thinking)
+            )
+            return CompletionDecision("done")
+        if ungrounded:
+            self._events.emit(
+                "warn",
+                {
+                    "message": (
+                        "Model reported query counts that are not in this-turn "
+                        "execute output — asking it to execute"
                     )
                 },
             )
@@ -195,12 +377,7 @@ class CompletionHandler:
                     ),
                     LLMMessage(
                         role="user",
-                        content=(
-                            f"{GEMINI_EVIDENCE_MARKER}. "
-                            "Call `execute` or `use_skill` now. "
-                            "Quote only that tool output. "
-                            "Do not invent a table, matrix, or SQL result."
-                        ),
+                        content=f"{GEMINI_EVIDENCE_MARKER}. {ungrounded}",
                     ),
                 ]
             )
@@ -305,10 +482,8 @@ class CompletionHandler:
     ) -> bool:
         if _gemini_evidence_nudge_count(messages) >= _MAX_GEMINI_EVIDENCE_NUDGES:
             return False
-        if _this_turn_has_tool_work(messages):
-            return False
         content = (getattr(response, "content", None) or "").strip()
-        return _looks_like_ungrounded_query_result(content)
+        return _ungrounded_query_reason(messages, content) is not None
 
     async def _try_codeact(
         self,

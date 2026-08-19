@@ -1,3 +1,9 @@
+## v6.20.67 — Ground Gemini counts in this-turn execute (August 2026)
+
+- Count tables and “N patients / encounters” claims must match numbers from this-turn ``execute`` output. ``use_skill`` is instructions, not data.
+- Invented hour/day cells from a daily total, fenced/HTML tables, and ``Monday: 45`` lists are sent back (up to two nudges). After that the harness publishes a refusal, not the fake table.
+- Gemini prompt: if a daily total is all you have, say so — do not invent buckets.
+
 ## v6.20.66 — Reject invented SQL tables (August 2026)
 
 - A count table or “I executed SQL” claim with no ``execute`` / ``use_skill`` after the latest real user message is no longer accepted as the final answer. Gemini is sent back to run a tool and quote only that output (up to two nudges).

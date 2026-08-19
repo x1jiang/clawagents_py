@@ -51,8 +51,11 @@ def gemini_tool_use_section(
         "## Tool use (Gemini)\n"
         "Native tools (`use_skill`, `list_skills`, `execute`, and the other "
         "declared functions) are available this turn. Never invent SQL counts, "
-        "file contents, or command output. If you have not called a tool this "
-        "turn, say you have not run it — do not claim a query already executed."
+        "file contents, or command output. `use_skill` is instructions, not "
+        "data — every count in a table must appear in this-turn `execute` "
+        "output. If a daily total is all you have, say so; do not invent "
+        "hourly or weekday cells. If you have not called `execute` this turn, "
+        "say you have not run it — do not claim a query already executed."
     )
 
 
