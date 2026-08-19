@@ -1,3 +1,8 @@
+## v6.20.65 — Gemini skill catalog on CJK turns (August 2026)
+
+- Chinese (and other CJK) follow-ups no longer wipe ``## Available Skills``. Ranking used to treat a question like “请问你是调用 sql 了？” as empty (ASCII-only tokens), so Gemini 3.7 answered in one iteration with invented SQL counts.
+- Gemini system prompts now say not to invent SQL counts or claim a query ran without a tool call.
+
 ## v6.20.64 — Gemini request-shape hardening (August 2026)
 
 - Scrub every Gemini turn to the google-genai allow-list before ``generate_content``. Illegal extras such as ``call_id`` are stripped even if a future change adds them back. The exact 6.20.62 crash transcript now validates against the SDK models.

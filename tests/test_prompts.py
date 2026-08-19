@@ -7,6 +7,7 @@ from clawagents.prompts import (
     append_prompt_injection,
     build_prompt_injection,
     build_system_prompt,
+    gemini_tool_use_section,
     model_identity_section,
 )
 from clawagents.prompts.cache_align import normalize_stable_prefix
@@ -16,6 +17,19 @@ def test_model_identity_section_names_configured_model():
     block = model_identity_section("gemini", "gemini-3.1-flash-lite")
     assert "`gemini/gemini-3.1-flash-lite`" in block
     assert "Do not claim to be a different model" in block
+
+
+def test_gemini_tool_use_section_only_for_gemini():
+    block = gemini_tool_use_section("gemini", "gemini-3.7-flash")
+    assert "Never invent SQL counts" in block
+    assert gemini_tool_use_section("openai", "gpt-5.6-terra") == ""
+
+
+def test_append_model_identity_adds_gemini_tool_honesty():
+    text = append_model_identity("base", "gemini", "gemini-3.7-flash")
+    assert text.count("## Tool use (Gemini)") == 1
+    twice = append_model_identity(text, "gemini", "gemini-3.7-flash")
+    assert twice == text
 
 
 def test_append_model_identity_is_idempotent_and_skips_empty_model():

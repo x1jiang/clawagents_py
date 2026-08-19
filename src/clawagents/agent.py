@@ -1704,6 +1704,22 @@ def _skill_stem(token: str) -> str:
     return value
 
 
+_CJK_RE = re.compile(r"[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]")
+
+
+def _has_cjk(text: str) -> bool:
+    return bool(_CJK_RE.search(text or ""))
+
+
+def _query_is_substantive(text: str) -> bool:
+    """True when ranking should keep a catalog (not greetings like 'hello').
+
+    ASCII tokenizers miss CJK, so a Chinese SQL follow-up used to look empty
+    and wipe ``## Available Skills`` from the system prompt.
+    """
+    return len(_skill_tokens(text)) >= 2 or _has_cjk(text)
+
+
 def _skill_tokens(text: str) -> set[str]:
     normalized = unicodedata.normalize("NFKC", text or "").casefold()
     out: set[str] = set()
@@ -1924,7 +1940,7 @@ def _build_skill_catalog_prompt(
         ]
         confident = [pair for pair in scored if pair[1] >= SKILL_CONFIDENT_MATCH_SCORE]
         possible = [pair for pair in scored if pair[1] >= SKILL_POSSIBLE_MATCH_SCORE]
-        meaningful_query = len(_skill_tokens(query)) >= 2
+        meaningful_query = _query_is_substantive(query)
         if confident:
             relevant = list(confident[:SKILL_RELEVANT_MAX_CANDIDATES])
             selected_ids = {id(skill) for skill, _score in relevant}

@@ -39,17 +39,41 @@ def model_identity_section(
     )
 
 
+def gemini_tool_use_section(
+    provider: Optional[str],
+    model: Optional[str],
+) -> str:
+    """Stop Gemini Flash from inventing tool results when it skipped the call."""
+    blob = f"{provider or ''} {model or ''}".casefold()
+    if "gemini" not in blob:
+        return ""
+    return (
+        "## Tool use (Gemini)\n"
+        "Native tools (`use_skill`, `list_skills`, `execute`, and the other "
+        "declared functions) are available this turn. Never invent SQL counts, "
+        "file contents, or command output. If you have not called a tool this "
+        "turn, say you have not run it — do not claim a query already executed."
+    )
+
+
 def append_model_identity(
     base_prompt: str,
     provider: Optional[str],
     model: Optional[str],
 ) -> str:
-    """Append :func:`model_identity_section` unless already present."""
+    """Append identity (and Gemini tool-honesty) unless already present."""
     base = base_prompt or ""
-    block = model_identity_section(provider, model)
-    if not block or "## Model identity" in base:
-        return base
-    return f"{base.rstrip()}\n\n{block}"
+    for block in (
+        model_identity_section(provider, model),
+        gemini_tool_use_section(provider, model),
+    ):
+        if not block:
+            continue
+        heading = block.split("\n", 1)[0]
+        if heading and heading in base:
+            continue
+        base = f"{base.rstrip()}\n\n{block}"
+    return base
 
 
 def build_system_prompt(
