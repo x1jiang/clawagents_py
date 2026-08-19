@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from clawagents.agent import _build_skill_catalog_prompt, _skill_relevance_score
+from clawagents.agent import (
+    _build_skill_catalog_prompt,
+    _latest_user_text,
+    _skill_relevance_score,
+)
 from clawagents.prompts import (
     INJECTION_BEGIN,
     INJECTION_END,
@@ -58,6 +62,35 @@ def test_skill_catalog_omits_metadata_when_nothing_clears_threshold():
     ]
 
     assert _build_skill_catalog_prompt(skills, query="hello") == ""
+
+
+def test_chinese_sql_followup_keeps_skill_discovery():
+    skills = [
+        SimpleNamespace(
+            name="atomic_waterfall_query",
+            description="Cohort SQL waterfall validation and extraction",
+            path="skills/atomic/SKILL.md",
+        ),
+        SimpleNamespace(name="slides", description="Format a presentation", path="c/SKILL.md"),
+    ]
+    text = _build_skill_catalog_prompt(
+        skills, query="请问你是调用sql了？还是你自己编造的数据"
+    )
+    assert text
+    assert "atomic_waterfall_query" in text
+    assert "Skill Discovery" in text or "Available Skills" in text
+
+
+def test_chinese_followup_keeps_prior_english_waterfall_intent():
+    query = _latest_user_text(
+        [
+            {"role": "user", "content": "Run the atomic waterfall cohort SQL for trauma GCS"},
+            {"role": "assistant", "content": "286 / 254"},
+            {"role": "user", "content": "请问你是调用sql了？还是你自己编造的数据"},
+        ]
+    )
+    assert "Prior substantive request" in query
+    assert "atomic waterfall" in query
 
 
 def test_skill_catalog_injects_only_relevant_top_k_for_current_turn():
