@@ -68,6 +68,20 @@ def test_plain_anthropic_401_keeps_generic_hint():
     assert "Mantle" not in descriptor.recovery_hint
 
 
+def test_gemini_pydantic_extra_forbidden_is_not_auth():
+    """6.20.62 sent FunctionResponse.call_id; google-genai rejected it as extra_forbidden."""
+    err = Exception(
+        "43 validation errors for _GenerateContentParameters\n"
+        "contents.list[union[Content,str]].4.Content.parts.0.function_response.call_id\n"
+        "  Extra inputs are not permitted [type=extra_forbidden, "
+        "input_value='call_8652019', input_type=str]"
+    )
+    descriptor = classify_error(err)
+    assert descriptor.error_class is not ErrorClass.PROVIDER_AUTH
+    assert "API key" not in descriptor.recovery_hint
+    assert "not an API-key" in descriptor.recovery_hint
+
+
 @pytest.mark.parametrize(
     "message",
     [

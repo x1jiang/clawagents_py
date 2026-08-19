@@ -2375,15 +2375,17 @@ def _gemini_function_response_body(
     result: Any,
     call_id: str | None = None,
 ) -> dict[str, Any]:
-    """Build a FunctionResponse dict. Gemini 3.7 pairs by ``id`` and ``call_id``."""
+    """Build a FunctionResponse dict. Gemini 3 pairs by ``id`` only.
+
+    Do not send ``call_id`` — google-genai's Pydantic FunctionResponse
+    rejects it (``extra_forbidden``), which aborted the turn.
+    """
     body: dict[str, Any] = {
         "name": name,
         "response": {"result": result},
     }
     if call_id:
-        cid = str(call_id)
-        body["id"] = cid
-        body["call_id"] = cid
+        body["id"] = str(call_id)
     return body
 
 
@@ -2392,10 +2394,9 @@ def _stamp_function_response_ids(
     call_id: str | None,
 ) -> dict[str, Any]:
     out = dict(body)
+    out.pop("call_id", None)
     if call_id:
-        cid = str(call_id)
-        out["id"] = cid
-        out["call_id"] = cid
+        out["id"] = str(call_id)
     return out
 
 
