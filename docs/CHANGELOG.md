@@ -1,3 +1,7 @@
+## v6.20.66 — Reject invented SQL tables (August 2026)
+
+- A count table or “I executed SQL” claim with no ``execute`` / ``use_skill`` after the latest real user message is no longer accepted as the final answer. Gemini is sent back to run a tool and quote only that output (up to two nudges).
+
 ## v6.20.65 — Gemini skill catalog on CJK turns (August 2026)
 
 - Chinese (and other CJK) follow-ups no longer wipe ``## Available Skills``. Ranking used to treat a question like “请问你是调用 sql 了？” as empty (ASCII-only tokens), so Gemini 3.7 answered in one iteration with invented SQL counts.

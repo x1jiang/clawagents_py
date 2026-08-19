@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 
 from clawagents.providers.llm import (
+    GEMINI_EVIDENCE_MARKER,
     GEMINI_SUMMARIZE_MARKER,
     LLMMessage,
     looks_like_gemini_command_dump,
@@ -18,6 +20,58 @@ from clawagents.providers.llm import (
 logger = logging.getLogger(__name__)
 
 _MAX_GEMINI_ANSWER_NUDGES = 2
+_MAX_GEMINI_EVIDENCE_NUDGES = 2
+
+_HARNESS_USER_MARKERS = (GEMINI_SUMMARIZE_MARKER, GEMINI_EVIDENCE_MARKER)
+
+_MD_TABLE_HEADER_RE = re.compile(r"(?m)^\s*\|.+\|\s*$\n^\s*\|[-:| ]+\|")
+_CLAIMED_QUERY_RE = re.compile(
+    r"(?i)(executed sql|ran (?:the )?sql|sql (?:was )?executed|"
+    r"query returned|database output|from the database|"
+    r"qualifying encounters|after executing|real (?:intraday|sql))"
+)
+
+
+def _is_harness_user(content: str) -> bool:
+    return any(marker in content for marker in _HARNESS_USER_MARKERS)
+
+
+def _this_turn_has_tool_work(messages: list[LLMMessage]) -> bool:
+    """True when a tool ran after the latest real user message."""
+    start = 0
+    for index in range(len(messages) - 1, -1, -1):
+        msg = messages[index]
+        if msg.role != "user" or not isinstance(msg.content, str):
+            continue
+        if _is_harness_user(msg.content):
+            continue
+        start = index + 1
+        break
+    for msg in messages[start:]:
+        if msg.role == "tool":
+            return True
+        if msg.role == "assistant" and msg.tool_calls_meta:
+            return True
+        content = msg.content
+        if isinstance(content, str) and (
+            content.startswith("[used ")
+            or content.startswith("[called ")
+            or "[result " in content
+        ):
+            return True
+    return False
+
+
+def _looks_like_ungrounded_query_result(text: str) -> bool:
+    """True when the reply presents query counts without this-turn tool output."""
+    blob = (text or "").strip()
+    if not blob:
+        return False
+    if _MD_TABLE_HEADER_RE.search(blob) and len(re.findall(r"\b\d{1,6}\b", blob)) >= 4:
+        return True
+    if _CLAIMED_QUERY_RE.search(blob) and re.search(r"\b\d{2,}\b", blob):
+        return True
+    return False
 
 
 def _transcript_has_tool_work(messages: list[LLMMessage]) -> bool:
@@ -43,6 +97,16 @@ def _gemini_nudge_count(messages: list[LLMMessage]) -> int:
         if msg.role == "user"
         and isinstance(msg.content, str)
         and GEMINI_SUMMARIZE_MARKER in msg.content
+    )
+
+
+def _gemini_evidence_nudge_count(messages: list[LLMMessage]) -> int:
+    return sum(
+        1
+        for msg in messages
+        if msg.role == "user"
+        and isinstance(msg.content, str)
+        and GEMINI_EVIDENCE_MARKER in msg.content
     )
 
 
@@ -105,6 +169,37 @@ class CompletionHandler:
                         content=(
                             "Your previous response was cut off mid-JSON. "
                             "Please resend the complete tool call as valid JSON."
+                        ),
+                    ),
+                ]
+            )
+            return CompletionDecision("continue")
+
+        if use_native_tools and self._should_retry_ungrounded_query_result(
+            messages, response
+        ):
+            self._events.emit(
+                "warn",
+                {
+                    "message": (
+                        "Model reported query counts without running a tool — asking it to execute"
+                    )
+                },
+            )
+            messages.extend(
+                [
+                    LLMMessage(
+                        role="assistant",
+                        content=response.content or "",
+                        thinking=thinking,
+                    ),
+                    LLMMessage(
+                        role="user",
+                        content=(
+                            f"{GEMINI_EVIDENCE_MARKER}. "
+                            "Call `execute` or `use_skill` now. "
+                            "Quote only that tool output. "
+                            "Do not invent a table, matrix, or SQL result."
                         ),
                     ),
                 ]
@@ -203,6 +298,17 @@ class CompletionHandler:
         if not content:
             return _transcript_has_tool_work(messages)
         return False
+
+    @staticmethod
+    def _should_retry_ungrounded_query_result(
+        messages: list[LLMMessage], response: Any
+    ) -> bool:
+        if _gemini_evidence_nudge_count(messages) >= _MAX_GEMINI_EVIDENCE_NUDGES:
+            return False
+        if _this_turn_has_tool_work(messages):
+            return False
+        content = (getattr(response, "content", None) or "").strip()
+        return _looks_like_ungrounded_query_result(content)
 
     async def _try_codeact(
         self,

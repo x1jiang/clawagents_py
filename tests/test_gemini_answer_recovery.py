@@ -6,7 +6,12 @@ import asyncio
 from types import SimpleNamespace
 
 from clawagents.graph.completion_handler import CompletionHandler
-from clawagents.providers.llm import GEMINI_SUMMARIZE_MARKER, LLMMessage, LLMResponse
+from clawagents.providers.llm import (
+    GEMINI_EVIDENCE_MARKER,
+    GEMINI_SUMMARIZE_MARKER,
+    LLMMessage,
+    LLMResponse,
+)
 
 
 class _Events:
@@ -136,3 +141,93 @@ def test_nudge_cap_stops_retry_loop():
     )
     assert decision.action == "done"
     assert "[called execute" in state.result
+
+
+_FAKE_INTRADAY_TABLE = """
+Done. Real Intraday Time Distribution (Using PAT_ENC_HSP.ED_ARRIVAL_TIME):
+
+| Day | 00:00–03:59 | 04:00–07:59 | 08:00–11:59 | Total |
+| --- | ---: | ---: | ---: | ---: |
+| Monday | 5 | 3 | 9 | 45 |
+| Tuesday | 4 | 2 | 7 | 39 |
+"""
+
+
+def test_invented_count_table_without_tools_continues():
+    handler = _handler()
+    messages = [
+        LLMMessage(
+            role="user",
+            content="Then use some real intraday timestamp to get more accurate time distribution",
+        )
+    ]
+    response = LLMResponse(
+        content=_FAKE_INTRADAY_TABLE,
+        model="gemini-3.7-flash",
+        tokens_used=40,
+    )
+    decision = _handle(
+        handler,
+        state=SimpleNamespace(),
+        messages=messages,
+        response=response,
+        thinking=None,
+        use_native_tools=True,
+        consult_advisor=lambda *_a, **_k: None,
+        should_final_check=False,
+    )
+    assert decision.action == "continue"
+    assert GEMINI_EVIDENCE_MARKER in str(messages[-1].content)
+
+
+def test_count_table_after_this_turn_execute_completes():
+    handler = _handler()
+    messages = [
+        LLMMessage(role="user", content="use a real intraday timestamp"),
+        LLMMessage(
+            role="assistant",
+            content="",
+            tool_calls_meta=[{"id": "c1", "name": "execute", "args": {}}],
+        ),
+        LLMMessage(role="tool", content="Monday 5 3 9", tool_call_id="c1"),
+    ]
+    response = LLMResponse(
+        content=_FAKE_INTRADAY_TABLE,
+        model="gemini-3.7-flash",
+        tokens_used=20,
+    )
+    state = SimpleNamespace(result=None, status="running")
+    decision = _handle(
+        handler,
+        state=state,
+        messages=messages,
+        response=response,
+        thinking=None,
+        use_native_tools=True,
+        consult_advisor=lambda *_a, **_k: None,
+        should_final_check=False,
+    )
+    assert decision.action == "done"
+    assert "ED_ARRIVAL_TIME" in state.result
+
+
+def test_claimed_sql_execution_without_tools_continues():
+    handler = _handler()
+    messages = [LLMMessage(role="user", content="Have you execute any sql to get the answer?")]
+    response = LLMResponse(
+        content="Yes. I executed SQL and the query returned 305 qualifying encounters.",
+        model="gemini-3.7-flash",
+        tokens_used=12,
+    )
+    decision = _handle(
+        handler,
+        state=SimpleNamespace(),
+        messages=messages,
+        response=response,
+        thinking=None,
+        use_native_tools=True,
+        consult_advisor=lambda *_a, **_k: None,
+        should_final_check=False,
+    )
+    assert decision.action == "continue"
+    assert GEMINI_EVIDENCE_MARKER in str(messages[-1].content)
