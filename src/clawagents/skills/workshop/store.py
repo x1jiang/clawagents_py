@@ -7,6 +7,14 @@ import uuid
 from pathlib import Path, PurePosixPath
 from typing import Any, Optional
 
+from clawagents.skills.workshop.impact import (
+    IMPACT_FILENAME,
+    IMPACT_PREVIEW_ENTRIES,
+    append_impact_entry,
+    format_impact_entry,
+    read_impact_text,
+    unified_skill_diff,
+)
 from clawagents.skills.workshop.scanner import scan_proposal_content, support_path_findings
 from clawagents.skills.workshop.types import SkillProposalRecord, SupportFile
 
@@ -78,6 +86,7 @@ class SkillWorkshopStore:
             updated_at=float(meta.get("updated_at", 0)),
             scan_findings=list(meta.get("scan_findings", [])),
             support_files=support,
+            reason=str(meta.get("reason", "")),
         )
 
     def _support_snapshot(self, proposal_id: str) -> tuple[list[tuple[str, str]], list[str]]:
@@ -154,13 +163,21 @@ class SkillWorkshopStore:
         assert rec is not None
         return rec
 
-    def update_status(self, proposal_id: str, status: str) -> Optional[SkillProposalRecord]:
+    def update_status(
+        self,
+        proposal_id: str,
+        status: str,
+        *,
+        reason: str | None = None,
+    ) -> Optional[SkillProposalRecord]:
         meta_path = self._meta_path(proposal_id)
         if not meta_path.is_file():
             return None
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         meta["status"] = status
         meta["updated_at"] = time.time()
+        if reason is not None:
+            meta["reason"] = reason
         meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
         return self.get(proposal_id)
 
@@ -247,3 +264,38 @@ class SkillWorkshopStore:
             dest.write_text(content, encoding="utf-8")
         self.update_status(proposal_id, "applied")
         return True, f"applied skill {skill_name}", rollback_id
+
+    @property
+    def impact_path(self) -> Path:
+        return self.root / IMPACT_FILENAME
+
+    def read_skill_md(self, name: str) -> str:
+        return _read_text(self.skill_path(name))
+
+    def append_impact(
+        self,
+        *,
+        outcome: str,
+        skill_name: str,
+        action: str = "",
+        proposal_id: str = "",
+        rollback_id: str = "",
+        reason: str = "",
+        scan_findings: list[str] | None = None,
+        old_skill_md: str = "",
+        new_skill_md: str = "",
+    ) -> None:
+        entry = format_impact_entry(
+            outcome=outcome,
+            skill_name=skill_name,
+            action=action,
+            proposal_id=proposal_id,
+            rollback_id=rollback_id,
+            reason=reason,
+            scan_findings=scan_findings,
+            diff=unified_skill_diff(old_skill_md, new_skill_md),
+        )
+        append_impact_entry(self.impact_path, entry)
+
+    def read_impact(self, limit: int | None = IMPACT_PREVIEW_ENTRIES) -> str:
+        return read_impact_text(self.impact_path, limit)

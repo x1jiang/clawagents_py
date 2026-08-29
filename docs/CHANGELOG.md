@@ -1,3 +1,9 @@
+## v6.20.68 — Persistent skill-workshop impact ledger (August 2026)
+
+- ``skill_workshop`` apply / reject / quarantine / rollback now append an entry to ``.clawagents/skill-workshop/skill-impact.md``: outcome, target skill, persisted reason, and a unified ``SKILL.md`` diff.
+- Rollback restores the skill snapshot only. The ledger is never deleted, so rejected diffs stay visible to the next proposal.
+- ``list`` / ``inspect`` and a new ``action=impact`` read the last entries. Reject/quarantine reasons are stored on the proposal, not dropped.
+
 ## v6.20.67 — Ground Gemini counts in this-turn execute (August 2026)
 
 - Count tables and “N patients / encounters” claims must match numbers from this-turn ``execute`` output. ``use_skill`` is instructions, not data.
