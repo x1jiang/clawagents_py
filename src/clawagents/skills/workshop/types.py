@@ -37,3 +37,4 @@ class SkillProposalRecord:
     updated_at: float = 0.0
     scan_findings: list[str] = field(default_factory=list)
     support_files: list[SupportFile] = field(default_factory=list)
+    reason: str = ""

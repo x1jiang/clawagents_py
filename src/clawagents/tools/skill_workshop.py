@@ -7,6 +7,7 @@ import os
 from typing import Any
 
 from clawagents.permissions.mode import PermissionMode
+from clawagents.skills.workshop.impact import IMPACT_PREVIEW_ENTRIES
 from clawagents.skills.workshop.service import SkillWorkshopService
 from clawagents.tools.registry import Tool, ToolResult
 
@@ -20,7 +21,10 @@ class SkillWorkshopTool:
     name = "skill_workshop"
     description = (
         "Governed skill authoring: create/update proposals, scan, apply, reject, quarantine, rollback. "
-        "Never write live SKILL.md directly — use create/update then apply after review."
+        "Never write live SKILL.md directly — use create/update then apply after review. "
+        "Before proposing a change, call action=impact (or read "
+        ".clawagents/skill-workshop/skill-impact.md) so you do not repeat a "
+        "rejected, blocked, or rolled-back edit."
     )
     parameters = {
         "action": {
@@ -37,6 +41,11 @@ class SkillWorkshopTool:
         "goal": {"type": "string", "description": "Authoring goal", "required": False},
         "evidence": {"type": "string", "description": "Supporting evidence", "required": False},
         "reason": {"type": "string", "description": "Reject/quarantine reason", "required": False},
+        "limit": {
+            "type": "integer",
+            "description": "Max skill-impact entries to return (action=impact or list)",
+            "required": False,
+        },
         "support_files": {
             "type": "string",
             "description": "JSON array of {path, content}",
@@ -96,7 +105,15 @@ class SkillWorkshopTool:
                     description=args.get("description"),
                 )
             elif action == "list":
-                result = {"proposals": self._service.list()}
+                impact = self._service.impact(limit=_impact_limit(args))
+                result = {
+                    "proposals": self._service.list(),
+                    "skill_impact_path": impact["skill_impact_path"],
+                    "skill_impact_relative_path": impact["skill_impact_relative_path"],
+                    "skill_impact_preview": impact["skill_impact_preview"],
+                }
+            elif action == "impact":
+                result = self._service.impact(limit=_impact_limit(args))
             elif action == "inspect":
                 result = self._service.inspect(str(args.get("proposal_id", "")))
             elif action == "apply":
@@ -132,6 +149,16 @@ class SkillWorkshopTool:
             return ToolResult(success=True, output=json.dumps(result, indent=2))
         except Exception as exc:
             return ToolResult(success=False, output="", error=str(exc))
+
+
+def _impact_limit(args: dict[str, Any]) -> int:
+    raw = args.get("limit")
+    if raw is None or raw == "":
+        return IMPACT_PREVIEW_ENTRIES
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return IMPACT_PREVIEW_ENTRIES
 
 
 def _parse_support_files(raw: Any) -> list[dict[str, str]] | None:
