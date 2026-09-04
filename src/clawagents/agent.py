@@ -661,6 +661,7 @@ def create_claw_agent(
     on_exit_plan_mode: Any = None,
     permission_rules: list | None = None,
     goal_mode: bool = False,
+    browser: bool = False,
     features: Optional[dict[str, bool]] = None,
     workspace: Optional[Union[str, os.PathLike]] = None,
 ) -> ClawAgent:
@@ -1309,6 +1310,17 @@ def create_claw_agent(
             from clawagents.tools.memory_search import create_memory_search_tool
             if registry.get("memory_search") is None:
                 registry.register(create_memory_search_tool(workspace=workspace_root))
+    except Exception:
+        pass
+
+    # Browser accessibility tools (OpenClaw / Hermes parity)
+    try:
+        from clawagents.config.features import is_enabled as _feat_browser
+        if _feat_browser("browser_tools") or browser:
+            from clawagents.browser.tools import create_browser_tools
+            for t in create_browser_tools():
+                if registry.get(t.name) is None:
+                    registry.register(t)
     except Exception:
         pass
 

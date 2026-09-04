@@ -115,6 +115,7 @@ _FEATURE_DEFAULTS: dict[str, str] = {
     # to disable.
     "provider_circuit_breaker": "1",
     "tool_error_traceback": "0",   # Include short traceback in ToolResult.error (also CLAW_DEBUG)
+    "browser_tools":        "0",   # Accessibility-tree browser tools (Playwright @e1/@e2)
 }
 
 
