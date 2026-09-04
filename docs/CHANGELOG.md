@@ -1,3 +1,8 @@
+## v6.20.69 — Browser accessibility tools & hermetic test hardening (September 2026)
+
+- ``create_claw_agent(browser=True)`` and ``browser_tools`` feature flag now register the Playwright accessibility-tree browser toolset into the agent registry.
+- Added comprehensive hermetic test suites for browser integration, prompt cache boundary alignment, hashline-guarded context edits, and pre-compaction memory flush.
+
 ## v6.20.68 — Persistent skill-workshop impact ledger (August 2026)
 
 - ``skill_workshop`` apply / reject / quarantine / rollback now append an entry to ``.clawagents/skill-workshop/skill-impact.md``: outcome, target skill, persisted reason, and a unified ``SKILL.md`` diff.
