@@ -68,6 +68,10 @@ pip install -U 'clawagents[all]'       # All providers + tiktoken
 
 > **Version 6.18.0** — Grok-inspired edit/execute harness (July 2026).
 
+### New In v6.20.72
+- **Lint-clean tree, enforced in CI.** ~260 unused imports and 14 dead locals removed (mostly `context_observatory/`); `[tool.ruff.lint]` pins an explicit correctness ruleset and a `ruff` CI job keeps it that way. No behaviour change.
+- **Repo hygiene.** Stale benchmark/report artifacts removed from the repo root. Web search remains Tavily-only (`TAVILY_API_KEY`); the external Exa PR was closed.
+
 ### New In v6.20.71
 - **Correct Claude context windows.** Per Anthropic's context-windows page, Opus 4.6/4.7/4.8, Opus 5, Sonnet 4.6, Sonnet 5 and Fable 5/5.1 are 1M by default; Sonnet 4.5, Haiku 4.5 and Opus 4.5 are 200K. Previously Opus 4.6+ was budgeted at 200K (compacting ~5× too early) and Sonnet 4.5 at 1M (overflow risk — no `context-1m` beta header is sent).
 - **Gemini Pro windows corrected to 1M.** `gemini-3.1-pro`, `gemini-3-pro` and `gemini-2.5-pro` are 1,048,576 input tokens per ai.google.dev; the table said 2M.
