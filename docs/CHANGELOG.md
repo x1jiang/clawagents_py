@@ -1,3 +1,19 @@
+## v6.20.71 — Correct Claude context windows, Mantle profiles, Python 3.14 (September 2026)
+
+- Claude context windows follow Anthropic's context-windows page: Opus 4.6/4.7/4.8, Opus 5, Sonnet 4.6, Sonnet 5, Fable 5/5.1 → 1M; Sonnet 4.5, Haiku 4.5, Opus 4.5 → 200K. Opus 4.6+ was compacting at a 200K budget; Sonnet 4.5 was budgeted at 1M with no beta header.
+- ``gemini-3.1-pro`` / ``gemini-3-pro`` / ``gemini-2.5-pro`` corrected from 2M to the documented 1,048,576-token input limit.
+- New profiles: ``gemini-3.8-flash``, ``claude-opus-4-8``, ``claude-sonnet-5``, ``claude-fable-5``, ``claude-haiku-4-5``, ``deepseek.v3.2`` (164K), ``kimi-k2.5`` (256K), ``glm-5`` (200K), ``gpt-oss-*`` (128K).
+- ``normalize_model_id`` strips geo **and** vendor prefixes plus the Bedrock ``:0`` revision; ``us.anthropic.claude-…`` ids now resolve instead of falling through to the 1M/0.75 default.
+- ``clawagents.list_profiles`` (paths helper) is no longer shadowed by ``sandbox.profiles.list_profiles``; the latter is exported as ``list_sandbox_profiles``.
+- Python 3.14 in CI + classifiers. ``asyncio.get_event_loop()`` → ``get_running_loop()``; ``asyncio.iscoroutinefunction`` → ``inspect.iscoroutinefunction``.
+- ``tests/test_model_profiles.py`` pins every window above.
+
+## v6.20.70 — Configurable base prompt, append mechanisms, pinned context at the prompt tail (September 2026)
+
+- Built-in base prompt moved to ``clawagents.prompts.base``; override via ``base_prompt=`` / ``--base-prompt`` / ``CLAW_BASE_PROMPT[_FILE]`` / ``.clawagents/base-prompt.md``. Append via ``base_prompt_append=`` and friends.
+- ``.clawagents/pinned-context.md`` is upserted as the last system block every round.
+- Fix: default ``gpt-5.6`` / ``mode=`` runs with no ``instruction`` dropped the base prompt; rules discovery honours ``workspace=``.
+
 ## v6.20.69 — Browser accessibility tools & hermetic test hardening (September 2026)
 
 - ``create_claw_agent(browser=True)`` and ``browser_tools`` feature flag now register the Playwright accessibility-tree browser toolset into the agent registry.

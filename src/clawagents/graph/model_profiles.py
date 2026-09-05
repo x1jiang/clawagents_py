@@ -111,6 +111,8 @@ MODEL_PROFILES: dict[str, dict[str, int | float]] = {
     },
     "grok": {"max_input_tokens": 131_072, "budget_ratio": 0.85},
     # ── Google — Gemini 3.x (1M–2M context) ────────────────────────────
+    "gemini-3.8-flash": {"max_input_tokens": 1_000_000, "budget_ratio": 0.90},
+    "gemini-3.8": {"max_input_tokens": 1_000_000, "budget_ratio": 0.90},
     "gemini-3.7-flash": {"max_input_tokens": 1_000_000, "budget_ratio": 0.90},
     "gemini-3.7": {"max_input_tokens": 1_000_000, "budget_ratio": 0.90},
     "gemini-3.6-flash": {"max_input_tokens": 1_000_000, "budget_ratio": 0.90},
@@ -118,27 +120,56 @@ MODEL_PROFILES: dict[str, dict[str, int | float]] = {
     "gemini-3.5-flash-lite": {"max_input_tokens": 1_000_000, "budget_ratio": 0.90},
     "gemini-3.5-flash": {"max_input_tokens": 1_000_000, "budget_ratio": 0.90},
     "gemini-3.5": {"max_input_tokens": 1_000_000, "budget_ratio": 0.90},
-    "gemini-3.1-pro": {"max_input_tokens": 2_000_000, "budget_ratio": 0.90},
+    "gemini-3.1-pro": {"max_input_tokens": 1_000_000, "budget_ratio": 0.90},
     "gemini-3.1-flash": {"max_input_tokens": 1_000_000, "budget_ratio": 0.90},
     "gemini-3.1": {"max_input_tokens": 1_000_000, "budget_ratio": 0.90},
-    "gemini-3-pro": {"max_input_tokens": 2_000_000, "budget_ratio": 0.90},
+    "gemini-3-pro": {"max_input_tokens": 1_000_000, "budget_ratio": 0.90},
     "gemini-3-flash-preview": {"max_input_tokens": 1_000_000, "budget_ratio": 0.90},
     "gemini-3-flash": {"max_input_tokens": 1_000_000, "budget_ratio": 0.90},
     # ── Google — Gemini 2.5 ────────────────────────────────────────────
-    "gemini-2.5-pro": {"max_input_tokens": 2_000_000, "budget_ratio": 0.90},
+    "gemini-2.5-pro": {"max_input_tokens": 1_000_000, "budget_ratio": 0.90},
     "gemini-2.5-flash": {"max_input_tokens": 1_000_000, "budget_ratio": 0.90},
-    # ── Anthropic — Claude 4.x ─────────────────────────────────────────
-    "claude-opus-4-7": {"max_input_tokens": 200_000, "budget_ratio": 0.85},
+    # ── Anthropic — Claude 5 / 4.x ─────────────────────────────────────
+    # Context windows per https://platform.claude.com/docs/en/build-with-claude/context-windows
+    # (Sep 2026): Fable 5/5.1, Mythos 5/5.1, Opus 5, Opus 4.8/4.7/4.6,
+    # Sonnet 5 and Sonnet 4.6 are 1M by default (no beta header). Every
+    # other Claude model — including Sonnet 4.5, Haiku 4.5 and Opus 4.5 —
+    # is 200K. Order matters: dotted-minor ids ("opus-4-8") must precede
+    # the bare "claude-opus-4" family fallback.
+    "claude-fable-5-1": {"max_input_tokens": 1_000_000, "budget_ratio": 0.85},
+    "claude-fable-5": {"max_input_tokens": 1_000_000, "budget_ratio": 0.85},
+    "claude-mythos-5-1": {"max_input_tokens": 1_000_000, "budget_ratio": 0.85},
+    "claude-mythos-5": {"max_input_tokens": 1_000_000, "budget_ratio": 0.85},
+    "claude-opus-5": {"max_input_tokens": 1_000_000, "budget_ratio": 0.85},
+    "claude-opus-4-8": {"max_input_tokens": 1_000_000, "budget_ratio": 0.85},
+    "claude-opus-4-7": {"max_input_tokens": 1_000_000, "budget_ratio": 0.85},
+    "claude-opus-4-6": {"max_input_tokens": 1_000_000, "budget_ratio": 0.85},
     "claude-opus-4-5": {"max_input_tokens": 200_000, "budget_ratio": 0.85},
     "claude-opus-4": {"max_input_tokens": 200_000, "budget_ratio": 0.85},
+    "claude-sonnet-5": {"max_input_tokens": 1_000_000, "budget_ratio": 0.85},
+    "claude-sonnet-4-6": {"max_input_tokens": 1_000_000, "budget_ratio": 0.85},
     "claude-4.6-sonnet": {"max_input_tokens": 1_000_000, "budget_ratio": 0.85},
-    "claude-4.5-sonnet": {"max_input_tokens": 1_000_000, "budget_ratio": 0.85},
-    "claude-sonnet-4-5": {"max_input_tokens": 1_000_000, "budget_ratio": 0.85},
+    "claude-4.5-sonnet": {"max_input_tokens": 200_000, "budget_ratio": 0.85},
+    "claude-sonnet-4-5": {"max_input_tokens": 200_000, "budget_ratio": 0.85},
     "claude-sonnet-4": {"max_input_tokens": 200_000, "budget_ratio": 0.85},
+    "claude-haiku-4-5": {"max_input_tokens": 200_000, "budget_ratio": 0.85},
+    "claude-haiku-4": {"max_input_tokens": 200_000, "budget_ratio": 0.85},
     # ── Anthropic — Claude 3.x ─────────────────────────────────────────
     "claude-3-7-sonnet": {"max_input_tokens": 200_000, "budget_ratio": 0.85},
     "claude-3-5-sonnet": {"max_input_tokens": 200_000, "budget_ratio": 0.85},
     "claude-3-5-haiku": {"max_input_tokens": 200_000, "budget_ratio": 0.85},
+    # ── Bedrock Mantle third-party models ──────────────────────────────
+    # Context windows from the AWS Bedrock model cards (Sep 2026). Mantle
+    # ids keep the vendor dot for DeepSeek ("deepseek.v3.2") but drop it for
+    # the others ("zai.glm-5" → "glm-5") — see resolve_model_profile.
+    "deepseek.v3.2": {"max_input_tokens": 164_000, "budget_ratio": 0.85},
+    "deepseek.v3.1": {"max_input_tokens": 128_000, "budget_ratio": 0.85},
+    "kimi-k2.5": {"max_input_tokens": 256_000, "budget_ratio": 0.85},
+    "kimi-k2-thinking": {"max_input_tokens": 256_000, "budget_ratio": 0.85},
+    "glm-5": {"max_input_tokens": 200_000, "budget_ratio": 0.85},
+    "glm-4.7": {"max_input_tokens": 200_000, "budget_ratio": 0.85},
+    "gpt-oss-safeguard": {"max_input_tokens": 128_000, "budget_ratio": 0.80},
+    "gpt-oss": {"max_input_tokens": 128_000, "budget_ratio": 0.80},
     # ── Ollama / local OpenAI-compatible models ────────────────────────
     # NOTE: prefix-matching walks in insertion order. Put specific tags
     # (``gemma4:e4b``) before generic families (``gemma4``) before legacy
@@ -169,29 +200,59 @@ MODEL_PROFILES: dict[str, dict[str, int | float]] = {
 }
 
 
+_GEO_PREFIXES = ("global.", "us.", "eu.", "apac.", "ap.", "af.", "me.", "ca.", "sa.")
+_VENDOR_PREFIXES = (
+    "openai.",
+    "anthropic.",
+    "amazon.",
+    "meta.",
+    "mistral.",
+    "cohere.",
+    "ai21.",
+    "xai.",
+    "moonshot.",
+    "moonshotai.",
+    "zai.",
+)
+# Mantle ids where the vendor dot is part of the model name we key on.
+_KEEP_VENDOR_DOT = ("deepseek.",)
+
+
+def normalize_model_id(model_name: str) -> str:
+    """Reduce a provider-qualified id to the bare model key used in MODEL_PROFILES.
+
+    Handles the Bedrock / Mantle spellings in one pass each:
+    ``bedrock/us.anthropic.claude-opus-4-8-20260301-v1:0`` →
+    ``claude-opus-4-8-20260301-v1``. Mirrors ``normalizeModelId`` in the
+    VS Code webview so both sides agree on which profile a model hits.
+    """
+    name = str(model_name or "").strip().lower()
+    if not name:
+        return name
+    if name.startswith("bedrock/"):
+        name = name[len("bedrock/") :]
+    for prefix in _GEO_PREFIXES:
+        if name.startswith(prefix):
+            name = name[len(prefix) :]
+            break
+    if not name.startswith(_KEEP_VENDOR_DOT):
+        for prefix in _VENDOR_PREFIXES:
+            if name.startswith(prefix):
+                name = name[len(prefix) :]
+                break
+    # Drop the Bedrock ":0" revision suffix so prefix matching sees the model.
+    if ":" in name:
+        name = name.split(":", 1)[0]
+    return name
+
+
 def resolve_model_profile(model_name: str | None) -> dict[str, int | float] | None:
     """Return the best-matching MODEL_PROFILES entry, or None."""
     if not model_name:
         return None
-    name = str(model_name).strip().lower()
+    name = normalize_model_id(model_name)
     if not name:
         return None
-    # Strip common Bedrock / provider prefixes so openai.gpt-5.6-luna matches.
-    for prefix in (
-        "bedrock/",
-        "global.",
-        "us.",
-        "eu.",
-        "apac.",
-        "ap.",
-        "openai.",
-        "anthropic.",
-        "amazon.",
-        "xai.",
-    ):
-        if name.startswith(prefix):
-            name = name[len(prefix) :]
-            break
     profile = MODEL_PROFILES.get(name)
     if profile:
         return profile

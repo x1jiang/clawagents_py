@@ -92,7 +92,11 @@ class ChannelRouter:
         if existing:
             existing.cancel()
 
-        loop = asyncio.get_event_loop()
+        # Adapters invoke this from inside the running loop (their reader
+        # tasks / callbacks), and ``ensure_future`` above already requires
+        # one. ``get_event_loop`` without a running loop is a
+        # DeprecationWarning on 3.12+ and an error on 3.14.
+        loop = asyncio.get_running_loop()
         handle = loop.call_later(
             self._debounce_ms / 1000.0,
             lambda k=key: asyncio.ensure_future(self._flush_debounce(k)),

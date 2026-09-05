@@ -263,8 +263,9 @@ async def _wait_for_tool_approval(
             return False
 
     # "event" (or any other truthy non-callable): poll RunContext
-    deadline = asyncio.get_event_loop().time() + max(1.0, timeout_s)
-    while asyncio.get_event_loop().time() < deadline:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(1.0, timeout_s)
+    while loop.time() < deadline:
         state = run_context.is_tool_approved(call_id, tool_name=tool_name)
         if state is not None:
             return bool(state)
