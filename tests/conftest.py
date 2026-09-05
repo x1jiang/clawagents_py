@@ -32,10 +32,14 @@ os.environ["CLAWAGENTS_SKIP_DOTENV"] = "1"
 # (openai>=2) raise at *construction* on an empty key, so tests that build a
 # real agent purely to inspect tool registration would crash offline. Inject
 # inert placeholders so construction succeeds without ever reaching a network
-# (CI's intent: "must not depend on real provider keys"). setdefault: a dev
-# exporting a real key, or a test's own monkeypatch.setenv/delenv, still wins.
+# (CI's intent: "must not depend on real provider keys"). A dev exporting a
+# real key, or a test's own monkeypatch.setenv/delenv, still wins. CI exports
+# the keys as *empty strings* (ci.yml), which ``setdefault`` would leave in
+# place — treat empty as unset, otherwise the OpenAI client raises
+# "Missing credentials" at construction.
 for _k in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY"):
-    os.environ.setdefault(_k, "sk-test-placeholder-not-a-real-key")
+    if not os.environ.get(_k):
+        os.environ[_k] = "sk-test-placeholder-not-a-real-key"
 
 from clawagents.config import features as _features  # noqa: E402
 
