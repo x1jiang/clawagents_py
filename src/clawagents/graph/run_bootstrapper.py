@@ -581,7 +581,7 @@ class RunBootstrapper:
     def _build_messages(self) -> list[LLMMessage]:
         c = self.c
         prompt_to_use = append_model_identity(
-            c.system_prompt or _BASE_SYSTEM_PROMPT,
+            c.system_prompt or _default_base_prompt(),
             getattr(c.llm, "name", None),
             getattr(c.llm, "model", None),
         )
@@ -1010,21 +1010,29 @@ def _default_on_event(kind: str, data: dict[str, Any]) -> None:
 _run_output_guardrails_fn: Any = None
 _coerce_output_type_fn: Any = None
 _HookResult: Any = None
-_BASE_SYSTEM_PROMPT: str = ""
+
+
+def _default_base_prompt() -> str:
+    """Base prompt for runs whose config carries no ``system_prompt``.
+
+    Honours ``CLAW_BASE_PROMPT[_FILE]`` and ``.clawagents/base-prompt.md`` so
+    a ``ClawAgent`` built directly (not via ``create_claw_agent``) still picks
+    up the configured override.
+    """
+    from clawagents.prompts.base import resolve_base_system_prompt
+
+    return resolve_base_system_prompt()
 
 
 def _bind_agent_loop_refs() -> None:
     """Called once from agent_loop to set forward references."""
     global _run_output_guardrails_fn, _coerce_output_type_fn, _HookResult
-    global _BASE_SYSTEM_PROMPT
     from .agent_loop import (
         _run_output_guardrails,
         _coerce_output_type,
         HookResult,
-        BASE_SYSTEM_PROMPT,
     )
 
     _run_output_guardrails_fn = _run_output_guardrails
     _coerce_output_type_fn = _coerce_output_type
     _HookResult = HookResult
-    _BASE_SYSTEM_PROMPT = BASE_SYSTEM_PROMPT

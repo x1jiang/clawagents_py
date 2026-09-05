@@ -619,6 +619,8 @@ def create_claw_agent(
     api_version: Optional[str] = None,
     instruction: Optional[str] = None,
     system_prompt: Optional[str] = None,
+    base_prompt: Union[str, os.PathLike, None] = None,
+    base_prompt_append: Union[str, os.PathLike, None] = None,
     tools: Optional[List] = None,
     skills: Union[str, List[Union[str, os.PathLike]], None] = None,
     skills_exclude: Optional[List[str]] = None,
@@ -682,6 +684,16 @@ def create_claw_agent(
                         Default: from OPENAI_API_VERSION env / None.
         instruction:    What the agent should do / how it should behave (alias: ``system_prompt``).
         system_prompt:  Alias for ``instruction`` (class-style naming).
+        base_prompt:    Override the built-in base prompt used when no ``instruction``
+                        is given: inline text or a path to a file. ``""`` disables it.
+                        Default: ``CLAW_BASE_PROMPT_FILE`` / ``CLAW_BASE_PROMPT`` env,
+                        then ``.clawagents/base-prompt.md`` (workspace, then ``~``),
+                        then the built-in text.
+        base_prompt_append: Extra text (or a file path) appended after the system
+                        prompt — after the base prompt, or after ``instruction`` when one
+                        is given. Default: ``CLAW_BASE_PROMPT_APPEND_FILE`` /
+                        ``CLAW_BASE_PROMPT_APPEND`` env, then
+                        ``.clawagents/base-prompt-append.md`` (workspace, then ``~``).
         tools:          Additional tools. Built-in tools always included.
         skills:         Skill directories (default: auto-discovers ./skills). Bundled skills (e.g. OpenViking) are included when present.
         memory:         AGENTS.md paths (default: auto-discovers ./AGENTS.md, ./CLAWAGENTS.md).
@@ -794,6 +806,28 @@ def create_claw_agent(
     from clawagents.paths import resolve_workspace_root
 
     workspace_root = str(resolve_workspace_root(workspace))
+
+    # A caller instruction *replaces* the built-in base prompt. Otherwise the
+    # (configurable) base prompt is the foundation that mode instructions and
+    # harness suffixes attach to — previously they attached to "" and the base
+    # prompt was silently dropped whenever either was present.
+    from clawagents.prompts.base import (
+        apply_append,
+        resolve_base_prompt_append,
+        resolve_base_system_prompt,
+    )
+
+    if not resolved_instruction:
+        resolved_instruction = resolve_base_system_prompt(
+            base_prompt, append=base_prompt_append, workspace=workspace_root,
+        )
+    else:
+        # The append block is additive by nature, so it still lands after a
+        # caller instruction that replaced the base prompt.
+        resolved_instruction = apply_append(
+            resolved_instruction,
+            resolve_base_prompt_append(base_prompt_append, workspace=workspace_root),
+        )
 
     if trajectory is None:
         trajectory = os.environ.get("CLAW_TRAJECTORY", "").lower() in ("1", "true", "yes")
@@ -1132,12 +1166,15 @@ def create_claw_agent(
                 registry.register(t)
 
     # ── Auto-discover memory from default locations ────────────────────
-    memory_paths = _to_list(memory) if memory is not None else _auto_discover_memory()
+    memory_paths = (
+        _to_list(memory) if memory is not None else _auto_discover_memory(workspace_root)
+    )
     composed_before_llm = _compose_before_llm(
         memory_paths=memory_paths,
         skill_summaries=skill_summaries,
         skill_store=skill_store,
         context_window=context_window,
+        workspace=workspace_root,
     )
 
     # ── Custom mode (instruction + tool gate + permission) ────────────
@@ -2085,11 +2122,17 @@ _DEFAULT_SKILL_DIRS = [
 ]
 
 
-def _auto_discover_memory() -> list:
-    """Auto-discover memory + always-on rules files."""
-    from clawagents.memory.rules import discover_rule_paths
+def _auto_discover_memory(workspace: str | os.PathLike | None = None) -> list:
+    """Auto-discover memory + always-on rules files under *workspace*.
 
-    return [str(p) for p in discover_rule_paths()]
+    Pinned context is excluded here: ``_compose_before_llm`` re-reads it every
+    round and places it in its own tail block at the end of the system prompt.
+    """
+    from clawagents.memory.rules import discover_rule_paths
+    from clawagents.paths import resolve_workspace_root
+
+    root = resolve_workspace_root(workspace)
+    return [str(p) for p in discover_rule_paths(root, include_pinned=False)]
 
 
 def _auto_discover_skills(workspace: str | os.PathLike | None = None) -> list:
@@ -2172,13 +2215,40 @@ def _compose_before_llm(
     skill_summaries: Optional[str],
     skill_store: Any = None,
     context_window: Optional[int] = None,
+    workspace: Optional[str] = None,
 ) -> Optional[BeforeLLMHook]:
     """Compose memory/rules + skill injection into one before_llm hook.
 
     Reloads rule files every LLM round so always-on rules survive compaction.
     Re-ranks the skill catalog against the latest user turn when a store is set.
+    Re-reads ``.clawagents/pinned-context.md`` every round and upserts it as the
+    last block of the system message (strongest placement; survives compaction).
     """
-    from clawagents.prompts import append_prompt_injection, build_prompt_injection
+    from clawagents.prompts import (
+        append_pinned_context,
+        append_prompt_injection,
+        build_prompt_injection,
+    )
+
+    def _pinned_text() -> str:
+        if not workspace:
+            return ""
+        try:
+            from clawagents.memory.rules import read_pinned_context
+
+            return read_pinned_context(workspace)
+        except Exception:
+            return ""
+
+    def _with_pinned(msgs: list) -> list:
+        pinned = _pinned_text()
+        if not pinned and not any(
+            "<!--clawagents:pinned-->" in str(getattr(m, "content", "") or "")
+            for m in msgs
+            if getattr(m, "role", None) == "system"
+        ):
+            return list(msgs)
+        return append_pinned_context(msgs, pinned)
 
     def hook(messages: list) -> list:
         memory_content: Optional[str] = None
@@ -2219,11 +2289,12 @@ def _compose_before_llm(
             summaries = discovery
 
         if not memory_content and not summaries:
-            return messages
+            return _with_pinned(messages)
         injection = build_prompt_injection(memory_content, summaries)
-        return list(append_prompt_injection(messages, injection))
+        return _with_pinned(list(append_prompt_injection(messages, injection)))
 
-    # Always return a hook when we have paths or skills so rounds re-read disk.
-    if memory_paths or skill_summaries or skill_store is not None:
+    # Always return a hook when we have paths, skills, or a workspace whose
+    # pinned context may appear mid-session, so rounds re-read disk.
+    if memory_paths or skill_summaries or skill_store is not None or workspace:
         return hook
     return None

@@ -68,6 +68,12 @@ pip install -U 'clawagents[all]'       # All providers + tiktoken
 
 > **Version 6.18.0** — Grok-inspired edit/execute harness (July 2026).
 
+### New In v6.20.70
+- **Configurable base system prompt.** The built-in prompt now lives in `clawagents.prompts.base` and can be replaced via `base_prompt=` (text or file), `--base-prompt`, `CLAW_BASE_PROMPT[_FILE]`, or `.clawagents/base-prompt.md` (workspace, then `~`). `instruction=` still replaces it.
+- **Append mechanisms.** `base_prompt_append=` (text or file), `--base-prompt-append`, `CLAW_BASE_PROMPT_APPEND[_FILE]`, or `.clawagents/base-prompt-append.md` add rules after the base prompt *or* after `instruction=`.
+- **Pinned context rides at the tail.** `.clawagents/pinned-context.md` (the VS Code "Always-on context" banner) is now upserted as the last block of the system message every LLM round with precedence framing, instead of sitting mid-prompt inside the project-rules blob after the tool catalog. No longer duplicated in the rules block.
+- **Fix:** default `gpt-5.6` / `mode=` runs with no `instruction` dropped the built-in base prompt entirely (only the harness suffix or mode text was sent). Rules discovery now honours `workspace=` instead of the process cwd.
+
 ### New In v6.20.49
 - OpenAI Chat Completions + Responses: extract `cache_write_tokens` → `cache_creation_tokens` so cache-load cost is billed (1.25× write premium)
 - Cache-read (`cached_tokens`) unchanged; applies to official OpenAI API and Mantle/OpenAI-compatible frontier paths
@@ -345,6 +351,55 @@ agent = create_claw_agent(
 )
 result = await agent.invoke("Review this codebase and suggest improvements")
 ```
+
+`instruction=` **replaces** the built-in base prompt. To change the built-in
+text itself (used whenever no `instruction` is given) see the next section.
+
+### 3b. Customizing the built-in base prompt
+
+The default base prompt (identity, core behavior, efficiency rules) is
+`clawagents.prompts.base.DEFAULT_BASE_SYSTEM_PROMPT`. Override it without
+forking, highest precedence first:
+
+| Source | Example |
+|---|---|
+| `base_prompt=` parameter (inline text or file path) | `create_claw_agent("gpt-5", base_prompt="prompts/base.md")` |
+| `--base-prompt` CLI flag | `clawagents --task "..." --base-prompt prompts/base.md` |
+| `CLAW_BASE_PROMPT_FILE` env var | `CLAW_BASE_PROMPT_FILE=prompts/base.md` |
+| `CLAW_BASE_PROMPT` env var (inline text) | `CLAW_BASE_PROMPT="You are ..."` |
+| `.clawagents/base-prompt.md` in the workspace | drop a file, no code change |
+| `~/.clawagents/base-prompt.md` | user-wide default |
+| built-in text | — |
+
+Pass `base_prompt=""` to send no base prompt at all.
+
+**Appending instead of replacing.** To keep the base prompt (or your
+`instruction=`) and add rules after it, use any of these, highest precedence
+first:
+
+| Source | Example |
+|---|---|
+| `base_prompt_append=` parameter (inline text or file path) | `create_claw_agent("gpt-5", base_prompt_append="Always answer in French.")` |
+| `--base-prompt-append` CLI flag | `clawagents --task "..." --base-prompt-append prompts/extra.md` |
+| `CLAW_BASE_PROMPT_APPEND_FILE` env var | `CLAW_BASE_PROMPT_APPEND_FILE=prompts/extra.md` |
+| `CLAW_BASE_PROMPT_APPEND` env var (inline text) | `CLAW_BASE_PROMPT_APPEND="Always answer in French."` |
+| `.clawagents/base-prompt-append.md` in the workspace | drop a file, no code change |
+| `~/.clawagents/base-prompt-append.md` | user-wide default |
+
+The append block is added after the base prompt, or after `instruction=`
+when one is given (an instruction replaces the base, not the append).
+
+```python
+agent = create_claw_agent(
+    "gpt-5",
+    instruction="You are a senior code reviewer.",
+    base_prompt_append="Always answer in French.",
+)
+# system prompt == "You are a senior code reviewer.\n\nAlways answer in French."
+```
+
+Mode instructions (`mode=`) and model harness suffixes (e.g. GPT-5.6
+efficiency rules) are layered on top of whichever base prompt wins.
 
 ### 4. With trajectory logging & rethink
 
