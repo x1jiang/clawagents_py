@@ -27,8 +27,17 @@ _RULES_DIR = ".clawagents/rules"
 DEFAULT_RULES_MAX_CHARS = 12_000
 
 
-def discover_rule_paths(workspace: str | Path | None = None) -> List[Path]:
-    """Return rule file paths in stable order (deduped)."""
+def discover_rule_paths(
+    workspace: str | Path | None = None,
+    *,
+    include_pinned: bool = True,
+) -> List[Path]:
+    """Return rule file paths in stable order (deduped).
+
+    ``include_pinned=False`` leaves ``.clawagents/pinned-context.md`` out for
+    callers that place pinned context in its own tail block instead (see
+    :func:`clawagents.prompts.append_pinned_context`), so it is not sent twice.
+    """
     root = Path(workspace or os.getcwd()).resolve()
     found: list[Path] = []
     seen: set[Path] = set()
@@ -43,7 +52,8 @@ def discover_rule_paths(workspace: str | Path | None = None) -> List[Path]:
         seen.add(rp)
         found.append(rp)
 
-    _add(root / _PINNED_CONTEXT_FILE)
+    if include_pinned:
+        _add(root / _PINNED_CONTEXT_FILE)
     for name in _RULE_ROOT_FILES:
         _add(root / name)
     for rel in _RULE_NESTED_FILES:

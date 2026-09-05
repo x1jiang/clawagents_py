@@ -463,6 +463,8 @@ async def cmd_task(
     mode: str | None = None,
     auto: bool = False,
     action_mode: str = "tools",
+    base_prompt: str | None = None,
+    base_prompt_append: str | None = None,
 ):
     """Run a single task and print the result."""
     from clawagents.agent import create_claw_agent
@@ -488,6 +490,10 @@ async def cmd_task(
         kwargs["mode"] = resolved_mode
     if action_mode and action_mode != "tools":
         kwargs["action_mode"] = action_mode
+    if base_prompt is not None:
+        kwargs["base_prompt"] = base_prompt
+    if base_prompt_append is not None:
+        kwargs["base_prompt_append"] = base_prompt_append
     agent = create_claw_agent(**kwargs)
     tool_count = len(agent.tools.list())
     advisor_info = f" advisor={advisor_model}" if agent.advisor_llm else ""
@@ -757,6 +763,8 @@ def main():
         help="Output format for --task (text, json, stream-json)",
     )
     parser.add_argument("--mode", type=str, help="Named agent mode from modes.json / builtins")
+    parser.add_argument("--base-prompt", type=str, metavar="PATH_OR_TEXT", help="Override the built-in base system prompt (file path or inline text; env: CLAW_BASE_PROMPT_FILE / CLAW_BASE_PROMPT)")
+    parser.add_argument("--base-prompt-append", type=str, metavar="PATH_OR_TEXT", help="Append extra text after the system prompt (file path or inline text; env: CLAW_BASE_PROMPT_APPEND_FILE / CLAW_BASE_PROMPT_APPEND)")
     parser.add_argument(
         "--auto",
         action="store_true",
@@ -825,6 +833,8 @@ def main():
                 mode=args.mode,
                 auto=args.auto,
                 action_mode=args.action_mode,
+                base_prompt=args.base_prompt,
+                base_prompt_append=args.base_prompt_append,
             ))
         except KeyboardInterrupt:
             sys.stderr.write("\nInterrupted.\n")

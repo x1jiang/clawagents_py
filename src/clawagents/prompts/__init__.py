@@ -17,6 +17,19 @@ _INJECTION_BLOCK_RE = re.compile(
     re.MULTILINE,
 )
 
+# User-pinned "always-on" context. Rides at the very END of the system message
+# (after tools, rules and dynamic layers) so it is the last instruction the
+# model reads before the conversation — the strongest position short of the
+# user turn itself. Re-upserted every LLM round.
+PINNED_BEGIN = "<!--clawagents:pinned-->"
+PINNED_END = "<!--/clawagents:pinned-->"
+PINNED_HEADING = "## Pinned context (always applies)"
+
+_PINNED_BLOCK_RE = re.compile(
+    r"\n*" + re.escape(PINNED_BEGIN) + r"[\s\S]*?" + re.escape(PINNED_END) + r"\n?",
+    re.MULTILINE,
+)
+
 
 def model_identity_section(
     provider: Optional[str],
@@ -150,3 +163,51 @@ def append_prompt_injection(
         return result
 
     return messages
+
+
+def build_pinned_block(text: Optional[str]) -> str:
+    """Wrap user-pinned context in its tagged, precedence-framed block."""
+    body = (text or "").strip()
+    if not body:
+        return ""
+    return (
+        f"{PINNED_BEGIN}\n"
+        f"{PINNED_HEADING}\n"
+        "The user pinned the following instructions for this workspace. They apply "
+        "to every turn, including after context compaction, and take precedence "
+        "over the project rules, tool notes, and defaults above when they conflict.\n\n"
+        f"{body}\n"
+        f"{PINNED_END}"
+    )
+
+
+def strip_pinned_context(content: str) -> str:
+    """Remove a previously upserted pinned-context block."""
+    if not content:
+        return content
+    return _PINNED_BLOCK_RE.sub("", content)
+
+
+def append_pinned_context(
+    messages: Sequence[Any],
+    text: Optional[str],
+) -> list:
+    """Upsert pinned context as the LAST block of the system message.
+
+    Empty ``text`` removes any existing block. Only the system message is
+    touched; user turns are never rewritten.
+    """
+    result = list(messages)
+    block = build_pinned_block(text)
+    for index, message in enumerate(result):
+        role = message.get("role") if isinstance(message, dict) else getattr(message, "role", None)
+        if role != "system":
+            continue
+        content = message.get("content", "") if isinstance(message, dict) else getattr(message, "content", "")
+        if not isinstance(content, str):
+            content = str(content or "")
+        content = strip_pinned_context(content).rstrip()
+        new_content = f"{content}\n\n{block}\n" if block else f"{content}\n"
+        result[index] = LLMMessage(role="system", content=new_content)
+        return result
+    return result
