@@ -138,7 +138,6 @@ class TurnLLMCaller:
         model_name = resolved_model_name or response.model
 
         # Record provider-reported token counts and telemetry.
-        input_tokens = int(getattr(response, "prompt_tokens", 0) or 0)
         peak_memory_bytes = usage.sample_memory()
         req_usage = self._accumulate_usage(
             response,

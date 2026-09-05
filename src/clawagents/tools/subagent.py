@@ -280,7 +280,6 @@ class TaskTool:
             args=args,
             personas=self._personas,
         )
-        spec = resolved.spec
         effective_max_iter = resolved.max_iterations
         effective_prompt = resolved.system_prompt
         effective_native_tools = resolved.use_native_tools

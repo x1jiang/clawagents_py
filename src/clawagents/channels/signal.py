@@ -53,7 +53,7 @@ class SignalAdapter:
 
     async def _read_loop(self) -> None:
         assert self._proc and self._proc.stdout
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         while True:
             line = await loop.run_in_executor(None, self._proc.stdout.readline)
             if not line:

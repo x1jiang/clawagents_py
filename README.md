@@ -68,6 +68,14 @@ pip install -U 'clawagents[all]'       # All providers + tiktoken
 
 > **Version 6.18.0** — Grok-inspired edit/execute harness (July 2026).
 
+### New In v6.20.71
+- **Correct Claude context windows.** Per Anthropic's context-windows page, Opus 4.6/4.7/4.8, Opus 5, Sonnet 4.6, Sonnet 5 and Fable 5/5.1 are 1M by default; Sonnet 4.5, Haiku 4.5 and Opus 4.5 are 200K. Previously Opus 4.6+ was budgeted at 200K (compacting ~5× too early) and Sonnet 4.5 at 1M (overflow risk — no `context-1m` beta header is sent).
+- **Gemini Pro windows corrected to 1M.** `gemini-3.1-pro`, `gemini-3-pro` and `gemini-2.5-pro` are 1,048,576 input tokens per ai.google.dev; the table said 2M.
+- **Model profiles for every id the VS Code picker offers.** Added `gemini-3.8-flash`, `claude-opus-4-8` / `claude-sonnet-5` / `claude-fable-5`, `claude-haiku-4-5`, and the Bedrock Mantle third-party ids (`deepseek.v3.2` 164K, `kimi-k2.5` 256K, `glm-5` 200K, `gpt-oss-*` 128K) from the AWS model cards.
+- **Fix: Bedrock ids never matched a profile.** `resolve_model_profile` stripped only one prefix, so `us.anthropic.claude-…-v1:0` fell through to the generic 1M/0.75 guess. New `normalize_model_id` strips geo + vendor prefixes and the `:0` revision, mirroring the VS Code webview.
+- **Fix: `clawagents.list_profiles` was silently shadowed** by the sandbox catalog's function of the same name. It again returns the `~/.clawagents/<profile>` directory list; the sandbox one is exported as `clawagents.list_sandbox_profiles`.
+- **Python 3.14** added to the CI matrix and classifiers (suite passes). Replaced the 3.14-deprecated `asyncio.get_event_loop()` / `asyncio.iscoroutinefunction` call sites.
+
 ### New In v6.20.70
 - **Configurable base system prompt.** The built-in prompt now lives in `clawagents.prompts.base` and can be replaced via `base_prompt=` (text or file), `--base-prompt`, `CLAW_BASE_PROMPT[_FILE]`, or `.clawagents/base-prompt.md` (workspace, then `~`). `instruction=` still replaces it.
 - **Append mechanisms.** `base_prompt_append=` (text or file), `--base-prompt-append`, `CLAW_BASE_PROMPT_APPEND[_FILE]`, or `.clawagents/base-prompt-append.md` add rules after the base prompt *or* after `instruction=`.
