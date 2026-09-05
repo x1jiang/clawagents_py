@@ -70,8 +70,15 @@ def _run_cmd(cmd: list[str], *, timeout_s: float) -> subprocess.CompletedProcess
     )
 
 
-def run_syntax_gate(path: str | Path, *, timeout_s: float = 2.0) -> str | None:
-    """Return a status line for *path*, or ``None`` if no checker applies."""
+def run_syntax_gate(path: str | Path, *, timeout_s: float = 10.0) -> str | None:
+    """Return a status line for *path*, or ``None`` if no checker applies.
+
+    ``timeout_s`` bounds each checker subprocess. A cold ``node --check`` on a
+    loaded CI runner or laptop can take well over 2 s just to start, and a
+    timeout downgrades a real syntax failure to "checker skipped" — so the
+    default is generous; a one-shot syntax check only reaches it if the
+    checker genuinely hangs.
+    """
     file_path = Path(path)
     ext = file_path.suffix.lower()
     spec = _CHECKERS.get(ext)
