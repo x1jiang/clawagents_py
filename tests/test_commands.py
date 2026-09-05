@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 from clawagents.commands import (
     COMMAND_REGISTRY,

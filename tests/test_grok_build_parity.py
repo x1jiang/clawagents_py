@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import subprocess
 from pathlib import Path
 
@@ -16,8 +15,7 @@ from clawagents.permissions.plan_approval import (
     PlanApprovalDecision,
 )
 from clawagents.run_context import RunContext
-from clawagents.tools.plan_mode import ExitPlanModeTool, enter_plan_mode_tool
-from clawagents.tools.registry import ToolRegistry
+from clawagents.tools.plan_mode import ExitPlanModeTool
 
 
 @pytest.fixture(autouse=True)
@@ -309,7 +307,7 @@ def test_os_sandbox_profile_readonly(tmp_path: Path):
 
 
 def test_scope_graph_incremental(tmp_path: Path):
-    from clawagents.memory.scope_graph import ScopeGraph, get_scope_graph, _GRAPHS
+    from clawagents.memory.scope_graph import get_scope_graph, _GRAPHS
 
     (tmp_path / "a.py").write_text("def foo():\n    return 1\n", encoding="utf-8")
     (tmp_path / "b.py").write_text("def bar():\n    return foo()\n", encoding="utf-8")

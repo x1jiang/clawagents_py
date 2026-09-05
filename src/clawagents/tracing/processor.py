@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import sys
@@ -10,7 +9,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import IO, Any, Optional
+from typing import IO, Optional
 
 from clawagents.tracing.span import Span
 

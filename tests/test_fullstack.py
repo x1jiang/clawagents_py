@@ -4,16 +4,12 @@ Covers: hooks, memory loader, todolist, filesystem upgrades, subagent.
 Run with: python -m pytest tests/test_fullstack.py -v
 """
 
-import json
-import asyncio
-import tempfile
-from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 import pytest
 
 from clawagents.sandbox.local import LocalBackend
-from clawagents.tools.registry import ToolRegistry, ToolResult, ParsedToolCall
+from clawagents.tools.registry import ToolRegistry, ToolResult
 
 
 # ─── Memory Loader Tests ─────────────────────────────────────────────────

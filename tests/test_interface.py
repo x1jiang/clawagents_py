@@ -14,7 +14,7 @@ import os
 import pytest
 import tempfile
 import shutil
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch, MagicMock
 
 
 @pytest.fixture

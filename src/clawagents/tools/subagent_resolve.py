@@ -14,7 +14,7 @@ Separates:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal, Mapping, Optional, Sequence
+from typing import Any, Literal, Mapping, Sequence
 
 from clawagents.tools.subagent import SubAgentSpec
 

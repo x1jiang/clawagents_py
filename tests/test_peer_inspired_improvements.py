@@ -18,7 +18,7 @@ from clawagents.memory.core_memory import (
     load_core_memory,
 )
 from clawagents.memory.facts import add_fact, list_facts, live_facts_preamble
-from clawagents.memory.repo_map import build_repo_map, collect_tags, rank_tags
+from clawagents.memory.repo_map import build_repo_map
 from clawagents.memory.shadow_checkpoint import (
     create_checkpoint,
     list_checkpoints,

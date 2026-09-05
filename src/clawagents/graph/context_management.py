@@ -22,7 +22,6 @@ from typing import Any, Callable, Optional
 from clawagents.providers.llm import LLMProvider, LLMMessage, NativeToolSchema
 from clawagents.run_context import RunContext
 from clawagents.tools.registry import ToolRegistry
-from clawagents.context.carryover import get_compaction_carryover
 from clawagents.graph.model_profiles import (
     resolve_context_budget as _resolve_context_budget,
     resolve_long_context_threshold as _resolve_long_context_threshold,

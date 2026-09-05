@@ -9,7 +9,7 @@ Inspired by ToolUniverse's BaseTool.validate_parameters().
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple
+from typing import Any, Callable, Dict, List, Optional, Protocol
 
 
 class _ToolLike(Protocol):

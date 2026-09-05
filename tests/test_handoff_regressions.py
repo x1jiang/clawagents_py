@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
 import pytest
 
-from clawagents.providers.llm import LLMProvider, LLMMessage, LLMResponse
+from clawagents.providers.llm import LLMProvider, LLMResponse
 from clawagents.run_context import RunContext
 from clawagents.tools.subagent import TaskTool, _pin_llm_model
 

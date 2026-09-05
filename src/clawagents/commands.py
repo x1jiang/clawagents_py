@@ -30,8 +30,8 @@ To add a command: append a :class:`CommandDef` entry to
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Iterable, Literal, Optional
+from dataclasses import dataclass
+from typing import Literal, Optional
 
 
 CacheImpact = Literal["none", "deferred", "immediate"]

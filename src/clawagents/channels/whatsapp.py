@@ -24,15 +24,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import subprocess
 import sys
 import tempfile
-import time
 from pathlib import Path
 from typing import Any, Callable
 
-from clawagents.channels.types import ChannelAdapter, ChannelMessage
+from clawagents.channels.types import ChannelMessage
 
 _BAILEYS_HELPER = '''
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require("baileys");

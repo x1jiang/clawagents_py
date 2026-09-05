@@ -224,7 +224,6 @@ class SseEventBridge:
 
         usage = event.get("usage") or {}
         per_request = usage.get("per_request") or []
-        total_calls = len(per_request) or len(self._usage_events)
 
         if per_request:
             # Authoritative path: use per_request from the done event

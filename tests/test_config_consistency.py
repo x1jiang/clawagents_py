@@ -76,7 +76,7 @@ def test_all_config_fields_in_readme():
     """Every EngineConfig env var should be documented in README.md."""
     mapping = _config_field_to_env()
     missing = []
-    for field_name, env_name in mapping.items():
+    for env_name in mapping.values():
         if not _readme_mentions(env_name):
             missing.append(env_name)
 

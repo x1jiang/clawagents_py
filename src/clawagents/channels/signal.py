@@ -21,7 +21,7 @@ import sys
 import time
 from typing import Any, Callable
 
-from clawagents.channels.types import ChannelAdapter, ChannelMessage
+from clawagents.channels.types import ChannelMessage
 
 
 class SignalAdapter:

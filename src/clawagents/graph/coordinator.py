@@ -28,7 +28,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Optional, Protocol
+from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
 

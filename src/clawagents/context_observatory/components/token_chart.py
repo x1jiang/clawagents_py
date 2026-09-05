@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
 
 import streamlit as st
 
@@ -121,7 +120,6 @@ def _render_utilization_curve(store: EventStore) -> None:
     # Utilization percentage bar
     if utilization:
         latest = utilization[-1]
-        color = "green" if latest < 60 else "orange" if latest < 80 else "red"
         st.progress(min(latest / 100, 1.0), text=f"Current utilization: {latest:.1f}%")
 
 

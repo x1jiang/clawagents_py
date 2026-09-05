@@ -22,11 +22,11 @@ import os
 import pytest
 import tempfile
 import shutil
-from unittest.mock import MagicMock, AsyncMock, patch
+from unittest.mock import MagicMock, patch
 from typing import Dict, Any, List
 
 from clawagents.sandbox.local import LocalBackend
-from clawagents.tools.registry import Tool, ToolResult, ToolRegistry
+from clawagents.tools.registry import ToolResult, ToolRegistry
 
 
 # ─── Custom Tools ─────────────────────────────────────────────────────────
@@ -629,7 +629,7 @@ class TestFullPipelineWithHooks:
     async def test_multi_tool_execution_chain(self):
         """Simulate a realistic multi-step tool chain."""
         from clawagents.tools.filesystem import (
-            LsTool, ReadFileTool, GrepTool, EditFileTool, WriteFileTool
+            LsTool, ReadFileTool, GrepTool, EditFileTool
         )
         from clawagents.tools.todolist import WriteTodosTool, UpdateTodoTool, reset_todos
 

@@ -7,7 +7,6 @@ promotes frequently retrieved items and decays stale session memories.
 from __future__ import annotations
 
 import hashlib
-import json
 import math
 import os
 import re
@@ -15,7 +14,6 @@ import sqlite3
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Optional
 
 
 def _blake2_hex(content: str | bytes) -> str:

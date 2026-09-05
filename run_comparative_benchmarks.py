@@ -3,7 +3,6 @@ import subprocess
 import time
 import re
 from pathlib import Path
-from typing import Dict, List
 from tabulate import tabulate
 import os
 

@@ -16,13 +16,12 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import Any
 from unittest.mock import patch
 
 import pytest
 
-from clawagents.providers.llm import LLMProvider, LLMResponse, LLMMessage
-from clawagents.tools.registry import ToolRegistry, ToolResult
+from clawagents.providers.llm import LLMProvider, LLMResponse
+from clawagents.tools.registry import ToolRegistry
 from clawagents.tools.subagent import TaskTool, SubAgentSpec
 
 

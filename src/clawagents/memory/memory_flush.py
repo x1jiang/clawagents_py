@@ -10,7 +10,7 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable
 
 
 LLMComplete = Callable[[str], Awaitable[str]]
@@ -138,7 +138,7 @@ async def run_memory_flush(
 
     # Exact dedup via smart store
     try:
-        from clawagents.memory.smart_store import SmartMemoryStore, MemoryChunk, ingest_text
+        from clawagents.memory.smart_store import SmartMemoryStore, ingest_text
         import uuid
 
         store = SmartMemoryStore(ws)

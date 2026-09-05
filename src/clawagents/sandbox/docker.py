@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from clawagents.redact import is_secret_name
-from clawagents.sandbox.backend import DirEntry, ExecResult, FileStat, SandboxBackend
+from clawagents.sandbox.backend import DirEntry, ExecResult, FileStat
 
 # Vendor-prefixed shapes (``GITHUB_PAT``, ``STRIPE_SK_LIVE``) and infra
 # names (``DATABASE_URL``, ``DSN``) that don't contain any of redact's

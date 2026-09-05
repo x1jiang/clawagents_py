@@ -23,7 +23,7 @@ import asyncio
 import inspect
 import re
 from dataclasses import dataclass
-from typing import Any, Callable, Optional, Union, get_args, get_origin
+from typing import Any, Callable, Union, get_args, get_origin
 
 from clawagents.run_context import RunContext
 from clawagents.tools.registry import Tool, ToolResult

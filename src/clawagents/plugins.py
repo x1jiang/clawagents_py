@@ -28,12 +28,6 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover
-    from clawagents.graph.agent_loop import (
-        BeforeLLMHook,
-        BeforeToolHook,
-        AfterToolHook,
-        HookResult,
-    )
     from clawagents.tools.registry import ToolResult
 
 

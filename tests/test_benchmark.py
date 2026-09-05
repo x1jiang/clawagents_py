@@ -9,11 +9,9 @@ Marked as benchmark; skip with: pytest -m "not benchmark"
 import os
 import time
 import pytest
-from pathlib import Path
 
 from clawagents.config.config import load_config, get_default_model
 from clawagents.providers.llm import create_provider
-from clawagents.tools.registry import ToolRegistry
 from clawagents.tools.filesystem import filesystem_tools
 from clawagents.tools.exec import exec_tools
 from clawagents.agent import create_claw_agent

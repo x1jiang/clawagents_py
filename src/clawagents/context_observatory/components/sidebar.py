@@ -6,7 +6,6 @@ selection, chat session management, and the original session summary metrics.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
@@ -129,7 +128,6 @@ def render_sidebar(store: EventStore) -> dict[str, Any]:
         for chat in chats[:20]:
             chat_id = chat.get("id", "")
             title = chat.get("title", chat_id[:20])
-            mode_badge = chat.get("mode", "")
             msg_count = chat.get("message_count", 0)
             label = f"{title} ({msg_count} msgs)" if msg_count else title
             is_active = chat_id == active_chat
@@ -221,7 +219,6 @@ def _render_connection_status() -> None:
     if status == "connected":
         health = st.session_state.get("sidecar_health", {})
         model = health.get("model", "unknown")
-        provider = health.get("provider", "")
         st.sidebar.success(f"🟢 Connected — {model}")
     elif status == "error":
         detail = st.session_state.get("sidecar_error", "")

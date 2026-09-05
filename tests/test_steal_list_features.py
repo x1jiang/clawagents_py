@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
-import pytest
 
 
 def test_shadow_checkpoint_modes_and_index(tmp_path: Path, monkeypatch):

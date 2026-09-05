@@ -40,8 +40,6 @@ class TestTaxonomyExternalHooksGate:
 
 class TestSeatbeltQuoting:
     def test_single_quote_command_uses_shlex_quote(self):
-        from clawagents.sandbox.profiles import ProfileBackend, OSSandboxProfile
-        from clawagents.sandbox.local import LocalBackend
 
         # Build the wrap string the same way exec does for seatbelt.
         command = "echo 'hi' && echo $(whoami)"

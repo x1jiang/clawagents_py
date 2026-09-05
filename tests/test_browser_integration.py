@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock
 
 from clawagents.agent import create_claw_agent
 from clawagents.config.features import temporary_overrides

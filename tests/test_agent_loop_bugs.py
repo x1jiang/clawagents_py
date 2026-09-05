@@ -131,7 +131,6 @@ class TestExternalPreLlmRoleCoercion:
         # Sanity check: the LLMMessage role literal — by inspecting the source
         # the fix uses these four roles.
         from typing import get_args, get_type_hints
-        import inspect
 
         # Resolve forward-refs in the from __future__ import annotations module.
         try:

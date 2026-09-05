@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
 
 
 def test_lesson_utilities_live_in_lessons_module():
@@ -130,7 +129,7 @@ def test_snippet_shared_between_session_and_history_search(tmp_path):
 def test_create_claw_agent_registers_consolidated_tools(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     from clawagents.agent import create_claw_agent
-    from clawagents.providers.llm import LLMMessage, LLMResponse, LLMProvider
+    from clawagents.providers.llm import LLMResponse, LLMProvider
 
     class FakeLLM(LLMProvider):
         name = "fake"

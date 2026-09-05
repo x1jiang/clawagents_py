@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import json
-import sys
 from enum import Enum
-from typing import Any, Callable
+from typing import Any
 
 from clawagents.graph.agent_loop import AgentState, EventKind, OnEvent
 

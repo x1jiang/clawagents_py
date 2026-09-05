@@ -274,8 +274,6 @@ async def _with_retry(
 
         if _feat_cb("provider_circuit_breaker"):
             from clawagents.circuit_breaker import (
-                BreakerOpen,
-                Outcome,
                 get_provider_breaker,
             )
 

@@ -15,17 +15,15 @@ import asyncio
 import logging
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import partial
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
-from clawagents.guardrails import OutputGuardrail
 from clawagents.handoffs import Handoff
 from clawagents.lifecycle import RunHooks
 from clawagents.prompts import append_model_identity, build_system_prompt
 from clawagents.providers.llm import LLMMessage, LLMProvider, LLMResponse, NativeToolSchema
 from clawagents.run_context import RunContext
-from clawagents.stream_events import StreamEvent
 from clawagents.tools.registry import ToolRegistry
 from clawagents.usage import RequestUsage, Usage
 

@@ -1,11 +1,9 @@
-import os
 import time
 import asyncio
 from pathlib import Path
 
 from clawagents.config.config import load_config, get_default_model
 from clawagents.providers.llm import create_provider
-from clawagents.tools.registry import ToolRegistry
 from clawagents.tools.filesystem import filesystem_tools
 from clawagents.tools.exec import exec_tools
 from clawagents.tools.skills import SkillStore, create_skill_tools
@@ -39,7 +37,7 @@ async def run_benchmark():
     llm = create_provider(active_model, config)
     streaming = config.streaming
 
-    print(f"\n🦞 ClawAgents Benchmark (Python Port)")
+    print("\n🦞 ClawAgents Benchmark (Python Port)")
     print(f"   Provider: {llm.name} | Model: {active_model} | Streaming: {streaming}")
     print(f"   Task: {TASK}\n")
 
@@ -57,9 +55,9 @@ async def run_benchmark():
     task_time = time.time() - start_task
 
     total_time = init_time + task_time
-    print(f"\n━━━ ClawAgents_Py Result ━━━")
+    print("\n━━━ ClawAgents_Py Result ━━━")
     print(result.result[:500])
-    print(f"━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    print("━━━━━━━━━━━━━━━━━━━━━━━━━━")
     print(f"\n⏱  Init: {init_time:.2f}s | Task: {task_time:.2f}s | Total: {total_time:.2f}s")
     print(f"   Iterations: {result.iterations} | Tool calls: {result.tool_calls}")
 

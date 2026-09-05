@@ -20,7 +20,7 @@ recommended for production multi-agent code (use
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Optional
 
 from clawagents.browser._safety import check_url
 from clawagents.browser.config import BrowserConfig

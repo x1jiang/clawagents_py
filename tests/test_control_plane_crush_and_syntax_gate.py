@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 
 
 def test_use_skill_output_never_crushed(tmp_path, monkeypatch):

@@ -8,8 +8,6 @@ symlinks, binary content, etc.
 Run: python -m pytest tests/test_corner_cases.py -v
 """
 
-import asyncio
-import json
 import os
 import pytest
 import tempfile
@@ -137,7 +135,7 @@ class TestBoundaryConditions:
     async def test_empty_file_read(self):
         from clawagents.tools.filesystem import ReadFileTool
         path = os.path.join(self.tmpdir, "empty.txt")
-        with open(path, "w") as f:
+        with open(path, "w"):
             pass  # empty file
 
         result = await ReadFileTool(_sb(self.tmpdir)).execute({"path": path})
@@ -485,7 +483,7 @@ class TestMemoryCornerCases:
             f.write(b"\x00\x01\x02\x03\xff\xfe")
 
         # Should not crash
-        result = load_memory_files([path])
+        load_memory_files([path])
         # May return content or None — just should not crash
 
     def test_very_large_memory_file(self):
@@ -596,7 +594,7 @@ class TestToolRegistryCornerCases:
 
         registry = ToolRegistry()
         registry.register(BadTool())
-        result = await registry.execute_tool("bad", {})
+        await registry.execute_tool("bad", {})
         # Should handle gracefully (may wrap in error or succeed)
 
     @pytest.mark.asyncio

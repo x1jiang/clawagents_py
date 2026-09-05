@@ -8,11 +8,10 @@ an empty response that the agent loop interprets as "done".
 Run: python -m pytest tests/test_malformed_fn_call.py -v
 """
 
-import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from clawagents.providers.llm import GeminiProvider, LLMResponse, NativeToolSchema
+from clawagents.providers.llm import GeminiProvider, NativeToolSchema
 
 
 # ─── Helpers: mock Gemini SDK objects ─────────────────────────────────────

@@ -21,10 +21,9 @@ Usage::
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
 import httpx

@@ -41,6 +41,24 @@ jobs:
           ANTHROPIC_API_KEY: ""
         run: pytest tests/ -v --maxfail=10
 
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ruff
+        run: python -m pip install --upgrade pip ruff
+
+      # Ruleset is pinned in [tool.ruff.lint] in pyproject.toml.
+      - name: ruff check
+        run: ruff check --output-format=github .
+
   build:
     name: build + twine check
     runs-on: ubuntu-latest

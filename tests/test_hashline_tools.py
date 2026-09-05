@@ -5,14 +5,10 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-import pytest
 
 from clawagents.config.features import temporary_overrides
 from clawagents.sandbox.local import LocalBackend
 from clawagents.tools.hashline import (
-    HashlineEditTool,
-    HashlineGrepTool,
-    HashlineReadTool,
     create_hashline_tools,
     encode_hash,
     line_hash,

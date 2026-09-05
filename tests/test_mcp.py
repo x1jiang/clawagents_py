@@ -219,7 +219,7 @@ async def test_create_claw_agent_raises_when_mcp_servers_passed_without_sdk(monk
         # Use a stub LLM provider via the ``model`` kwarg path with a real
         # provider would require API keys. Instead we go through `create_claw_agent`
         # but supply an LLMProvider directly.
-        from clawagents.providers.llm import LLMProvider, LLMMessage, LLMResponse
+        from clawagents.providers.llm import LLMProvider, LLMResponse
 
         class _StubLLM(LLMProvider):  # type: ignore[misc]
             def __init__(self) -> None:

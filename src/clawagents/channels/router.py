@@ -15,7 +15,6 @@ import asyncio
 from typing import Any, Awaitable, Callable, Optional
 
 from clawagents.channels.types import (
-    ChannelAdapter,
     ChannelMessage,
     channel_message_to_agent_input,
 )
