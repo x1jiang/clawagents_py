@@ -1,3 +1,11 @@
+## v6.20.72 — Lint cleanup, pinned ruff ruleset, repo hygiene (September 2026)
+
+- Removed ~260 unused imports and 14 dead locals across ``src/`` and ``tests/`` (most in ``context_observatory/``). No behaviour change; ``agent_loop`` keeps its compatibility re-exports.
+- ``context_observatory/app.py`` imports ``EventStore`` under ``TYPE_CHECKING`` so its annotations no longer reference an undefined name.
+- ``[tool.ruff.lint]`` now pins ``select = E4/E7/E9/F/B006/B007`` (``E402``/``E731``/``E741`` ignored) so results don't drift with ruff's defaults; CI gained a ``ruff`` job.
+- Deleted stale root artifacts (``benchmark-report.md``, ``benchmark_report.md``, ``python-project-report.md``, ``test-py.txt``, ``test_new_features.py``).
+- Closed the external Exa search PR: ``web_search`` stays Tavily-backed (``TAVILY_API_KEY``); no Exa dependency.
+
 ## v6.20.71 — Correct Claude context windows, Mantle profiles, Python 3.14 (September 2026)
 
 - Claude context windows follow Anthropic's context-windows page: Opus 4.6/4.7/4.8, Opus 5, Sonnet 4.6, Sonnet 5, Fable 5/5.1 → 1M; Sonnet 4.5, Haiku 4.5, Opus 4.5 → 200K. Opus 4.6+ was compacting at a 200K budget; Sonnet 4.5 was budgeted at 1M with no beta header.
