@@ -46,7 +46,7 @@ class TestSkillLoading:
         even when the directory doesn't exist."""
 
         from clawagents.agent import create_claw_agent
-        from clawagents.providers.llm import LLMProvider, LLMMessage, LLMResponse
+        from clawagents.providers.llm import LLMProvider, LLMResponse
 
         class FakeLLM(LLMProvider):
             name = "fake"

@@ -16,7 +16,6 @@ through the entire parallel branch.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 import pytest
@@ -110,7 +109,7 @@ async def test_native_indexing_with_before_tool_rejecting_middle_call():
             return HookResult(allowed=False, reason="blocked beta")
         return HookResult(allowed=True)
 
-    state = await run_agent_graph(
+    await run_agent_graph(
         "task",
         llm,
         tools=reg,
@@ -163,7 +162,7 @@ async def test_native_indexing_with_before_tool_modifying_args():
         # Modify args for both — this constructs a new ParsedToolCall internally
         return HookResult(allowed=True, updated_args={"x": f"sanitised:{args.get('x')}"})
 
-    state = await run_agent_graph(
+    await run_agent_graph(
         "task",
         llm,
         tools=reg,

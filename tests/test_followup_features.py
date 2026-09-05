@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
 
 
 def test_cross_session_history_search(tmp_path):
@@ -49,7 +48,7 @@ def test_search_history_tool(tmp_path, monkeypatch):
 
 def test_serialize_agent_state():
     from clawagents.graph.agent_loop import AgentState
-    from clawagents.output_format import OutputFormat, print_agent_output, serialize_agent_state
+    from clawagents.output_format import OutputFormat, serialize_agent_state
 
     state = AgentState(
         messages=[],

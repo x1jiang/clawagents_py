@@ -45,12 +45,11 @@ Example
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass, field
-from typing import Any, Generic, Iterable, TypeVar
+from dataclasses import dataclass
+from typing import Any, Iterable, TypeVar
 
 from clawagents.lifecycle import RunHooks
 from clawagents.run_context import RunContext
-from clawagents.usage import RequestUsage
 
 TContext = TypeVar("TContext")
 

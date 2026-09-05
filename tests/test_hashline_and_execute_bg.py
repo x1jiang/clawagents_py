@@ -14,7 +14,6 @@ from clawagents.tools.hashline import (
     ParsedAnchor,
     apply_edits,
     encode_hash,
-    format_hashline_content,
     line_hash,
     split_lines,
 )

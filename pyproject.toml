@@ -124,8 +124,15 @@ warn_unused_ignores = true
 # Per-module overrides go here when needed (e.g. relaxing for vendored code).
 
 [tool.ruff.lint]
-# Keep defaults (E4/E7/E9/F). The public API re-exports live in __init__.py
-# files by convention — don't flag them as unused imports.
+# Pin the ruleset explicitly so results don't drift with ruff's defaults.
+# Correctness-focused: pyflakes (F), syntax/runtime errors (E9), the
+# non-stylistic pycodestyle checks (E4/E7), and the two flake8-bugbear
+# mutable-default / unused-loop-var rules. Enforced in CI (`ruff check .`).
+select = ["E4", "E7", "E9", "F", "B006", "B007"]
+# E402: several modules (agent_loop facade, llm) import after setup code on
+# purpose. E731/E741: stylistic; not worth churning existing code for.
+ignore = ["E402", "E731", "E741"]
 
 [tool.ruff.lint.per-file-ignores]
+# The public API re-exports live in __init__.py files by convention.
 "**/__init__.py" = ["F401"]

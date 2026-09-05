@@ -11,7 +11,6 @@ from clawagents.tools.apply_patch import (
     _apply_search_replace,
     _parse_search_replace_hunks,
 )
-from clawagents.tools.skills import SkillStore
 
 
 def test_reuse_does_not_swap_empty_assistant_tool_meta():

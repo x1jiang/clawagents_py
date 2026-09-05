@@ -3,11 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import json
-from pathlib import Path
 
 from clawagents.goal import GoalPauseReason, GoalStatus, GoalTracker
-from clawagents.goal.tools import create_goal_tools
 from clawagents.agent import create_claw_agent
 
 
@@ -34,7 +31,7 @@ def test_act_does_not_bind_active_disk_goal(tmp_path, monkeypatch):
     assert gt.is_active()
 
     from clawagents.graph.agent_loop import run_agent_graph
-    from clawagents.providers.llm import LLMMessage, LLMResponse
+    from clawagents.providers.llm import LLMResponse
     from clawagents.run_context import RunContext
     from clawagents.tools.registry import ToolRegistry
 

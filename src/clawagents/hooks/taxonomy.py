@@ -12,11 +12,9 @@ import json
 import socket
 import ssl
 import subprocess
-import urllib.error
-import urllib.request
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Optional
+from typing import Any
 from urllib.parse import urlparse
 
 

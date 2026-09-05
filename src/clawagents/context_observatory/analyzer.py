@@ -28,9 +28,6 @@ _SECTION_PATTERNS: list[tuple[str, str]] = [
     ("agent_memory", "<agent_memory"),
 ]
 
-# Marker inserted between static prompt and dynamic content.
-_CACHE_BOUNDARY = "__CACHE_BOUNDARY__"
-
 
 def analyze_system_prompt(
     content: str | list[Any],
@@ -50,14 +47,6 @@ def analyze_system_prompt(
 
     text = content if isinstance(content, str) else str(content)
     total = count_tokens(text, model)
-
-    # Split at cache boundary if present
-    static_part = text
-    dynamic_part = ""
-    if _CACHE_BOUNDARY in text:
-        parts = text.split(_CACHE_BOUNDARY, 1)
-        static_part = parts[0]
-        dynamic_part = parts[1] if len(parts) > 1 else ""
 
     breakdown: dict[str, int] = {}
     remaining = text

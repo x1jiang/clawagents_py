@@ -1,15 +1,12 @@
 """Tests for Context Observatory session directory structure and package import/export."""
 
 import json
-import zipfile
-from pathlib import Path
 
 from clawagents.context_observatory.events import (
     LLMCallEvent,
     MessageSnapshot,
-    ToolCallSnapshot,
 )
-from clawagents.context_observatory.store import EventStore, get_history_dir
+from clawagents.context_observatory.store import EventStore
 from clawagents.paths import get_context_observatory_dir
 
 

@@ -12,7 +12,6 @@ from __future__ import annotations
 import fnmatch
 import os
 import re
-from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 # Description prefixes Grok extracts into when-to-use

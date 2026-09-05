@@ -18,10 +18,9 @@ from clawagents.tools.registry import (
     ToolRegistry, ToolResult, ParsedToolCall, truncate_tool_output,
 )
 from clawagents.graph.agent_loop import (
-    run_agent_graph as _run_agent_graph, AgentState, EventKind, OnEvent,
+    run_agent_graph as _run_agent_graph, EventKind, OnEvent,
     _estimate_tokens, _truncate_old_tool_args,
 )
-from functools import partial
 
 async def run_agent_graph(*args, use_native_tools=False, **kwargs):
     return await _run_agent_graph(*args, use_native_tools=use_native_tools, **kwargs)

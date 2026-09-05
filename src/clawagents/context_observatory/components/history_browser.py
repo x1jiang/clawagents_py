@@ -292,7 +292,6 @@ def _render_detail_panel(idx: int, entry: dict[str, Any]) -> None:
 
         dl_cols = st.columns(2)
         path = entry.get("path", "")
-        dir_path = entry.get("dir_path", "")
 
         # 1. Download Session ZIP Package
         with dl_cols[0]:

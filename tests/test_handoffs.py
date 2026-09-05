@@ -13,7 +13,7 @@ import pytest
 
 from clawagents.agent import ClawAgent
 from clawagents.graph.agent_loop import run_agent_graph
-from clawagents.handoffs import Handoff, HandoffInputData, handoff
+from clawagents.handoffs import HandoffInputData, handoff
 from clawagents.handoff_filters import remove_all_tools
 from clawagents.lifecycle import RunHooks
 from clawagents.providers.llm import (
@@ -25,7 +25,7 @@ from clawagents.providers.llm import (
 )
 from clawagents.run_context import RunContext
 from clawagents.stream_events import HandoffOccurredEvent, StreamEvent
-from clawagents.tools.registry import ToolRegistry, ToolResult
+from clawagents.tools.registry import ToolRegistry
 
 
 # ─── Mock LLM ────────────────────────────────────────────────────────────

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -36,7 +35,7 @@ def test_hunk_store_skips_secret_baseline(tmp_path, monkeypatch):
 
 
 def test_resolve_hook_url_pins_ip():
-    from clawagents.hooks.taxonomy import resolve_hook_url, is_blocked_ip
+    from clawagents.hooks.taxonomy import resolve_hook_url
 
     # Public IP literal should pin without DNS
     target, reason = resolve_hook_url("https://1.1.1.1/hook")
@@ -54,7 +53,6 @@ def test_webhook_uses_pinned_post():
     from clawagents.hooks.taxonomy import (
         HookHandler,
         HookEvent,
-        HookPinnedTarget,
         _run_webhook,
     )
 

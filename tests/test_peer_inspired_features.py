@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
 
 
 def test_skill_workshop_create_scan_apply_rollback(tmp_path):

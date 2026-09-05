@@ -1,8 +1,7 @@
 """Tests for the tokenizer module."""
 
 import math
-import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from clawagents.tokenizer import (
     count_tokens,

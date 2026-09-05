@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 
 
 def test_subagent_registry_inherits_permission_engine(tmp_path: Path, monkeypatch):

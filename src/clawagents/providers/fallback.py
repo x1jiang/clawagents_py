@@ -9,13 +9,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, Callable, Coroutine
+from typing import Any, Callable
 
 from clawagents.providers.llm import (
     LLMMessage,
     LLMProvider,
     LLMResponse,
-    NativeToolCall,
     NativeToolSchema,
     OnChunkCallback,
 )

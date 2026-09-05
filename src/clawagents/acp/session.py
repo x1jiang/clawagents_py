@@ -30,7 +30,6 @@ from clawagents.acp.messages import (
     AgentThoughtChunk,
     PermissionDecision,
     PermissionRequest,
-    SessionUpdate,
     StopReason,
     ToolCallComplete,
     ToolCallStart,

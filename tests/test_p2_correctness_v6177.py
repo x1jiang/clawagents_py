@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import tempfile
-from pathlib import Path
 
 import pytest
 
@@ -126,7 +123,6 @@ def test_enqueue_interject_exported():
 def test_dream_lock_released_on_cancel(tmp_path):
     from clawagents.memory.dream import run_dream, _lock_path
     from clawagents.config.features import reset, set_overrides
-    import os
 
     reset()
     set_overrides({"memory_dream": True})

@@ -13,7 +13,6 @@ import re
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 PWD_MARKER = "__CLAW_PWD__"
 ENV_MARKER = "__CLAW_ENV__"

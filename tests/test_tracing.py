@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import time
 from pathlib import Path
 
 import pytest
@@ -11,10 +10,8 @@ import pytest
 from clawagents.tracing import (
     Span, SpanKind, SpanStatus, TracingExporter,
     BatchTraceProcessor, JsonlSpanExporter, ConsoleSpanExporter,
-    set_default_processor, get_default_processor, add_trace_processor,
-    flush_traces, shutdown_tracing,
-    agent_span, turn_span, generation_span, tool_span, handoff_span,
-    custom_span, current_span, current_trace_id,
+    set_default_processor, add_trace_processor,
+    flush_traces, agent_span, turn_span, generation_span, tool_span, custom_span, current_span, current_trace_id,
 )
 
 

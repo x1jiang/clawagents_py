@@ -14,7 +14,6 @@ Exercises actual tool execution on real filesystem with temp directories:
 Run: python -m pytest tests/test_tools_comprehensive.py -v
 """
 
-import asyncio
 import os
 import pytest
 import tempfile

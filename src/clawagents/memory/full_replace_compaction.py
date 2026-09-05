@@ -18,9 +18,8 @@ Algorithm (mirrors ``xai-grok-compaction`` code_compaction):
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass, field
-from typing import Any, Optional, Sequence
+from typing import Sequence
 
 from clawagents.providers.llm import LLMMessage, LLMProvider
 

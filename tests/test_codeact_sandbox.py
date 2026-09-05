@@ -7,7 +7,6 @@ gate and by the curated ``__builtins__`` — otherwise ``open(...)`` and
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from clawagents.graph.codeact import run_code_action

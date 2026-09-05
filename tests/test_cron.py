@@ -16,7 +16,6 @@ Mirrors ``clawagents/src/cron/cron.test.ts``.
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path

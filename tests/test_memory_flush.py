@@ -4,14 +4,11 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from unittest.mock import MagicMock
 
-import pytest
 
 from clawagents.config.features import temporary_overrides
 from clawagents.memory.memory_flush import (
     FlushConfig,
-    _format_window,
     process_flush_response,
     run_memory_flush,
     select_flush_window,

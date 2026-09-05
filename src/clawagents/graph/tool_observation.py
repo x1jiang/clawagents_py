@@ -14,7 +14,7 @@ import logging
 import re
 import time
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 from clawagents.providers.llm import LLMMessage
 from clawagents.run_context import RunContext

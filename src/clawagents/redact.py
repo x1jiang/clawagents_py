@@ -42,7 +42,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from typing import Any, Iterable, Mapping
+from typing import Any, Mapping
 
 logger = logging.getLogger(__name__)
 

@@ -34,10 +34,12 @@ import logging
 import queue
 import threading
 import time
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import streamlit as st
+
+if TYPE_CHECKING:
+    from clawagents.context_observatory.store import EventStore
 
 logger = logging.getLogger(__name__)
 
@@ -213,7 +215,6 @@ def main() -> None:
 
     # Lazy imports to avoid loading heavy dependencies at module level
     from clawagents.context_observatory.components.chat_panel import (
-        apply_sse_event,
         clear_chat_items,
         render_chat_panel,
     )
@@ -229,8 +230,6 @@ def main() -> None:
     )
     from clawagents.context_observatory.components.sidebar import render_sidebar
     from clawagents.context_observatory.components.token_chart import render_token_charts
-    from clawagents.context_observatory.sse_client import SseClient
-    from clawagents.context_observatory.sse_hooks_bridge import SseEventBridge
     from clawagents.context_observatory.store import EventStore
 
     # ── Initialize session state ──

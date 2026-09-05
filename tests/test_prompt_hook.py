@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from typing import Any
 
 import pytest
 
-from clawagents.hooks.prompt_hook import PromptHook, PromptHookVerdict, _parse_verdict
+from clawagents.hooks.prompt_hook import PromptHook, _parse_verdict
 
 
 def test_promptbook_validates_empty_prompt():
@@ -128,7 +127,6 @@ async def test_evaluate_fails_open_on_llm_error():
 @pytest.mark.asyncio
 async def test_default_resolver_import_path_is_not_broken():
     """Fallback path must import ``agent._resolve_model`` (not a missing llm symbol)."""
-    from clawagents.hooks import prompt_hook as ph
 
     hook = PromptHook(prompt="block writes outside the repo", model="gpt-4o-mini")
     # Resolve only — stub create_provider so we don't need live keys.

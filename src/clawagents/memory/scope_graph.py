@@ -10,7 +10,6 @@ from clawagents.memory.repo_map import (
     RepoTag,
     _iter_code_files,
     _rel,
-    collect_tags,
     rank_tags,
     render_repo_map,
 )

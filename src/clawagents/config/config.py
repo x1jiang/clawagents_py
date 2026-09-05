@@ -193,11 +193,11 @@ def load_config() -> EngineConfig:
 
 # Re-export canonical classifiers (single source of truth).
 from clawagents.providers.model_classify import (  # noqa: E402
-    BEDROCK_GEO_PREFIXES,
-    is_anthropic_model,
-    is_bedrock_model_id,
-    is_gemini_model,
-    strip_bedrock_prefix,
+    BEDROCK_GEO_PREFIXES as BEDROCK_GEO_PREFIXES,
+    is_anthropic_model as is_anthropic_model,
+    is_bedrock_model_id as is_bedrock_model_id,
+    is_gemini_model as is_gemini_model,
+    strip_bedrock_prefix as strip_bedrock_prefix,
 )
 
 

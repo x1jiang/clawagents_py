@@ -6,7 +6,7 @@ majority verifier → fail-open strategist.
 
 from __future__ import annotations
 
-from typing import Any, Awaitable, Callable, Optional
+from typing import Awaitable, Callable
 
 from clawagents.config.features import is_enabled
 from clawagents.goal import (

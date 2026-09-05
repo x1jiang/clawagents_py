@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 
-import pytest
 
 
 def test_smart_memory_dedup_and_access_boost(tmp_path: Path, monkeypatch):
@@ -223,7 +221,6 @@ def test_hunk_attribution_agent_and_external(tmp_path: Path, monkeypatch):
         list_hunks,
         refresh_file_hunks,
     )
-    from clawagents.memory.hunk_watcher import HunkWatcher
 
     f = tmp_path / "a.txt"
     f.write_text("base\n", encoding="utf-8")

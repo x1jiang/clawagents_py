@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import asyncio
 
-import pytest
 
 from clawagents.run_context import RunContext
 from clawagents.steer import (
-    NextTurnQueue,
     SteerHook,
     SteerMessage,
     SteerQueue,

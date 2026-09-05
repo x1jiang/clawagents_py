@@ -18,7 +18,6 @@ VSCode webview's ``App.tsx``.
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import streamlit as st
@@ -188,7 +187,6 @@ def apply_sse_event(event: dict[str, Any]) -> None:
 
     elif event_type == "compact_progress":
         phase = event.get("phase", "")
-        msg = event.get("message", "")
         if phase and phase not in ("end", "failed", "dropped"):
             # Show compaction in progress
             if items and items[-1].get("kind") == "status":
@@ -301,15 +299,12 @@ def _render_tool(idx: int, item: dict[str, Any]) -> None:
     if status == "running":
         icon = "⏳"
         status_text = "Running…"
-        color = "#fd7e14"
     elif success:
         icon = "✅"
         status_text = "Done"
-        color = "#198754"
     else:
         icon = "❌"
         status_text = "Failed"
-        color = "#dc3545"
 
     # Tool header
     header_parts = [f"{icon} **{name}**"]

@@ -21,16 +21,19 @@ Efficiency features (learned from deepagents/openclaw):
 
 from __future__ import annotations
 
+# This module is a compatibility facade: many helpers were extracted into
+# sibling ``graph/*`` modules but are still imported from here by tests and
+# downstream integrations, so unused-import checks are disabled file-wide.
+# ruff: noqa: F401
+
 import asyncio
 import json
 import logging
-import os
-import re
 import signal
 import sys
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
+from typing import Any, Callable, Literal, Optional
 
 from clawagents.providers.llm import LLMProvider, LLMMessage, LLMResponse, NativeToolSchema
 from clawagents.tools.registry import ToolRegistry, ParsedToolCall, ToolResult

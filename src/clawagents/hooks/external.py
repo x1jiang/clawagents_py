@@ -29,7 +29,7 @@ import asyncio
 import json
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -140,7 +140,6 @@ def build_taxonomy_dispatcher(
 
     from clawagents.hooks.taxonomy import (
         HookDispatcher,
-        HookEvent,
         HookHandler,
         load_handlers_from_config,
         normalize_event,

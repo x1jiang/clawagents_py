@@ -30,7 +30,6 @@ from typing import Any, Callable
 
 from clawagents.context_observatory.analyzer import (
     analyze_system_prompt,
-    compute_role_tokens,
 )
 from clawagents.context_observatory.events import (
     BudgetSnapshot,
