@@ -15,6 +15,7 @@ from clawagents.tools.registry import ToolResult
 _CONTROL_PLANE: frozenset[str] = frozenset(
     {
         "think",
+        "finish_coordination",
         "ask_user",
         "ask_user_question",
         "list_skills",
@@ -169,7 +170,7 @@ def apply_mode_active_profile(
         for tool in registry.list_registered()
         if bool(getattr(tool, "context_protection", False))
     )
-    for name in ("tool_discover", "tool_describe", "tool_profile"):
+    for name in ("tool_discover", "tool_describe", "tool_profile", "finish_coordination"):
         if name in registered:
             active.add(name)
     registry.set_active_tools(active)
@@ -241,3 +242,19 @@ class ActivateToolGroupTool:
             ),
             added_tool_names=list(added),
         )
+
+
+def apply_coordination_active_profile(registry: Any, *, chat_mode: str | None = None) -> list[str]:
+    """Small coordinator surface; mode permissions still take precedence."""
+    names = {"ls", "read_file", "grep", "write_file", "edit_file", "execute",
+             "task", "write_todos", "retrieve_tool_result", "activate_tool_group", "finish_coordination"}
+    if (chat_mode or "").lower() in {"read_only", "plan", "ask"}:
+        names &= READ_ONLY_TOOL_NAMES
+    if registry.get("activate_tool_group") is None:
+        registry.register(ActivateToolGroupTool(registry))
+    registered = registry.list_registered()
+    names.update(t.name for t in registered if getattr(t, "context_protection", False))
+    names.update({"tool_discover", "tool_describe", "tool_profile"})
+    active = names & {t.name for t in registered}
+    registry.set_active_tools(active)
+    return sorted(active)

@@ -35,6 +35,10 @@ class ResolvedProviderProfile:
 
 
 BUILTIN_PROVIDER_PROFILES: dict[str, ProviderProfile] = {
+    "gemma-agentic": ProviderProfile(
+        "gemma-agentic", "openai", "gemma4-agentic-v2",
+        "http://127.0.0.1:18080/v1", "not-needed",
+    ),
     "meta": ProviderProfile(
         "meta", "openai", "Muse-Glimmer-30B",
         "http://129.106.31.72:7790/v1", "not-needed",
@@ -73,6 +77,13 @@ def load_provider_profiles(paths: list[Path] | None = None) -> dict[str, Provide
     profiles = dict(BUILTIN_PROVIDER_PROFILES)
     # Read at resolution time so CLI dotenv loading and long-lived hosts work.
     # Never borrow OPENAI_API_KEY for a self-hosted deployment.
+    gemma = profiles["gemma-agentic"]
+    profiles["gemma-agentic"] = ProviderProfile(
+        "gemma-agentic", "openai",
+        os.getenv("GEMMA_AGENTIC_MODEL") or gemma.model,
+        os.getenv("GEMMA_AGENTIC_BASE_URL") or gemma.base_url,
+        os.getenv("GEMMA_AGENTIC_API_KEY") or gemma.api_key,
+    )
     meta = profiles["meta"]
     profiles["meta"] = ProviderProfile(
         "meta", "openai",

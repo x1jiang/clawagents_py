@@ -178,6 +178,10 @@ MODEL_PROFILES: dict[str, dict[str, int | float]] = {
     # prefixes (``gemma3``/``gemma``) so "gemma4:e4b" doesn't collapse to
     # the 8K Gemma-1 default.
     # ── Google — Gemma 4 (released 2026-04-02; Apache-2.0) ─────────────
+    # Conservative per-slot serving cap for the Q4 coordinator deployment.
+    "gemma4-agentic-v2": {"max_input_tokens": 16_384, "budget_ratio": 0.70},
+    "gemma4-v2-": {"max_input_tokens": 16_384, "budget_ratio": 0.70},
+    "gemma-4-12b-agentic-fable5-composer2.5-v2": {"max_input_tokens": 16_384, "budget_ratio": 0.70},
     "gemma4:e2b": {"max_input_tokens": 128_000, "budget_ratio": 0.80},
     "gemma4:e4b": {"max_input_tokens": 128_000, "budget_ratio": 0.80},
     "gemma4:26b": {"max_input_tokens": 256_000, "budget_ratio": 0.85},

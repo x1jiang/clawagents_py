@@ -1530,6 +1530,8 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
         affinity = _openai_affinity(self._base_url, session_id)
         if affinity.get("prompt_cache_key"):
             kwargs["prompt_cache_key"] = affinity["prompt_cache_key"]
+        from clawagents.providers.gemma import apply_chat_options
+        apply_chat_options(kwargs, self.model, profile_model=getattr(self, "_gemma_agentic_model", ""))
         create_kwargs: dict[str, Any] = dict(kwargs)
         if affinity.get("extra_headers"):
             create_kwargs["extra_headers"] = affinity["extra_headers"]
@@ -1955,6 +1957,8 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
                 )
                 if affinity.get("prompt_cache_key"):
                     kwargs["prompt_cache_key"] = affinity["prompt_cache_key"]
+                from clawagents.providers.gemma import apply_chat_options
+                apply_chat_options(kwargs, self.model, profile_model=getattr(self, "_gemma_agentic_model", ""))
                 create_kwargs = dict(kwargs)
                 if affinity.get("extra_headers"):
                     create_kwargs["extra_headers"] = affinity["extra_headers"]

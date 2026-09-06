@@ -15,6 +15,7 @@ Hermes-derived guardrails:
 """
 
 import asyncio
+import math
 import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -140,6 +141,13 @@ class SubAgentSpec:
     tool_allowlist: Optional[List[str]] = None
     tool_denylist: Optional[List[str]] = None
 
+    timeout_seconds: Optional[float] = None
+    """Optional wall-clock deadline for this worker, including model requests."""
+
+    llm: Optional[LLMProvider] = None
+    """Explicit worker provider, including its endpoint and credentials."""
+
+
 
 def _registry_for_workspace(
     tools: ToolRegistry,
@@ -166,7 +174,7 @@ def _registry_for_workspace(
     deny = deny_tools or frozenset()
     for tool in tools.list():
         name = getattr(tool, "name", "") or ""
-        if name in deny or name == "task":
+        if name in deny or name in {"task", "finish_coordination"}:
             continue
         if allow_tools is not None and name not in allow_tools and name not in ("think",):
             continue
@@ -199,7 +207,12 @@ class TaskTool:
         self._workspace = workspace or os.getcwd()
 
         agent_names = [s.name for s in self._subagents]
-        agent_list = f" Available specialized agents: {', '.join(agent_names)}." if agent_names else ""
+        if len(set(agent_names)) != len(agent_names) or any(not n.strip() for n in agent_names):
+            raise ValueError("Worker names must be nonempty and unique")
+        for spec in self._subagents:
+            if spec.timeout_seconds is not None and (not math.isfinite(spec.timeout_seconds) or spec.timeout_seconds <= 0):
+                raise ValueError("Worker timeout_seconds must be positive and finite")
+        agent_list = " Configured workers: " + "; ".join(f"{s.name}: {s.description}" for s in self._subagents) if agent_names else ""
         self.description = (
             "Delegate a task to a sub-agent with its own isolated context window. "
             "Use for complex sub-tasks that would clutter your main context. "
@@ -215,6 +228,8 @@ class TaskTool:
             },
             "agent": {
                 "type": "string",
+                "required": bool(agent_names),
+                **({"enum": agent_names} if agent_names else {}),
                 "description": f"Optional: name of a specialized sub-agent to use.{' Options: ' + ', '.join(agent_names) if agent_names else ''}",
             },
             "max_iterations": {
@@ -249,6 +264,10 @@ class TaskTool:
         description = str(args.get("description", ""))
         agent_name = args.get("agent")
 
+        if self._subagents and agent_name not in {spec.name for spec in self._subagents}:
+            return ToolResult(success=False, output="", error=(
+                "Choose a configured worker: " + ", ".join(spec.name for spec in self._subagents)
+            ))
         if not description:
             return ToolResult(success=False, output="", error="No task description provided")
 
@@ -281,9 +300,19 @@ class TaskTool:
             personas=self._personas,
         )
         effective_max_iter = resolved.max_iterations
+        if resolved.spec is not None and resolved.spec.llm is not None:
+            effective_max_iter = min(effective_max_iter, max(1, resolved.spec.max_iterations))
         effective_prompt = resolved.system_prompt
         effective_native_tools = resolved.use_native_tools
         use_cred_proxy = bool(resolved.credential_proxy and is_enabled("credential_proxy"))
+
+        worker_llm = resolved.spec.llm if resolved.spec is not None else None
+        if worker_llm is not None and resolved.model and resolved.model != getattr(worker_llm, "model", None):
+            return ToolResult(success=False, output="", error="Model override conflicts with the configured worker provider")
+        child_llm = worker_llm if worker_llm is not None else (
+            _pin_llm_model(self._llm, resolved.model)
+            if resolved.model else self._llm
+        )
 
         child_tools = self._tools
         child_workspace = self._workspace
@@ -314,6 +343,18 @@ class TaskTool:
                 deny_tools=resolved.denied_tools(),
                 allow_tools=resolved.tool_allowlist,
             )
+
+        # A child must not terminate its parent's application job. Keep the
+        # existing sandbox-bound tools and permissions, without rebinding paths.
+        if child_tools is not None and child_tools.get("finish_coordination") is not None:
+            filtered = ToolRegistry()
+            for attr in ("_permission_engine", "_permission_ask_handler"):
+                if hasattr(child_tools, attr):
+                    setattr(filtered, attr, getattr(child_tools, attr))
+            for tool in child_tools.list():
+                if tool.name != "finish_coordination":
+                    filtered.register(tool)
+            child_tools = filtered
 
         async def do_run() -> ToolResult:
             from clawagents.sandbox.credential_proxy import CredentialProxy
@@ -346,11 +387,6 @@ class TaskTool:
                         "ANTHROPIC_API_KEY": "proxy",
                     }
 
-            child_llm = (
-                _pin_llm_model(self._llm, resolved.model)
-                if resolved.model
-                else self._llm
-            )
 
             # Build kwargs, stripping any parent-context keys to keep the
             # child agent isolated (M1: subagent state isolation).
@@ -480,6 +516,12 @@ class TaskTool:
                 description,
             )
 
+            async def run_child():
+                limit = resolved.spec.timeout_seconds if resolved.spec else None
+                if limit is None:
+                    return await run_agent_graph(**run_kwargs)
+                return await asyncio.wait_for(run_agent_graph(**run_kwargs), timeout=limit)
+
             state = None
             try:
                 if proxy_env_overrides:
@@ -491,7 +533,7 @@ class TaskTool:
                             _old_env[k] = os.environ.get(k)
                             os.environ[k] = v
                         try:
-                            state = await run_agent_graph(**run_kwargs)
+                            state = await run_child()
                         finally:
                             for k, orig in _old_env.items():
                                 if orig is None:
@@ -502,7 +544,7 @@ class TaskTool:
                                 proxy.stop()
                 else:
                     # No proxy → no env mutation → no race → no lock needed.
-                    state = await run_agent_graph(**run_kwargs)
+                    state = await run_child()
                     if proxy is not None:
                         # Defensive: shouldn't happen (we only build proxy when
                         # there are overrides), but keep the cleanup symmetric.
@@ -552,6 +594,11 @@ class TaskTool:
                     error=f"Sub-agent failed: {state.result}",
                 )
 
+            if state.status != "done" or (state.result or "").strip() == "[cancelled]" or (state.result or "").startswith(("Reached maximum of ", "Tool loop detected", "Ping-pong loop detected", "Circuit breaker:", "[iteration budget exhausted]", "[interrupted]")):
+                return ToolResult(
+                    success=False, output=state.result or "",
+                    error="Sub-agent incomplete: cancelled, unfinished, or iteration budget exhausted",
+                )
             agent_label = f"Sub-agent [{resolved.type}]"
             iso_note = f", isolation={resolved.isolation}" if resolved.isolation != "none" else ""
             return ToolResult(
@@ -566,6 +613,8 @@ class TaskTool:
             if self._use_queue:
                 return await enqueue_command_in_lane(CommandLane.Subagent.value, do_run)
             return await do_run()
+        except TimeoutError:
+            return ToolResult(success=False, output="", error="Sub-agent incomplete: worker deadline exceeded")
         except Exception as e:
             return ToolResult(success=False, output="", error=f"Sub-agent error: {str(e)}")
 
