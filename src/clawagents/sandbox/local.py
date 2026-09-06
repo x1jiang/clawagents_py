@@ -111,8 +111,10 @@ class LocalBackend:
         # static set would otherwise leak into LLM-generated shell commands.
         from clawagents.redact import is_secret_name
 
-        return {k: v for k, v in os.environ.items()
-                if k not in self._SENSITIVE_ENV_KEYS and not is_secret_name(k)}
+        from clawagents.utils.python_runtime import pin_python_env
+
+        return pin_python_env({k: v for k, v in os.environ.items()
+                              if k not in self._SENSITIVE_ENV_KEYS and not is_secret_name(k)})
 
     # ── Command execution ───────────────────────────────────────────
 
