@@ -1,0 +1,343 @@
+#!/usr/bin/env python3
+"""Frozen multi-file/property-tested Glimmer vs Luna benchmark (stdlib graders).
+
+Run: .venv/bin/python scripts/benchmark_meta_challenge.py --output results.json
+Configure LUNA_API_KEY (or OPENAI_API_KEY); optionally LUNA_BASE_URL.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+from dataclasses import asdict
+import difflib
+import hashlib
+import json
+import os
+from pathlib import Path
+import random
+import shlex
+import shutil
+import statistics
+import subprocess
+import sys
+import tempfile
+import time
+
+from clawagents import create_claw_agent
+from clawagents.config.config import load_config
+from meta_challenge_cases import CASES, Case
+from clawagents.sandbox.local import LocalBackend
+from clawagents.sandbox.profiles import OSSandboxProfile, ProfileBackend
+
+
+class ChallengeSandbox(ProfileBackend):
+    """Fail-closed macOS child-shell boundary for private benchmark sources."""
+
+    def __init__(self, root: Path):
+        binary = shutil.which("sandbox-exec")
+        if not binary:
+            raise RuntimeError(
+                "This benchmark requires macOS sandbox-exec for grader isolation"
+            )
+        self.binary = binary
+        super().__init__(
+            LocalBackend(root=str(root)),
+            OSSandboxProfile(
+                name="benchmark",
+                allow_paths=(".",),
+                network=False,
+            ),
+        )
+
+    def wrap_command(self, command: str, *, cwd: str | None = None) -> str:
+        def quoted(path):
+            return str(path).replace("\\", "\\\\").replace('"', '\\"')
+
+        source_root = Path(__file__).resolve().parent.parent
+        profile = "\n".join(
+            [
+                "(version 1)",
+                "(allow default)",
+                "(deny network*)",
+                "(deny file-write*)",
+                f'(allow file-write* (subpath "{quoted(Path(self.cwd).resolve())}"))',
+                '(allow file-write-data (literal "/dev/null"))',
+                f'(deny file-read* (subpath "{quoted(source_root)}"))',
+                '(deny file-read* (regex #".*(meta_challenge_cases|benchmark_meta_challenge|test_meta_challenge|meta-challenge|claw-challenge-luna-key).*"))',
+            ]
+        )
+        return f"{shlex.quote(self.binary)} -p {shlex.quote(profile)} /bin/sh -c {shlex.quote(command)}"
+
+
+def grader_leaked(messages) -> bool:
+    return any(
+        marker in str(message.content)
+        for message in messages
+        if message.role == "tool"
+        for marker in (
+            "LEDGER_ORACLE =",
+            "DAG_ORACLE =",
+            "CACHE_ORACLE =",
+            "MIGRATION_ORACLE =",
+            "BENCHMARK_PRIVATE_ORACLE",
+        )
+    )
+
+
+def prepare(case: Case, root: Path, *, reference=False):
+    for name, contents in {
+        **case.files,
+        **(case.reference if reference else {}),
+    }.items():
+        dest = root / name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(contents)
+
+
+def grade(case: Case, root: Path) -> dict:
+    """Oracle lives in parent memory, never in the agent workspace."""
+    source = "import sys, os; sys.path.insert(0, os.getcwd())\n" + case.oracle
+    try:
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", source],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            env={"PATH": os.environ.get("PATH", ""), "PYTHONHASHSEED": "0"},
+        )
+        details = (
+            json.loads(result.stdout.splitlines()[-1]) if result.returncode == 0 else {}
+        )
+        return {
+            "passed": result.returncode == 0 and details.get("passed") is True,
+            "checks": details.get("checks", 0),
+            "exit_code": result.returncode,
+            "diagnostic": result.stderr[-1800:] if result.returncode else "",
+        }
+    except (subprocess.TimeoutExpired, ValueError, IndexError) as exc:
+        return {"passed": False, "checks": 0, "error_type": type(exc).__name__}
+
+
+def clean_completion(status: str, message: str) -> bool:
+    return status == "done" and not message.startswith("Reached maximum of ")
+
+
+def patch_for(case: Case, root: Path) -> str:
+    chunks = []
+    for name in sorted(case.files):
+        target = root / name
+        after = target.read_text() if target.is_file() else ""
+        chunks.extend(
+            difflib.unified_diff(
+                case.files[name].splitlines(True),
+                after.splitlines(True),
+                fromfile="a/" + name,
+                tofile="b/" + name,
+            )
+        )
+    # Include model-created Python files but never runtime/history state.
+    for target in sorted(root.rglob("*.py")):
+        name = target.relative_to(root).as_posix()
+        if name not in case.files and not any(
+            part.startswith(".") for part in target.relative_to(root).parts
+        ):
+            chunks.extend(
+                difflib.unified_diff(
+                    [],
+                    target.read_text().splitlines(True),
+                    fromfile="/dev/null",
+                    tofile="b/" + name,
+                )
+            )
+    return "".join(chunks)[:100_000]
+
+
+async def run_one(arm, task, repeat, args):
+    case = CASES[task]
+    row = dict(arm=arm, task=task, repeat=repeat, passed=False)
+    with tempfile.TemporaryDirectory(prefix="claw-challenge-") as temp:
+        root = Path(temp)
+        prepare(case, root)
+        kwargs = dict(
+            sandbox=ChallengeSandbox(root),
+            workspace=root,
+            skills=[],
+            memory=[],
+            streaming=True,
+            context_window=196608,
+            max_tokens=6144,
+            max_iterations=32,
+            trajectory=False,
+            rethink=False,
+            learn=False,
+            mode="ci",
+            tool_discovery=False,
+            temperature=0,
+            features={
+                k: False
+                for k in [
+                    "background_memory",
+                    "core_memory",
+                    "memory_bank",
+                    "memory_dream",
+                    "smart_memory",
+                    "context_ledger",
+                    "fact_store",
+                    "repo_map_inject",
+                ]
+            },
+        )
+        if arm == "glimmer":
+            kwargs["profile"] = "meta"
+        else:
+            kwargs.update(
+                model="gpt-5.6-luna",
+                api_key=args.luna_key,
+                base_url=args.luna_base,
+                reasoning_effort="medium",
+            )
+        started = time.perf_counter()
+        agent = None
+        original_cwd = Path.cwd()
+        try:
+            os.chdir(root)
+            agent = create_claw_agent(**kwargs)
+            row["active_tools"] = sorted(t.name for t in agent.tools.list())
+            row["model"] = agent.llm.model
+            result = await asyncio.wait_for(
+                agent.invoke(case.prompt, max_iterations=32), timeout=args.timeout
+            )
+            row.update(
+                status=result.status,
+                result=result.result,
+                tool_calls=result.tool_calls,
+                iterations=result.iterations,
+                usage=asdict(result.usage),
+                clean_completion=clean_completion(result.status, result.result),
+            )
+            row["integrity_passed"] = not grader_leaked(result.messages)
+            row["tool_diagnostics"] = [
+                str(m.content)[-600:]
+                for m in result.messages
+                if m.role == "tool"
+                and ("Error:" in str(m.content) or "exited with code" in str(m.content))
+            ][-8:]
+        except Exception as exc:
+            row.update(
+                status="error", error_type=type(exc).__name__, clean_completion=False
+            )
+        finally:
+            row["agent_seconds"] = round(time.perf_counter() - started, 4)
+            if agent is not None:
+                await agent.llm.client.close()
+            os.chdir(original_cwd)
+        grading_started = time.perf_counter()
+        row["grading"] = grade(case, root)
+        row["grading_seconds"] = round(time.perf_counter() - grading_started, 4)
+        row["passed"] = (
+            row.get("integrity_passed", False)
+            and row.get("clean_completion", False)
+            and row["grading"]["passed"]
+            and row.get("tool_calls", 0) > 0
+        )
+        row["patch"] = patch_for(case, root)
+    return row
+
+
+def summarize(rows):
+    summary = {}
+    for arm in sorted({r["arm"] for r in rows}):
+        group = [r for r in rows if r["arm"] == arm]
+        summary[arm] = dict(
+            runs=len(group),
+            passed=sum(r["passed"] for r in group),
+            artifact_passes=sum(r["grading"]["passed"] for r in group),
+            total_seconds=round(sum(r["agent_seconds"] for r in group), 3),
+            median_seconds=round(
+                statistics.median(r["agent_seconds"] for r in group), 3
+            ),
+            prompt_tokens=sum(
+                r.get("usage", {}).get("prompt_tokens", 0) for r in group
+            ),
+            output_tokens=sum(
+                r.get("usage", {}).get("output_tokens", 0) for r in group
+            ),
+            tool_calls=sum(r.get("tool_calls", 0) for r in group),
+        )
+    return summary
+
+
+async def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--timeout", type=float, default=240)
+    parser.add_argument("--tasks", nargs="+", choices=list(CASES), default=list(CASES))
+    parser.add_argument(
+        "--arms", nargs="+", choices=["glimmer", "luna"], default=["glimmer", "luna"]
+    )
+    args = parser.parse_args()
+    if args.repeats < 1:
+        parser.error("repeats must be positive")
+    cfg = load_config()
+    args.luna_key = os.getenv("LUNA_API_KEY") or cfg.openai_api_key
+    args.luna_base = (
+        os.getenv("LUNA_BASE_URL") or cfg.openai_base_url or "https://api.openai.com/v1"
+    )
+    if "luna" in args.arms and not args.luna_key:
+        parser.error("LUNA_API_KEY or OPENAI_API_KEY required")
+    os.environ.pop("LUNA_API_KEY", None)
+    os.environ.pop("ADVISOR_MODEL", None)
+    os.environ["CLAWAGENTS_DOTENV_OVERRIDE"] = "0"
+    rows = []
+    data = dict(
+        started_at_utc=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        suite_sha256=hashlib.sha256(
+            Path(__file__).with_name("meta_challenge_cases.py").read_bytes()
+        ).hexdigest(),
+        runner_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        isolation="macOS sandbox-exec; shell cwd equals task workspace; source and grader reads denied; no child network",
+        repeats=args.repeats,
+        tasks=args.tasks,
+        arms=args.arms,
+        seed=917,
+        max_iterations=32,
+        max_output_tokens=6144,
+        timeout_seconds=args.timeout,
+        rows=rows,
+    )
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    rng = random.Random(917)
+    for repeat in range(args.repeats):
+        tasks = list(args.tasks)
+        rng.shuffle(tasks)
+        for task in tasks:
+            arms = list(args.arms)
+            rng.shuffle(arms)
+            for arm in arms:
+                row = await run_one(arm, task, repeat, args)
+                rows.append(row)
+                data["summary"] = summarize(rows)
+                args.output.write_text(json.dumps(data, indent=2) + "\n")
+                print(
+                    json.dumps(
+                        {
+                            k: row[k]
+                            for k in [
+                                "arm",
+                                "task",
+                                "repeat",
+                                "passed",
+                                "agent_seconds",
+                            ]
+                        }
+                    ),
+                    flush=True,
+                )
+    print(json.dumps(data["summary"], indent=2))
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

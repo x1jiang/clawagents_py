@@ -863,6 +863,11 @@ def create_claw_agent(
         context_window = _lc().context_window  # default: 1_000_000
 
     # ── Resolve optional provider profile before model construction ─────
+    if profile is None:
+        meta_default = model is None and os.getenv("PROVIDER", "").strip().lower() == "meta"
+        meta_model = isinstance(model, str) and model.strip().lower() == "muse-glimmer-30b"
+        if meta_default or meta_model:
+            profile = "meta"
     provider_hint: Optional[str] = None
     if profile:
         from clawagents.provider_profiles import resolve_provider_profile
@@ -878,6 +883,10 @@ def create_claw_agent(
         api_key = resolved_profile.api_key
         base_url = resolved_profile.base_url
         api_version = resolved_profile.api_version
+        if profile == "meta":
+            api_key = api_key or "not-needed"
+            if wire_api is None:
+                wire_api = "chat_completions"
         # Declared profile provider drives routing/key fields (not re-inferred
         # solely from the model string — aliases like internal-claude-* need this).
         provider_hint = (resolved_profile.provider or "").strip() or None
@@ -1428,7 +1437,7 @@ def create_claw_agent(
             if registry.get(discovery_tool.name) is None:
                 registry.register(discovery_tool)
 
-    # GPT-5.6 / Luna: shrink the advertised tool surface; optional groups stay
+    # Model efficiency profiles: shrink the tool surface; optional groups stay
     # registered and unlock via activate_tool_group (see tool_groups.py).
     try:
         from clawagents.harness_profiles import resolve_harness_profile
@@ -1443,7 +1452,7 @@ def create_claw_agent(
             else getattr(llm, "model", None) or getattr(model, "model", None)
         )
         _hp = resolve_harness_profile(str(_mid) if _mid else None)
-        if _hp is not None and _hp.name == "openai-gpt56":
+        if _hp is not None and _hp.name in {"openai-gpt56", "meta-glimmer"}:
             if registry.get("activate_tool_group") is None:
                 registry.register(ActivateToolGroupTool(registry))
             apply_mode_active_profile(

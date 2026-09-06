@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.20.49-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.20.74-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -25,6 +25,8 @@ This repo is the **Python framework** (`pip install clawagents`). Ready-made cli
 | **ClawAgents for VS Code / Cursor** | **v1.0.139** | Editor extension — fork hardening, Mantle Kimi ids, companion lockstep | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Releases](https://github.com/x1jiang/clawagents-vscode/releases) |
 | **Python package** | **v6.20.49** | This library — Context Observatory, modular agent loop · `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/) · [Release](https://github.com/x1jiang/clawagents_py/releases) |
 | **TypeScript package** | **v6.12.13** | Node/TS sibling — `npm install git+https://github.com/x1jiang/clawagents.git` | [Repo](https://github.com/x1jiang/clawagents) |
+
+For **Meta / Muse-Glimmer-30B** setup and benchmarks, see [Meta Glimmer integration](META_GLIMMER.md).
 
 ## Installation
 

@@ -6,6 +6,8 @@ from __future__ import annotations
 # keys first so e.g. "gpt-5.4-medium" resolves to the "gpt-5.4" profile
 # rather than falling back to "gpt-5".
 MODEL_PROFILES: dict[str, dict[str, int | float]] = {
+    # Deployment /v1/models reports max_model_len=196608 (2026-09-06).
+    "muse-glimmer-30b": {"max_input_tokens": 196_608, "budget_ratio": 0.80},
     # ── OpenAI — GPT-5.6 (~1.05M context) ──────────────────────────────
     # long_context_threshold: official pricing cliff (>272K → 2× input / 1.5× output).
     # Economic micro-compact / soft-trim start below this so agent loops stay
