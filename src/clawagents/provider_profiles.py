@@ -41,7 +41,7 @@ BUILTIN_PROVIDER_PROFILES: dict[str, ProviderProfile] = {
     ),
     "meta": ProviderProfile(
         "meta", "openai", "Muse-Glimmer-30B",
-        "http://129.106.31.72:7790/v1", "not-needed",
+        "", "not-needed",
     ),
     "openai": ProviderProfile("openai", "openai", "gpt-5.6-terra"),
     "gemini": ProviderProfile("gemini", "gemini", "gemini-3.7-flash"),
@@ -132,6 +132,10 @@ def resolve_provider_profile(
     selected = profiles.get(profile)
     if selected is None:
         raise ValueError(f"Unknown provider profile: {profile}")
+
+    endpoint = base_url if base_url is not None else selected.base_url
+    if profile == "meta" and not (endpoint or "").strip():
+        raise ValueError("Meta requires a Base URL. Pass base_url or configure glimmer_30B_backend.")
 
     return ResolvedProviderProfile(
         profile=profile,
