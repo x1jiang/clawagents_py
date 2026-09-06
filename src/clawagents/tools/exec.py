@@ -585,18 +585,9 @@ def _shell_argv(command: str) -> list[str]:
 
 def _child_env() -> dict[str, str]:
     """Sanitized subprocess env — same floor as ``LocalBackend._sanitized_env``."""
-    try:
-        from clawagents.redact import is_secret_name
-        from clawagents.sandbox.local import LocalBackend
+    from clawagents.sandbox.local import LocalBackend
 
-        deny = LocalBackend._SENSITIVE_ENV_KEYS
-        return {
-            k: v
-            for k, v in os.environ.items()
-            if k not in deny and not is_secret_name(k)
-        } | {"PAGER": "cat"}
-    except Exception:
-        return {**os.environ, "PAGER": "cat"}
+    return LocalBackend()._sanitized_env() | {"PAGER": "cat"}
 
 
 def _drain_profile_warnings(sb: Any) -> str:
@@ -899,6 +890,10 @@ class ExecTool:
         "When ctx_execute or ctx_batch_execute is available, prefer those for "
         "broad reads or output that needs filtering; use execute for bounded "
         "commands, mutations, builds, and tests. "
+        "Honor the user's Python interpreter selection: local commands inherit "
+        "CLAWAGENTS_PYTHON and its directory first on PATH. Use that exact interpreter "
+        "for Python and `-m pip`; do not substitute /usr/bin/python*, create a different "
+        "venv, or install into another environment unless the user requests it. "
         "Working directory and (when enabled) env exports persist across calls "
         "in this session. Noisy commands (pytest, git status/log/diff, ls, rg, …) "
         "may be auto-wrapped with rtk when installed. "
