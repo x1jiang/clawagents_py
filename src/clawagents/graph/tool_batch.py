@@ -665,6 +665,7 @@ class ToolResultProcessor:
                             success=hook_result["success"],
                             output=hook_result["output"],
                             error=hook_result.get("error"),
+                            return_direct=getattr(result, "return_direct", False) and bool(hook_result["success"]),
                         )
                 except Exception as exc:
                     self._events.emit(

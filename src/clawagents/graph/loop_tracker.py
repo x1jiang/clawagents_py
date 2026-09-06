@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 # waiting past one wait budget, and replaying the earlier "still running"
 # answer would make the job look permanently stuck.
 TIME_DEPENDENT_TOOLS: frozenset[str] = frozenset(
-    {"task_wait", "task_status", "task_output", "task_list"}
+    {"task_wait", "task_status", "task_output", "task_list", "finish_coordination"}
 )
 
 
@@ -106,7 +106,7 @@ class _ToolCallTracker:
             prior_reads=self._read_history,
         )
 
-    def record_result(self, tool_name: str, args: dict, output: str) -> None:
+    def record_result(self, tool_name: str, args: dict, output: str, *, success: bool = True) -> None:
         """Record the result of a tool call for no-progress detection."""
         from clawagents.loop_detection import hash_tool_call
 
@@ -118,7 +118,15 @@ class _ToolCallTracker:
         else:
             self._no_progress_count = max(0, self._no_progress_count - 1)
         self._result_hashes[key] = result_hash
-        self.cache_result_output(tool_name, args, output)
+        if success:
+            self.cache_result_output(tool_name, args, output)
+        else:
+            # Failure is progress evidence, never a reusable successful result.
+            self._result_outputs.pop(key, None)
+            self._read_history = [
+                row for row in self._read_history
+                if self._key(row[0], row[1]) != key
+            ]
         call_hash = hash_tool_call(tool_name, args)
         self._poll_history.append((tool_name, call_hash, result_hash))
         if len(self._poll_history) > self._window_size:

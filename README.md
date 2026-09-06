@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.20.74-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.20.75-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -1775,3 +1775,7 @@ Full history: [docs/CHANGELOG.md](docs/CHANGELOG.md).
 ### Explicit Python selection for local commands
 
 Set `CLAWAGENTS_PYTHON` to the full interpreter path before starting ClawAgents, for example `/path/to/venv/bin/python`. Local shell execution prepends that interpreter's directory to PATH without resolving venv symlinks, sets VIRTUAL_ENV when applicable, and reports missing interpreters instead of falling back. With no selection, the inherited PATH remains unchanged. In VS Code, set `clawagents.pythonRuntime` to `custom` and `clawagents.pythonPath` in User/Remote settings; the extension supplies this environment automatically. Use the selected interpreter with `-m pip` for package operations. Explicit commands and container/remote backends are not rewritten.
+
+### Gemma Q4 coordination
+
+Use `create_claw_agent(profile="gemma-agentic")` for the local Gemma agentic Q4_K_M backend. See [setup, independent worker routing and verified completion](GEMMA_COORDINATION.md) and [the controlled coordination comparison](benchmarks/gemma_coordination_20260906/REPORT.md).

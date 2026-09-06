@@ -15,7 +15,7 @@ from typing import Any, Dict, Iterable, List, Optional, Protocol
 
 
 class ToolResult:
-    __slots__ = ("success", "output", "error", "raw_output", "added_tool_names")
+    __slots__ = ("success", "output", "error", "raw_output", "added_tool_names", "return_direct")
 
     def __init__(
         self,
@@ -25,7 +25,9 @@ class ToolResult:
         *,
         raw_output: str | list[dict[str, Any]] | None = None,
         added_tool_names: Optional[list[str]] = None,
+        return_direct: bool = False,
     ):
+        self.return_direct = return_direct
         self.success = success
         self.output = output
         self.error = error
@@ -1087,6 +1089,7 @@ class ToolRegistry:
                     output=preview_output,
                     error=result.error,
                     raw_output=result.output,
+                    return_direct=getattr(result, "return_direct", False),
                 )
                 if is_cacheable and wrapped.success:
                     self._result_cache.set(tool_name, effective_args, wrapped)
@@ -1101,6 +1104,7 @@ class ToolRegistry:
                 output=preview_output,
                 error=result.error,
                 raw_output=full_output,
+                return_direct=getattr(result, "return_direct", False),
             )
 
             # Cache successful results for cacheable tools.

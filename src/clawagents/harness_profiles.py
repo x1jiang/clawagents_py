@@ -25,6 +25,15 @@ class HarnessProfile:
 
 
 BUILTIN_HARNESS_PROFILES: dict[str, HarnessProfile] = {
+    "gemma-agentic": HarnessProfile(
+        name="gemma-agentic",
+        match_models=("gemma4-agentic-v2", "gemma4-v2-", "gemma-4-12b-agentic-fable5-composer2.5-v2"),
+        system_prompt_suffix="Delegate with explicit inputs and acceptance checks. Verify worker artifacts. Never treat incomplete work as success.",
+        compaction_headroom_ratio=0.60,
+        clear_tool_keep=8,
+        clear_tool_trigger_ratio=0.60,
+        loop_detection_overrides={"warning_threshold": 2, "critical_threshold": 3},
+    ),
     "meta-glimmer": HarnessProfile(
         name="meta-glimmer",
         match_models=("muse-glimmer-30b",),

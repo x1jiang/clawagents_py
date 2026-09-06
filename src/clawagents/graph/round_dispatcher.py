@@ -106,7 +106,7 @@ class RoundDispatcher:
 
         safety = self._safety.check(parsed.tool_calls)
         if safety.action == "stop":
-            state.status = "done"
+            state.status = "error"
             state.result = safety.message
             return RoundDispatch("stop", messages)
         if safety.action == "retry":
@@ -122,4 +122,6 @@ class RoundDispatcher:
             native_tool_calls=parsed.native_tool_calls or [],
             round_index=round_index,
         )
+        if state.status == "done":
+            return RoundDispatch("stop", messages)
         return RoundDispatch("continue", messages)

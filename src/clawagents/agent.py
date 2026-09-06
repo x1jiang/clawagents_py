@@ -666,6 +666,8 @@ def create_claw_agent(
     browser: bool = False,
     features: Optional[dict[str, bool]] = None,
     workspace: Optional[Union[str, os.PathLike]] = None,
+    subagents: Optional[List] = None,
+    completion_check: Any = None,
 ) -> ClawAgent:
     """
     Create a ClawAgent with full-stack capabilities.
@@ -673,6 +675,8 @@ def create_claw_agent(
     Args:
         model:          Model name ("gpt-5", "gemini-3-flash") or LLMProvider.
                         None = auto-detect from env.
+        completion_check: Optional sync/async acceptance callback; True enables verified terminal completion.
+        subagents:      Named SubAgentSpec workers; each may carry its own llm provider.
         profile:        Optional named provider profile. Explicit model/api_key/base_url
                         args override profile values.
         api_key:        API key for the model provider. Auto-routed based on model name.
@@ -801,6 +805,25 @@ def create_claw_agent(
     Advanced hooks (set after creation):
         agent.before_tool = lambda name, args: name != "execute"
     """
+    from clawagents.providers.gemma import (
+        COORDINATOR_PROMPT, CONTEXT_WINDOW, MAX_OUTPUT_TOKENS, is_agentic_model,
+    )
+    if profile is None and (
+        (model is None and os.getenv("PROVIDER", "").strip().lower() == "gemma-agentic")
+        or (isinstance(model, str) and is_agentic_model(model))
+    ):
+        profile = "gemma-agentic"
+    if profile == "gemma-agentic":
+        if context_window is None:
+            context_window = CONTEXT_WINDOW
+        if max_tokens is None:
+            max_tokens = MAX_OUTPUT_TOKENS
+        if temperature is None:
+            temperature = 0.0
+        if max_iterations is None:
+            max_iterations = 24
+        if instruction is None and system_prompt is None and base_prompt is None:
+            instruction = COORDINATOR_PROMPT
     # ── Resolve opt-in flags ────────────────────────────────────────────
     resolved_instruction = _resolve_system_prompt(system_prompt, instruction)
     from clawagents.paths import resolve_workspace_root
@@ -883,7 +906,7 @@ def create_claw_agent(
         api_key = resolved_profile.api_key
         base_url = resolved_profile.base_url
         api_version = resolved_profile.api_version
-        if profile == "meta":
+        if profile in {"meta", "gemma-agentic"}:
             api_key = api_key or "not-needed"
             if wire_api is None:
                 wire_api = "chat_completions"
@@ -1320,9 +1343,13 @@ def create_claw_agent(
     from clawagents.tools.tool_program import create_tool_program_tool
     registry.register(create_tool_program_tool(registry))
 
+    if completion_check is not None:
+        from clawagents.tools.coordination import FinishCoordinationTool
+        registry.register(FinishCoordinationTool(completion_check))
+
     # ── Sub-agent tool (always available) ──────────────────────────────
     from clawagents.tools.subagent import create_task_tool
-    registry.register(create_task_tool(llm, registry, workspace=workspace_root))
+    registry.register(create_task_tool(llm, registry, subagents=subagents, workspace=workspace_root))
 
     # v6.17: PTY sessions + rewind tools
     try:
@@ -1436,6 +1463,12 @@ def create_claw_agent(
         ):
             if registry.get(discovery_tool.name) is None:
                 registry.register(discovery_tool)
+
+    if profile == "gemma-agentic":
+        # Keep the tuning attached to this model only, including custom aliases.
+        setattr(llm, "_gemma_agentic_model", getattr(llm, "model", ""))
+        from clawagents.tools.tool_groups import apply_coordination_active_profile
+        apply_coordination_active_profile(registry, chat_mode=chat_mode)
 
     # Model efficiency profiles: shrink the tool surface; optional groups stay
     # registered and unlock via activate_tool_group (see tool_groups.py).

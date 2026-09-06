@@ -199,7 +199,7 @@ class ToolTurnExecutor:
             session_call_id=native_call.tool_call_id if native_call else "",
         )
         if isinstance(prepared.output, str):
-            self._loop_tracker.record_result(call.tool_name, call.args, prepared.output)
+            self._loop_tracker.record_result(call.tool_name, call.args, prepared.output, success=tool_result.success)
         if self._failure_tracker:
             self._failure_tracker.record(tool_result.success, call.tool_name)
         self._record_single_trajectory(
@@ -221,6 +221,10 @@ class ToolTurnExecutor:
             use_native_tools=self._use_native_tools,
             added_tool_names=getattr(tool_result, "added_tool_names", None),
         )
+        if tool_result.success and getattr(tool_result, "return_direct", False):
+            state.status = "done"
+            state.result = str(tool_result.output)
+            return
         await self._maybe_rethink(messages, state, round_index)
 
     async def _is_single_call_approved(
@@ -401,8 +405,8 @@ class ToolTurnExecutor:
                 summaries.append(json.dumps(prepared.output))
                 outputs.append(json.dumps(prepared.output))
 
-        for call, output in zip(calls, outputs):
-            self._loop_tracker.record_result(call.tool_name, call.args, output)
+        for call, output, result in zip(calls, outputs, results):
+            self._loop_tracker.record_result(call.tool_name, call.args, output, success=result.success)
         if self._failure_tracker:
             self._failure_tracker.record_batch(
                 [(result.success, call.tool_name) for call, result in zip(calls, results)]
