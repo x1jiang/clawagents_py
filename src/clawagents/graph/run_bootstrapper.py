@@ -777,6 +777,7 @@ class RunBootstrapper:
                 )
                 or 0
             )
+            reasoning_t = int(getattr(resp, "reasoning_tokens", 0) or 0)
             req = usage.add_response(
                 model=getattr(resp, "model", None) or "",
                 prompt_tokens=prompt_t,
@@ -784,6 +785,7 @@ class RunBootstrapper:
                 output_tokens=output_t,
                 total_tokens=total_t,
                 cached_input_tokens=cache_read_t,
+                reasoning_tokens=reasoning_t,
                 cache_creation_tokens=cache_write_t,
                 time_to_first_token_ms=time_to_first_token_ms,
                 peak_memory_bytes=peak_memory_bytes,
@@ -796,6 +798,7 @@ class RunBootstrapper:
                     "output_tokens": req.output_tokens,
                     "total_tokens": req.total_tokens,
                     "cached_input_tokens": req.cached_input_tokens,
+                    "reasoning_tokens": req.reasoning_tokens,
                     "cache_creation_tokens": req.cache_creation_tokens,
                     "time_to_first_token_ms": req.time_to_first_token_ms,
                     "peak_memory_bytes": usage.peak_memory_bytes,
@@ -937,6 +940,7 @@ class RunBootstrapper:
             cached_system_tokens=self._cached_sys_tokens,
             compaction_savings=self._compaction_savings,
             token_ledger=self._token_ledger,
+            loop_tracker=self._loop_tracker,
         )
         round_dispatcher = RoundDispatcher(
             driver=turn_driver,

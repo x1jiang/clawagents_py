@@ -206,6 +206,21 @@ MODEL_PROFILES: dict[str, dict[str, int | float]] = {
 }
 
 
+# Deployment aliases → canonical MODEL_PROFILES key. A self-hosted model is
+# often served under a custom name (``glimmer_30B_model=Custom-Glimmer``,
+# ``GEMMA_AGENTIC_MODEL=my-gemma``); without this the alias silently falls back
+# to the caller's context window (1M by default) on a 196K / 16K server.
+_MODEL_PROFILE_ALIASES: dict[str, str] = {}
+
+
+def register_model_profile_alias(alias: str, canonical: str) -> None:
+    """Map a served model name onto an existing MODEL_PROFILES entry."""
+    key = normalize_model_id(alias)
+    target = normalize_model_id(canonical)
+    if key and target and target in MODEL_PROFILES:
+        _MODEL_PROFILE_ALIASES[key] = target
+
+
 _GEO_PREFIXES = ("global.", "us.", "eu.", "apac.", "ap.", "af.", "me.", "ca.", "sa.")
 _VENDOR_PREFIXES = (
     "openai.",
@@ -259,6 +274,9 @@ def resolve_model_profile(model_name: str | None) -> dict[str, int | float] | No
     name = normalize_model_id(model_name)
     if not name:
         return None
+    alias_target = _MODEL_PROFILE_ALIASES.get(name)
+    if alias_target:
+        name = alias_target
     profile = MODEL_PROFILES.get(name)
     if profile:
         return profile

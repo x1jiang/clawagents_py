@@ -9,6 +9,7 @@ Extracted from ``agent_loop.py`` for modularity.
 from __future__ import annotations
 
 import json
+import re
 from typing import TYPE_CHECKING
 
 from clawagents.tools.registry import ParsedToolCall
@@ -29,6 +30,105 @@ TIME_DEPENDENT_TOOLS: frozenset[str] = frozenset(
     {"task_wait", "task_status", "task_output", "task_list", "finish_coordination"}
 )
 
+# ─── Repeated-failure escalation ─────────────────────────────────────────
+# Identical-argument loops are caught by ``is_soft_looping``; a weaker model
+# that keeps retrying the *same failing approach with different arguments*
+# (six ``unsandboxed=true`` retries with six commands, five ``cat`` variants of
+# a path the sandbox denies) is not. Key failures by (tool, normalised error
+# line) and escalate the tool result itself, where the model actually reads.
+_FAILURE_PATH_RE = re.compile(r"(?<![\w-])/[^\s'\"`|;)]+")
+_FAILURE_NUM_RE = re.compile(r"\d+")
+_FAILURE_HEX_RE = re.compile(r"\b[0-9a-f]{8,}\b")
+_FAILURE_WS_RE = re.compile(r"\s+")
+_FAILURE_SIG_MAX = 160
+_FAILURE_DIRECTIVE_AT = 2
+
+
+def failure_signature(tool_name: str, output: str) -> str:
+    """Stable key for "the same error again": tool + first error-ish line with
+    paths / numbers / hashes normalised away."""
+    text = output if isinstance(output, str) else str(output or "")
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    chosen = ""
+    for ln in lines:
+        low = ln.lower()
+        if "error" in low or "denied" in low or "not permitted" in low or "not authorized" in low:
+            chosen = ln
+            break
+    if not chosen and lines:
+        chosen = lines[0]
+    chosen = chosen.lower()
+    chosen = _FAILURE_PATH_RE.sub("<path>", chosen)
+    chosen = _FAILURE_HEX_RE.sub("<hex>", chosen)
+    chosen = _FAILURE_NUM_RE.sub("#", chosen)
+    chosen = _FAILURE_WS_RE.sub(" ", chosen).strip()
+    return f"{tool_name}|{chosen[:_FAILURE_SIG_MAX]}"
+
+
+SHELL_TOOLS: frozenset[str] = frozenset({"execute", "exec", "bash"})
+_PROBE_STREAK_AT = 8
+_PROBE_STREAK_EVERY = 4
+
+
+def probe_streak_directive(streak: int) -> str | None:
+    """Nudge after many consecutive shell commands with no edit in between."""
+    if streak < _PROBE_STREAK_AT or (streak - _PROBE_STREAK_AT) % _PROBE_STREAK_EVERY:
+        return None
+    return (
+        f"[System] {streak} shell commands have run since the last file edit. "
+        "If the checks you needed have passed, stop probing and give the final "
+        "answer now; if something is still wrong, edit the code instead of running "
+        "more commands."
+    )
+
+
+def repeated_failure_directive(tool_name: str, count: int) -> str | None:
+    """Escalating instruction appended to a tool result on the Nth identical failure."""
+    if count < _FAILURE_DIRECTIVE_AT:
+        return None
+    if count == _FAILURE_DIRECTIVE_AT:
+        return (
+            f"[System] {tool_name} has now failed twice with the same error. "
+            "Do not retry the same approach with cosmetic changes. Change strategy: "
+            "use a different tool (for example read_file/write_file/edit_file instead "
+            "of shell cat/echo, or an in-workspace path instead of an absolute one), "
+            "or report the blocker to the user."
+        )
+    return (
+        f"[System] {tool_name} failed {count} times with the same error. STOP retrying "
+        "it — the environment will not change. Use a different tool or approach now, "
+        "or finish with a clear report of what is blocked and why."
+    )
+
+
+# Tools after which "the same call again" is verification, not a loop, and
+# after which a cached read is stale. ``execute`` is deliberately absent: a
+# test command re-run three times with no edit in between IS the loop the
+# detector exists for; the same command after each edit is the normal
+# edit-test cycle and used to trip the hard stop (critical_threshold=3 on the
+# Glimmer/Luna profiles) and end the run mid-task.
+MUTATING_TOOLS: frozenset[str] = frozenset(
+    {
+        "write_file", "edit_file", "apply_patch", "hashline_edit", "create_file",
+        "replace_in_file", "insert_in_file", "insert_lines", "patch_file",
+        "delete_file", "git_commit", "git_undo_ai", "checkpoint_restore",
+        "task", "subagent", "compose",
+    }
+)
+
+
+# Read-only tools: a repeat is cheap (cached) and, for a model that lost the
+# content to crushing/compaction, necessary. Killing the run on the third
+# identical read ("Tool loop detected (hashline_read). Stopping.") cost
+# Glimmer 2 of 12 benchmark trials; the no-progress circuit breaker remains
+# the backstop. Policy: 1st runs, 2nd gets the cached stub, 3rd+ re-executes.
+READ_TOOLS: frozenset[str] = frozenset(
+    {
+        "read_file", "hashline_read", "hashline_grep", "read_and_grep", "grep",
+        "glob", "ls", "tree", "search_history", "retrieve_tool_result",
+    }
+)
+
 
 class _ToolCallTracker:
     def __init__(
@@ -42,6 +142,9 @@ class _ToolCallTracker:
         from clawagents.loop_detection import resolve_loop_detection_config
 
         self._history: list[str] = []
+        # Parallel to _history: the mutation epoch each call was made in.
+        self._history_epochs: list[int] = []
+        self._mutation_epoch = 0
         self._poll_history: list[tuple[str, str, str | None]] = []
         self._window_size = window_size
         self._soft_limit = soft_limit
@@ -54,6 +157,11 @@ class _ToolCallTracker:
         self._no_progress_count = 0
         self._soft_warnings = 0
         self._poll_warnings: set[str] = set()
+        self._failure_counts: dict[str, int] = {}
+        # Consecutive shell commands since the last file edit ("verification
+        # churn": dozens of tiny python -c probes after the code is already
+        # correct, until the round cap).
+        self._probe_streak = 0
 
     def _key(self, tool_name: str, args: dict) -> str:
         try:
@@ -70,9 +178,27 @@ class _ToolCallTracker:
         return str(h)
 
     def record(self, tool_name: str, args: dict) -> None:
+        if tool_name in MUTATING_TOOLS:
+            self.note_mutation()
         self._history.append(self._key(tool_name, args))
+        self._history_epochs.append(self._mutation_epoch)
         if len(self._history) > self._window_size:
             self._history.pop(0)
+            self._history_epochs.pop(0)
+
+    def note_mutation(self) -> None:
+        """Workspace state changed: cached reads are stale and identical calls
+        made before this point no longer count toward a loop."""
+        self._mutation_epoch += 1
+        self._probe_streak = 0
+        self._result_outputs.clear()
+        self._read_history.clear()
+
+    def note_context_cleared(self) -> None:
+        """Compaction / micro-compact removed earlier tool output from the
+        transcript. The model can no longer see those results, so a repeat of
+        the same read is recovery: serve it fresh and do not count it."""
+        self.note_mutation()
 
     def cache_result_output(self, tool_name: str, args: dict, output: str) -> None:
         """Store truncated output for identical/overlapping reuse stubs."""
@@ -93,6 +219,10 @@ class _ToolCallTracker:
         if tool_name in TIME_DEPENDENT_TOOLS:
             return None
         key = self._key(tool_name, args)
+        if tool_name in READ_TOOLS and self._count_occurrences(tool_name, args) > 2:
+            # Third identical read in this epoch: the stub was not enough,
+            # return the real content again instead of arguing.
+            return None
         prior = self._result_outputs.get(key)
         if prior is not None:
             return (
@@ -106,8 +236,15 @@ class _ToolCallTracker:
             prior_reads=self._read_history,
         )
 
-    def record_result(self, tool_name: str, args: dict, output: str, *, success: bool = True) -> None:
-        """Record the result of a tool call for no-progress detection."""
+    def record_result(
+        self, tool_name: str, args: dict, output: str, *, success: bool = True
+    ) -> str | None:
+        """Record the result of a tool call for no-progress detection.
+
+        Returns an escalation directive when this failure repeats an earlier
+        one (same tool, same normalised error) so the caller can append it to
+        the tool result the model reads; ``None`` otherwise.
+        """
         from clawagents.loop_detection import hash_tool_call
 
         key = self._key(tool_name, args)
@@ -118,6 +255,7 @@ class _ToolCallTracker:
         else:
             self._no_progress_count = max(0, self._no_progress_count - 1)
         self._result_hashes[key] = result_hash
+        directive: str | None = None
         if success:
             self.cache_result_output(tool_name, args, output)
         else:
@@ -127,10 +265,27 @@ class _ToolCallTracker:
                 row for row in self._read_history
                 if self._key(row[0], row[1]) != key
             ]
+            if tool_name not in TIME_DEPENDENT_TOOLS:
+                directive = self.note_failure(tool_name, output)
+        if tool_name in SHELL_TOOLS:
+            self._probe_streak += 1
+            if directive is None:
+                directive = probe_streak_directive(self._probe_streak)
         call_hash = hash_tool_call(tool_name, args)
         self._poll_history.append((tool_name, call_hash, result_hash))
         if len(self._poll_history) > self._window_size:
             self._poll_history.pop(0)
+        return directive
+
+    def note_failure(self, tool_name: str, output: str) -> str | None:
+        """Count a failure by error signature; return the escalation directive if any."""
+        sig = failure_signature(tool_name, output)
+        count = self._failure_counts.get(sig, 0) + 1
+        self._failure_counts[sig] = count
+        return repeated_failure_directive(tool_name, count)
+
+    def failure_count(self, tool_name: str, output: str) -> int:
+        return self._failure_counts.get(failure_signature(tool_name, output), 0)
 
     def is_ping_ponging(self) -> bool:
         """Detect A->B->A->B ping-pong oscillation (last 6 entries)."""
@@ -153,10 +308,15 @@ class _ToolCallTracker:
 
     def _count_occurrences(self, tool_name: str, args: dict) -> int:
         key = self._key(tool_name, args)
-        return self._history.count(key)
+        epoch = self._mutation_epoch
+        return sum(
+            1
+            for entry, entry_epoch in zip(self._history, self._history_epochs)
+            if entry == key and entry_epoch == epoch
+        )
 
     def is_soft_looping(self, tool_name: str, args: dict) -> bool:
-        if tool_name in TIME_DEPENDENT_TOOLS:
+        if tool_name in TIME_DEPENDENT_TOOLS or tool_name in READ_TOOLS:
             return False
         return self._count_occurrences(tool_name, args) >= self._soft_limit
 
@@ -165,8 +325,9 @@ class _ToolCallTracker:
         # per-call wait budget legitimately needs more calls than the hard
         # limit, and stopping the batch there would abandon it. Stalls are
         # still caught by the no-progress circuit breaker, which keys off
-        # changing results rather than call count.
-        if tool_name in TIME_DEPENDENT_TOOLS:
+        # changing results rather than call count. Reads are served, not
+        # stopped (see READ_TOOLS).
+        if tool_name in TIME_DEPENDENT_TOOLS or tool_name in READ_TOOLS:
             return False
         return self._count_occurrences(tool_name, args) >= self._hard_limit
 

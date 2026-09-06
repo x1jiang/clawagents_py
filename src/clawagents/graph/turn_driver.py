@@ -113,7 +113,9 @@ class TurnDriver:
         cached_system_tokens: int,
         compaction_savings: list[float],
         token_ledger: IncrementalTokenLedger | None = None,
+        loop_tracker: Any = None,
     ) -> None:
+        self._loop_tracker = loop_tracker
         self._llm = llm
         self._caller = caller
         self._events = events
@@ -239,7 +241,18 @@ class TurnDriver:
         the resulting cache miss is expected rather than waste. Recording the
         upcoming request index lets cache-waste attribution exempt it instead
         of reporting it as an unexplained miss.
+
+        It also tells the loop tracker that tool output was cleared: a model
+        that re-reads a file whose contents micro-compact just removed is
+        recovering, not looping, and must not be served a 500-char stub or
+        hard-stopped for "re-calling with the same arguments".
         """
+        tracker = getattr(self, "_loop_tracker", None)
+        if tracker is not None and hasattr(tracker, "note_context_cleared"):
+            try:
+                tracker.note_context_cleared()
+            except Exception:
+                pass
         rc = self._run_context
         if rc is None or not isinstance(getattr(rc, "_metadata", None), dict):
             return

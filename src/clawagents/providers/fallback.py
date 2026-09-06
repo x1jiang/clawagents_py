@@ -77,6 +77,13 @@ class FallbackProvider(LLMProvider):
         for p in [primary, *fallbacks]:
             self._states[id(p)] = ProviderState()
 
+    @property
+    def model(self) -> str:
+        """The primary's model id — harness/loop resolvers key on ``llm.model``
+        (loop thresholds, micro-compact knobs, context profile) and silently
+        fell back to defaults when the wrapper had no such attribute."""
+        return str(getattr(self.primary, "model", "") or "")
+
     # ── Internal helpers ──────────────────────────────────────────────────
 
     def _state(self, provider: LLMProvider) -> ProviderState:

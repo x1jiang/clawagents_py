@@ -198,8 +198,16 @@ class ToolTurnExecutor:
             call_id=call_id,
             session_call_id=native_call.tool_call_id if native_call else "",
         )
-        if isinstance(prepared.output, str):
-            self._loop_tracker.record_result(call.tool_name, call.args, prepared.output, success=tool_result.success)
+        output = prepared.output
+        if isinstance(output, str):
+            directive = self._loop_tracker.record_result(
+                call.tool_name, call.args, output, success=tool_result.success
+            )
+            if directive:
+                self._events.emit(
+                    "warn", {"message": f"repeated failure: {call.tool_name} — escalating"}
+                )
+                output = f"{output}\n\n{directive}"
         if self._failure_tracker:
             self._failure_tracker.record(tool_result.success, call.tool_name)
         self._record_single_trajectory(
@@ -215,7 +223,7 @@ class ToolTurnExecutor:
             response_content=response.content or "",
             call=call,
             native_call=native_call,
-            output=prepared.output,
+            output=output,
             thinking=thinking,
             gemini_parts=getattr(response, "gemini_parts", None),
             use_native_tools=self._use_native_tools,
@@ -405,8 +413,19 @@ class ToolTurnExecutor:
                 summaries.append(json.dumps(prepared.output))
                 outputs.append(json.dumps(prepared.output))
 
-        for call, output, result in zip(calls, outputs, results):
-            self._loop_tracker.record_result(call.tool_name, call.args, output, success=result.success)
+        for index, (call, output, result) in enumerate(zip(calls, outputs, results)):
+            directive = self._loop_tracker.record_result(
+                call.tool_name, call.args, output, success=result.success
+            )
+            if directive:
+                self._events.emit(
+                    "warn", {"message": f"repeated failure: {call.tool_name} — escalating"}
+                )
+                outputs[index] = f"{output}\n\n{directive}"
+                # Multimodal results push two summary rows, so only annotate
+                # the summary when the lists are still index-aligned.
+                if len(summaries) == len(outputs):
+                    summaries[index] = f"{summaries[index]}\n\n{directive}"
         if self._failure_tracker:
             self._failure_tracker.record_batch(
                 [(result.success, call.tool_name) for call, result in zip(calls, results)]

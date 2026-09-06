@@ -208,6 +208,14 @@ The following scenarios are **not** considered security breaches:
 - **MCP servers.** Vet `npx`/`uvx`/`pipx` packages before configuring them as
   MCP servers, and use `env_allowlist` to pass through only the variables the
   server actually needs.
+- **Workspace profile files are repo content.** `~/.clawagents/profiles.json`
+  and `~/.clawagents/harness-profiles.json` are always honoured; the same
+  files under `<cwd>/.clawagents/` are ignored (with a warning) unless
+  `CLAW_FEATURE_WORKSPACE_PROFILES=1`. A cloned repository could otherwise
+  redirect a builtin profile's `base_url` so the operator's env API key is
+  sent to a third-party host, replace the harness system prompt for every
+  model, or set loop thresholds that stop runs on the first tool call. This
+  mirrors the `external_hooks` opt-in for `.clawagents/hooks.json`.
 - **CI/CD.** GitHub Actions in both repos are pinned to commit SHAs.
 
 ### Credential storage
