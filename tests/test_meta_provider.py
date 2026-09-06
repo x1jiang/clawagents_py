@@ -1,6 +1,8 @@
 """Meta profile routing and context regression coverage (no network)."""
 import json
 
+import pytest
+
 from clawagents.agent import create_claw_agent
 from clawagents.config.config import EngineConfig, get_default_model
 from clawagents.graph.model_profiles import resolve_model_profile
@@ -11,9 +13,9 @@ from clawagents.provider_profiles import load_provider_profiles, resolve_provide
 def test_meta_defaults_isolate_cloud_key(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("OPENAI_API_KEY", "cloud-key-must-not-be-forwarded")
-    agent = create_claw_agent(profile="meta", workspace=tmp_path, skills=[], memory=[])
+    agent = create_claw_agent(profile="meta", base_url="http://localhost:7790/v1", workspace=tmp_path, skills=[], memory=[])
     assert agent.llm.model == "Muse-Glimmer-30B"
-    assert str(agent.llm.client.base_url) == "http://129.106.31.72:7790/v1/"
+    assert str(agent.llm.client.base_url) == "http://localhost:7790/v1/"
     assert agent.llm.client.api_key == "not-needed"
     assert not agent.llm._should_use_responses(has_tools=True)
     assert "Tool efficiency:" in agent.system_prompt
@@ -43,11 +45,12 @@ def test_meta_profile_file_wins_over_env(monkeypatch, tmp_path):
 def test_meta_provider_env_selects_profile(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("PROVIDER", "meta")
+    monkeypatch.setenv("glimmer_30B_backend", "http://localhost:7790/v1")
     assert get_default_model(EngineConfig()) == "Muse-Glimmer-30B"
     agent = create_claw_agent(workspace=tmp_path, skills=[], memory=[])
     assert agent.llm.model == "Muse-Glimmer-30B"
     assert agent.llm.client.api_key == "not-needed"
-    assert str(agent.llm.client.base_url) == "http://129.106.31.72:7790/v1/"
+    assert str(agent.llm.client.base_url) == "http://localhost:7790/v1/"
 
 
 def test_meta_context_and_harness():
@@ -71,5 +74,18 @@ def test_bare_glimmer_uses_meta_and_explicit_args_win(monkeypatch, tmp_path):
 def test_meta_empty_key_never_falls_back_to_cloud(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("OPENAI_API_KEY", "cloud-secret")
-    agent = create_claw_agent(profile="meta", api_key="", workspace=tmp_path, skills=[], memory=[])
+    agent = create_claw_agent(profile="meta", api_key="", base_url="http://localhost:7790/v1", workspace=tmp_path, skills=[], memory=[])
     assert agent.llm.client.api_key == "not-needed"
+
+
+@pytest.mark.parametrize("model", [None, "Muse-Glimmer-30B"])
+def test_meta_requires_user_endpoint(monkeypatch, tmp_path, model):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("clawagents.provider_profiles._profile_paths", lambda: [])
+    for name in ("glimmer_30B_backend", "GLIMMER_30B_BACKEND"):
+        monkeypatch.delenv(name, raising=False)
+    assert load_provider_profiles()["meta"].base_url == ""
+    with pytest.raises(ValueError, match="Meta requires a Base URL"):
+        create_claw_agent(model=model, profile="meta", workspace=tmp_path)
+    with pytest.raises(ValueError, match="Meta requires a Base URL"):
+        resolve_provider_profile("meta", base_url="   ")

@@ -7,7 +7,7 @@ transport rather than adding another client or dependency.
 ```python
 from clawagents import create_claw_agent
 
-agent = create_claw_agent(profile="meta")
+agent = create_claw_agent(profile="meta", base_url="https://your-meta-server/v1")
 result = await agent.invoke("Read pyproject.toml and report the version")
 ```
 
@@ -18,7 +18,7 @@ For CLI or environment-based use:
 
 ```dotenv
 PROVIDER=meta
-glimmer_30B_backend=http://129.106.31.72:7790/v1
+glimmer_30B_backend=https://your-meta-server/v1
 glimmer_30B_model=Muse-Glimmer-30B
 ```
 
@@ -26,7 +26,9 @@ glimmer_30B_model=Muse-Glimmer-30B
 python -m clawagents --profile meta --task "Read pyproject.toml and report the version"
 ```
 
-The two `glimmer_30B_*` variables override built-in defaults; the Python core
+Meta has no built-in server endpoint. Supply a Base URL explicitly, through
+`glimmer_30B_backend`, or in your named profile. Missing or blank endpoints
+raise a configuration error before creating a client. The Python core
 also accepts `GLIMMER_30B_BACKEND` and `GLIMMER_30B_MODEL`. Optional `META_API_KEY`
 authenticates a protected deployment. Otherwise the SDK receives `not-needed`;
 it does not forward an ambient OpenAI key to Meta. Existing `profiles.json`
@@ -50,7 +52,8 @@ server default: an `enable_thinking=false` probe still produced reasoning on
 this deployment, so we do not advertise a working no-thinking mode.
 
 In the companion VS Code extension, select **Meta (Glimmer)** in Settings, then
-**Muse-Glimmer-30B**. The backend is filled automatically; save and approve the
+**Muse-Glimmer-30B**. Enter your server endpoint in the required **Base URL**
+field (or configure it in the environment); save and approve the
 custom URL through the extension's existing endpoint prompt. Per-chat model
 selection also lists Meta. Build/use the updated core together with the updated
 extension. Server credentials can be provided through the sidecar environment
