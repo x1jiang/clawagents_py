@@ -1,0 +1,10 @@
+{
+  "clawagents_py/src/clawagents/agent.py": "c73c77adec7d33bad78a54e3fc6e04263f5ce509ca144a8418712ca17352a7ff",
+  "clawagents_py/src/clawagents/provider_profiles.py": "edf401ade766de7924278d014a06f3f732aa17891c1f2c76e7573e2378a8610b",
+  "clawagents_py/src/clawagents/harness_profiles.py": "1d82c07eeea9bc18273919e08e37919610835163faebd2c24ad05d42e571abbc",
+  "clawagents_py/src/clawagents/graph/model_profiles.py": "413604af5cc19b0b1742c7e0f29f4d72cf35c5b2a209481b580f404ec758a41a",
+  "clawagents_py/src/clawagents/tools/validate.py": "6e7c4509c0a68a6762a9e0e9edbbef5c00321e495eac2a47a848573999d1c555",
+  "clawagents_py/scripts/benchmark_meta_glimmer.py": "aadf806b496ece7aad871311ec094d27933be72c04c17605274f0d785c412b43",
+  "clawagents_vscode/python/chats.py": "b15a61440fd7f8e85bd8055315bc0f03ac9c947b718eea82383ce831a0e6bc4c",
+  "clawagents_vscode/webview/src/providerCatalog.ts": "f96f5ffc87e2a7c18622e04b81c6e5c413de19b3c8c7045f15002c80fa57c6a2"
+}

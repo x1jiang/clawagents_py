@@ -25,6 +25,23 @@ class HarnessProfile:
 
 
 BUILTIN_HARNESS_PROFILES: dict[str, HarnessProfile] = {
+    "meta-glimmer": HarnessProfile(
+        name="meta-glimmer",
+        match_models=("muse-glimmer-30b",),
+        system_prompt_suffix=(
+            "Tool efficiency:\n"
+            "- Read the exact paths named by the user before searching elsewhere.\n"
+            "- Use native tool calls with the declared JSON arguments; never print tool-call markup.\n"
+            "- Reuse prior tool results instead of repeating identical calls.\n"
+            "- Optional tools stay hidden until you call activate_tool_group.\n"
+            "- After editing, run the relevant check, then report the result concisely.\n"
+            "- Stop when the requested result is verified."
+        ),
+        compaction_headroom_ratio=0.70,
+        clear_tool_keep=2,
+        clear_tool_trigger_ratio=0.35,
+        loop_detection_overrides={"warning_threshold": 2, "critical_threshold": 3},
+    ),
     # GPT-5.6 / Luna: huge tool schemas + multi-round search churn is the
     # dominant cost driver even when prompt-cache hit rates are excellent.
     "openai-gpt56": HarnessProfile(

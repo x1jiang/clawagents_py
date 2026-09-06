@@ -16,6 +16,7 @@ _PROVIDER_SECRET_KEYS = (
     "XAI_API_KEY",
     "GROK_API_KEY",
     "BEDROCK_API_KEY",
+    "META_API_KEY",
     "TAVILY_API_KEY",
     "ADVISOR_API_KEY",
     "AWS_ACCESS_KEY_ID",
@@ -65,6 +66,7 @@ def _secret_keys_to_protect() -> list[str]:
         "gemini": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
         "bedrock": ["BEDROCK_API_KEY"],
         "xai": ["XAI_API_KEY", "GROK_API_KEY"],
+        "meta": ["META_API_KEY"],
         "tavily": ["TAVILY_API_KEY"],
         "aws": ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"],
     }
@@ -209,6 +211,10 @@ def get_default_model(config: EngineConfig) -> str:
     at provider construction instead of silently routing to another vendor.
     """
     hint = os.getenv("PROVIDER", "").lower().strip()
+    if hint == "meta":
+        from clawagents.provider_profiles import resolve_provider_profile
+
+        return resolve_provider_profile("meta").model or "Muse-Glimmer-30B"
     if hint in ("bedrock", "aws"):
         return config.bedrock_model or "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
     if hint == "gemini":

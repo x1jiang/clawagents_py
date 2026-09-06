@@ -35,6 +35,10 @@ class ResolvedProviderProfile:
 
 
 BUILTIN_PROVIDER_PROFILES: dict[str, ProviderProfile] = {
+    "meta": ProviderProfile(
+        "meta", "openai", "Muse-Glimmer-30B",
+        "http://129.106.31.72:7790/v1", "not-needed",
+    ),
     "openai": ProviderProfile("openai", "openai", "gpt-5.6-terra"),
     "gemini": ProviderProfile("gemini", "gemini", "gemini-3.7-flash"),
     "anthropic": ProviderProfile("anthropic", "anthropic", "claude-sonnet-4-5"),
@@ -67,6 +71,15 @@ def _profile_paths() -> list[Path]:
 
 def load_provider_profiles(paths: list[Path] | None = None) -> dict[str, ProviderProfile]:
     profiles = dict(BUILTIN_PROVIDER_PROFILES)
+    # Read at resolution time so CLI dotenv loading and long-lived hosts work.
+    # Never borrow OPENAI_API_KEY for a self-hosted deployment.
+    meta = profiles["meta"]
+    profiles["meta"] = ProviderProfile(
+        "meta", "openai",
+        os.getenv("glimmer_30B_model") or os.getenv("GLIMMER_30B_MODEL") or meta.model,
+        os.getenv("glimmer_30B_backend") or os.getenv("GLIMMER_30B_BACKEND") or meta.base_url,
+        os.getenv("META_API_KEY") or meta.api_key,
+    )
     for path in paths or _profile_paths():
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
@@ -117,4 +130,3 @@ def resolve_provider_profile(
         base_url=base_url if base_url is not None else (selected.base_url or None),
         api_version=api_version if api_version is not None else (selected.api_version or None),
     )
-

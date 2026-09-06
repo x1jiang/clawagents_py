@@ -73,6 +73,14 @@ def _coerce_boolean(v: Any) -> Optional[bool]:
 def _coerce_string(v: Any) -> Optional[str]:
     if isinstance(v, str):
         return v
+    if isinstance(v, (dict, list)):
+        # Some compatible models return an object for a text parameter (e.g.
+        # write_file.content). Python repr silently writes invalid JSON and
+        # causes repeated repair calls; preserve the wire value as JSON text.
+        try:
+            return json.dumps(v, ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError):
+            return None
     if v is not None:
         return str(v)
     return None
