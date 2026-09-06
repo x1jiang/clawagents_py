@@ -47,9 +47,49 @@ tools. Concise tool instructions, repeated-call detection, and earlier clearing
 of old tool output reduce avoidable context growth. Structured values supplied
 for string tool parameters are serialized as JSON instead of Python repr,
 avoiding invalid file contents and repair loops. Existing text is unchanged.
-Reasoning remains at the
-server default: an `enable_thinking=false` probe still produced reasoning on
-this deployment, so we do not advertise a working no-thinking mode.
+
+## Reasoning channel and output budget
+
+Glimmer always reasons before acting. The deployment returns chain-of-thought
+on a separate `reasoning_content` field (SGLang reasoning parser) and counts it
+in `usage.completion_tokens` and `usage.reasoning_tokens`. Probed on
+2026-09-06: `chat_template_kwargs={"enable_thinking": false}`,
+`reasoning_effort`, and `separate_reasoning` are accepted and ignored, so there
+is no server-side way to cap it. The harness compensates from the outside:
+
+- The OpenAI-compatible transport captures `reasoning_content` (streaming and
+  non-streaming) into `LLMResponse.thinking`, so the doom-loop detector's
+  thinking channel and the `assistant_message` event see it, and
+  `usage.reasoning_tokens` is metered. Reasoning never reaches the visible
+  stream and is never re-sent to the server. Inline `<think>` blocks (Qwen,
+  DeepSeek, llama.cpp with thinking on) get the same treatment, including a
+  block cut before `</think>`.
+- `profile="meta"` defaults `max_tokens` to 16,384 (explicit values win).
+  Reasoning turns of 2K–6K tokens were common on real coding tasks; a 6,144
+  cap truncated four of twelve benchmark trials mid-thought.
+- When a turn still stops with `finish_reason="length"` and no tool call, the
+  loop no longer treats the empty content as the answer or routes it into the
+  "write the answer now" nudge. It records the turn as `[output truncated at
+  the token limit]`, asks the model to continue with brief reasoning, grows
+  `max_tokens` by 1.5× (capped), and does this at most twice per run. A tool
+  call whose JSON arguments were cut by the limit is dropped rather than run
+  on repaired-but-wrong arguments.
+- A tool that fails twice with the same normalised error (paths, numbers and
+  hashes stripped) gets an escalation appended to its result; the third time
+  it says to stop retrying and change approach. This targets the observed
+  pattern of retrying `unsandboxed=true` or an absolute-path `cat` with cosmetic
+  changes, which identical-argument loop detection cannot see.
+
+A custom served name (`glimmer_30B_model=Custom-Glimmer`) keeps all of the
+above: `create_claw_agent(profile="meta")` registers the name as an alias for
+the `meta-glimmer` harness and the `muse-glimmer-30b` context profile, and pins
+the context window to the deployment's 196,608 tokens.
+
+`.clawagents/profiles.json` and `.clawagents/harness-profiles.json` are read
+from `~/.clawagents/` always, and from the workspace only with
+`CLAW_FEATURE_WORKSPACE_PROFILES=1`. A cloned repository could otherwise point
+the builtin `openai` profile at its own host (the env API key follows) or
+replace the system prompt for every model.
 
 In the companion VS Code extension, select **Meta (Glimmer)** in Settings, then
 **Muse-Glimmer-30B**. Enter your server endpoint in the required **Base URL**

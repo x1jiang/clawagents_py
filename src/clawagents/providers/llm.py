@@ -92,6 +92,9 @@ class LLMResponse:
         cache_creation_tokens: int = 0,
         cache_read_tokens: int = 0,
         prompt_tokens: int = 0,
+        thinking: str | None = None,
+        finish_reason: str | None = None,
+        reasoning_tokens: int = 0,
     ):
         self.content = content
         self.model = model
@@ -103,6 +106,15 @@ class LLMResponse:
         self.cache_creation_tokens = cache_creation_tokens
         self.cache_read_tokens = cache_read_tokens
         self.prompt_tokens = prompt_tokens
+        # Separate reasoning channel (SGLang/vLLM ``reasoning_content``). Never
+        # re-sent to the provider; the loop uses it for doom-loop detection and
+        # the ``assistant_message`` event.
+        self.thinking = thinking
+        # Provider stop reason when known ("stop", "tool_calls", "length", …).
+        # ``"length"`` lets the loop recover a turn that hit ``max_tokens``
+        # mid-reasoning instead of treating the empty content as an answer.
+        self.finish_reason = finish_reason
+        self.reasoning_tokens = reasoning_tokens
 
 
 OnChunkCallback = (
@@ -114,7 +126,11 @@ OnChunkCallback = (
 
 import re as _re
 
-_THINK_BLOCK_RE = _re.compile(r"<think>(.*?)</think>", _re.DOTALL)
+# An unclosed block (the model hit max_tokens mid-thought) is still thinking,
+# never answer text: match to end-of-string when ``</think>`` is missing.
+_THINK_BLOCK_RE = _re.compile(r"<think>(.*?)(?:</think>|\Z)", _re.DOTALL)
+_THINK_OPEN = "<think>"
+_THINK_CLOSE = "</think>"
 
 
 def strip_thinking_tokens(content: str) -> tuple[str, str | None]:
@@ -122,8 +138,9 @@ def strip_thinking_tokens(content: str) -> tuple[str, str | None]:
 
     Handles models like Qwen3, DeepSeek that wrap chain-of-thought in <think> tags.
     Returns the content with thinking removed, and the thinking text separately.
+    A block truncated before ``</think>`` counts as thinking to the end.
     """
-    if not content or "<think>" not in content:
+    if not content or _THINK_OPEN not in content:
         return content, None
     thinking_parts: list[str] = []
     for m in _THINK_BLOCK_RE.finditer(content):
@@ -131,6 +148,52 @@ def strip_thinking_tokens(content: str) -> tuple[str, str | None]:
     clean = _THINK_BLOCK_RE.sub("", content).strip()
     thinking = "\n".join(thinking_parts) if thinking_parts else None
     return clean, thinking
+
+
+class _ThinkStreamFilter:
+    """Split a streamed text channel into visible text and inline ``<think>`` blocks.
+
+    Tags can straddle chunk boundaries, so a suffix that could still become a
+    tag is held back until the next chunk (or ``flush``). Text inside an
+    unclosed block at end-of-stream is thinking, not answer.
+    """
+
+    def __init__(self) -> None:
+        self._buf = ""
+        self._inside = False
+
+    @staticmethod
+    def _partial_suffix(buf: str, tag: str) -> int:
+        for n in range(min(len(tag) - 1, len(buf)), 0, -1):
+            if tag.startswith(buf[-n:]):
+                return n
+        return 0
+
+    def feed(self, text: str) -> tuple[str, str]:
+        self._buf += text
+        visible: list[str] = []
+        thinking: list[str] = []
+        while self._buf:
+            tag = _THINK_CLOSE if self._inside else _THINK_OPEN
+            sink = thinking if self._inside else visible
+            i = self._buf.find(tag)
+            if i >= 0:
+                sink.append(self._buf[:i])
+                self._buf = self._buf[i + len(tag):]
+                self._inside = not self._inside
+                continue
+            keep = self._partial_suffix(self._buf, tag)
+            cut = len(self._buf) - keep
+            sink.append(self._buf[:cut])
+            self._buf = self._buf[cut:]
+            break
+        return "".join(visible), "".join(thinking)
+
+    def flush(self) -> tuple[str, str]:
+        rest, self._buf = self._buf, ""
+        if self._inside:
+            return "", rest
+        return rest, ""
 
 
 def rebuild_thinking_content(content: str, thinking: str | None) -> str:
@@ -187,21 +250,33 @@ _CHUNK_STALL_S = 60.0
 _RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 
 
+# Status codes in free text only count when they look like a status code
+# ("Error code: 502", "HTTP 503", "status 429"), not as any digit run — a 400
+# whose message says "column 500" or "15024 tokens" used to be retried 3×.
+_STATUS_IN_TEXT_RE = _re.compile(
+    r"(?:error code|status(?: code)?|http)\s*[:=]?\s*(429|50[0-4])\b"
+)
+
+
 def _is_retryable(err: BaseException) -> bool:
     if isinstance(err, APIStatusError):
         return err.status_code in _RETRYABLE_STATUS_CODES
     if isinstance(err, (APIConnectionError, APITimeoutError)):
         return True
     if isinstance(err, Exception):
+        status = getattr(err, "status_code", None)
+        if isinstance(status, int) and not isinstance(status, bool):
+            return status in _RETRYABLE_STATUS_CODES
         msg = str(err).lower()
-        return any(
+        if any(
             tok in msg
             for tok in (
                 "econnreset", "network", "timeout", "stream stalled",
                 "rate limit", "too many requests", "service unavailable",
-                "429", "500", "502", "503", "504",
             )
-        )
+        ):
+            return True
+        return _STATUS_IN_TEXT_RE.search(msg) is not None
     return False
 
 
@@ -628,6 +703,52 @@ def _usage_detail_int(details: Any, *names: str) -> int:
     return 0
 
 
+def _openai_reasoning_tokens(usage: Any) -> int:
+    """Reasoning tokens from ``completion_tokens_details`` (OpenAI) or the
+    top-level ``usage.reasoning_tokens`` that SGLang / vLLM-style servers report."""
+    if not usage:
+        return 0
+    if isinstance(usage, dict):
+        details = usage.get("completion_tokens_details") or usage.get(
+            "output_tokens_details"
+        )
+        top = usage.get("reasoning_tokens")
+    else:
+        details = getattr(usage, "completion_tokens_details", None) or getattr(
+            usage, "output_tokens_details", None
+        )
+        top = getattr(usage, "reasoning_tokens", None)
+    value = _usage_detail_int(details, "reasoning_tokens")
+    if not value:
+        try:
+            value = int(top or 0)
+        except (TypeError, ValueError):
+            value = 0
+    return max(0, value)
+
+
+def _openai_reasoning_text(obj: Any) -> str:
+    """Separate reasoning channel of a chat message or streaming delta.
+
+    SGLang / vLLM / DeepSeek-style servers put chain-of-thought in
+    ``reasoning_content``; some proxies use ``reasoning``. The openai SDK keeps
+    unknown fields as attributes (``extra="allow"``) and in ``model_extra``.
+    """
+    if obj is None:
+        return ""
+    for attr in ("reasoning_content", "reasoning"):
+        value = obj.get(attr) if isinstance(obj, dict) else getattr(obj, attr, None)
+        if isinstance(value, str) and value:
+            return value
+    extra = getattr(obj, "model_extra", None)
+    if isinstance(extra, dict):
+        for attr in ("reasoning_content", "reasoning"):
+            value = extra.get(attr)
+            if isinstance(value, str) and value:
+                return value
+    return ""
+
+
 def _openai_cache_tokens(usage: Any) -> tuple[int, int]:
     """Return ``(cache_read_tokens, cache_write_tokens)`` from OpenAI usage.
 
@@ -665,21 +786,76 @@ def _openai_cached_tokens(usage: Any) -> int:
     return _openai_cache_tokens(usage)[0]
 
 
+def _tool_args_text(value: Any) -> str:
+    """Tool-call ``arguments`` as JSON text.
+
+    OpenAI sends a JSON string; some OpenAI-compatible servers (llama.cpp,
+    older vLLM, proxies) send an already-parsed object. Concatenating a dict
+    onto the streaming accumulator used to raise and be swallowed, so the tool
+    ran with ``{}``.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        try:
+            return json.dumps(value)
+        except (TypeError, ValueError):
+            return "{}"
+    return str(value)
+
+
+def _args_json_clean(text: str) -> bool:
+    try:
+        return isinstance(json.loads(text or "{}"), dict)
+    except (TypeError, ValueError):
+        return False
+
+
+def _coerce_args_dict(value: Any) -> dict[str, Any]:
+    """``_repair_json`` may salvage a list/scalar; tools only take a mapping."""
+    return value if isinstance(value, dict) else {}
+
+
+def _synth_tool_call_id(name: str, position: int) -> str:
+    """Servers that omit ``id`` still need a stable pair id for the next request;
+    an empty id makes the tool result orphaned on replay."""
+    return f"call_{position}_{hashlib.sha1(f'{name}:{position}'.encode()).hexdigest()[:8]}"
+
+
 def _parse_openai_tool_calls(
     tool_calls: Any,
+    *,
+    finish_reason: str | None = None,
 ) -> list[NativeToolCall] | None:
-    """Extract NativeToolCall list from OpenAI response tool_calls (handles function vs custom union)."""
+    """Extract NativeToolCall list from OpenAI response tool_calls (handles function vs custom union).
+
+    With ``finish_reason="length"`` a call whose arguments were cut mid-JSON is
+    dropped instead of executed on repaired-but-wrong arguments; the loop's
+    output-limit recovery then asks the model to continue.
+    """
     if not tool_calls:
         return None
     result: list[NativeToolCall] = []
-    for tc in tool_calls:
-        if getattr(tc, "type", None) == "function":
-            fn = tc.function
-            result.append(NativeToolCall(
-                tool_name=fn.name,
-                args=_repair_json(fn.arguments or "{}"),
-                tool_call_id=getattr(tc, "id", "") or "",
-            ))
+    for position, tc in enumerate(tool_calls):
+        fn = getattr(tc, "function", None)
+        tc_type = getattr(tc, "type", None)
+        if fn is None or (tc_type and tc_type != "function"):
+            continue
+        name = getattr(fn, "name", "") or ""
+        if not name:
+            continue
+        raw_args = _tool_args_text(getattr(fn, "arguments", None)) or "{}"
+        if finish_reason == "length" and not _args_json_clean(raw_args):
+            logger.warning(
+                "  [openai] tool call %s truncated by max_tokens — dropping it for recovery",
+                name,
+            )
+            continue
+        result.append(NativeToolCall(
+            tool_name=name,
+            args=_coerce_args_dict(_repair_json(raw_args)),
+            tool_call_id=getattr(tc, "id", "") or _synth_tool_call_id(name, position),
+        ))
     return result if result else None
 
 
@@ -1344,7 +1520,13 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
         if base_url and "api.openai.com" not in base_url.lower() and not ssl_verify:
             try:
                 import httpx
-                self._http_client = httpx.AsyncClient(verify=False, timeout=120.0)
+                # Match the SDK's default read budget: a non-streaming
+                # reasoning turn on a self-hosted 30B model can exceed 120s
+                # and each ReadTimeout re-ran the whole generation.
+                self._http_client = httpx.AsyncClient(
+                    verify=False,
+                    timeout=httpx.Timeout(600.0, connect=10.0),
+                )
             except ImportError:
                 self._http_client = None
 
@@ -1538,6 +1720,7 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
         resp = await self.client.chat.completions.create(**create_kwargs)
         _prompt_tokens = (resp.usage.prompt_tokens or 0) if resp.usage else 0
         _cached_tokens, _cache_write_tokens = _openai_cache_tokens(resp.usage)
+        _reasoning_tokens = _openai_reasoning_tokens(resp.usage)
         if not resp.choices:
             # Azure content filters and some OpenAI-compatible proxies return
             # 200 with an empty ``choices`` array; don't IndexError on it.
@@ -1546,9 +1729,15 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
                                prompt_tokens=_prompt_tokens,
                                cache_read_tokens=_cached_tokens,
                                cache_creation_tokens=_cache_write_tokens,
+                               reasoning_tokens=_reasoning_tokens,
                                partial=True)
-        msg = resp.choices[0].message
-        native_calls = _parse_openai_tool_calls(getattr(msg, "tool_calls", None))
+        choice = resp.choices[0]
+        msg = choice.message
+        _finish = getattr(choice, "finish_reason", None)
+        native_calls = _parse_openai_tool_calls(
+            getattr(msg, "tool_calls", None),
+            finish_reason=str(_finish) if _finish else None,
+        )
         return LLMResponse(
             content=msg.content or "",
             model=self.model,
@@ -1557,6 +1746,9 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
             cache_read_tokens=_cached_tokens,
             cache_creation_tokens=_cache_write_tokens,
             tool_calls=native_calls,
+            thinking=_openai_reasoning_text(msg) or None,
+            finish_reason=str(_finish) if _finish else None,
+            reasoning_tokens=_reasoning_tokens,
         )
 
     def _responses_kwargs(
@@ -1916,24 +2108,64 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
                 raise
 
             chunks: list[str] = []
+            thinking_chunks: list[str] = []
+            finish_reason: str | None = None
             final_tokens = 0
             final_prompt_tokens = 0
             final_cached_tokens = 0
             final_cache_write_tokens = 0
+            final_reasoning_tokens = 0
             tools_accumulation: dict[int, dict[str, Any]] = {}
+
+            think_filter = _ThinkStreamFilter()
+            stream: Any = None
 
             def _accumulated_calls() -> list[NativeToolCall] | None:
                 if not tools_accumulation:
                     return None
                 calls: list[NativeToolCall] = []
-                for _idx in sorted(tools_accumulation.keys()):
+                for position, _idx in enumerate(sorted(tools_accumulation.keys(), key=str)):
                     _fn = tools_accumulation[_idx]
+                    name = _fn.get("name") or ""
+                    if not name:
+                        continue
+                    raw_args = _fn.get("arguments") or "{}"
+                    if finish_reason == "length" and not _args_json_clean(raw_args):
+                        logger.warning(
+                            "  [openai] streamed tool call %s truncated by max_tokens — "
+                            "dropping it for recovery",
+                            name,
+                        )
+                        continue
                     calls.append(NativeToolCall(
-                        tool_name=_fn["name"],
-                        args=_repair_json(_fn["arguments"] or "{}"),
-                        tool_call_id=_fn.get("id", ""),
+                        tool_name=name,
+                        args=_coerce_args_dict(_repair_json(raw_args)),
+                        tool_call_id=_fn.get("id") or _synth_tool_call_id(name, position),
                     ))
-                return calls
+                return calls or None
+
+            def _finalize_text() -> None:
+                # Drain any held-back partial tag; an unclosed <think> is thinking.
+                visible, reasoning = think_filter.flush()
+                if visible:
+                    chunks.append(visible)
+                if reasoning:
+                    thinking_chunks.append(reasoning)
+
+            def _thinking_text() -> str | None:
+                return "".join(thinking_chunks) or None
+
+            async def _close_stream() -> None:
+                # Abandoning an SGLang/llama.cpp stream without closing leaves
+                # the server generating for a request nobody reads.
+                close = getattr(stream, "close", None)
+                if callable(close):
+                    try:
+                        maybe = close()
+                        if asyncio.iscoroutine(maybe):
+                            await maybe
+                    except Exception:
+                        pass
 
             try:
                 kwargs: dict[str, Any] = {
@@ -1967,7 +2199,8 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
 
                 async for chunk in _stall_guarded_stream(stream, _CHUNK_STALL_S):
                     if cancel_event and cancel_event.is_set():
-                        await stream.close()
+                        await _close_stream()
+                        _finalize_text()
                         return LLMResponse(
                             content="".join(chunks),
                             model=self.model,
@@ -1977,25 +2210,52 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
                             cache_creation_tokens=final_cache_write_tokens,
                             partial=True,
                             tool_calls=_accumulated_calls(),
+                            thinking=_thinking_text(),
+                            finish_reason=finish_reason,
+                            reasoning_tokens=final_reasoning_tokens,
                         )
 
                     try:
+                        if chunk.choices:
+                            _fr = getattr(chunk.choices[0], "finish_reason", None)
+                            if _fr:
+                                finish_reason = str(_fr)
                         if chunk.choices and chunk.choices[0].delta:
                             delta = chunk.choices[0].delta
-                            if delta.content:
-                                text = delta.content
+                            # Reasoning models stream chain-of-thought on a
+                            # separate channel; it is the first real token
+                            # (TTFT) but never part of the visible answer.
+                            reasoning_delta = _openai_reasoning_text(delta)
+                            if reasoning_delta:
                                 if not first_token_fired:
                                     first_token_fired = True
                                     _fire_first_token(on_first_token)
-                                chunks.append(text)
-                                await _invoke_callback(on_chunk, text)
-                            
+                                thinking_chunks.append(reasoning_delta)
+                            if delta.content:
+                                if not first_token_fired:
+                                    first_token_fired = True
+                                    _fire_first_token(on_first_token)
+                                # Inline <think> (Qwen/DeepSeek-style) is kept
+                                # out of the visible stream, like the final
+                                # content after strip_thinking_tokens.
+                                text, inline_think = think_filter.feed(delta.content)
+                                if inline_think:
+                                    thinking_chunks.append(inline_think)
+                                if text:
+                                    chunks.append(text)
+                                    await _invoke_callback(on_chunk, text)
+
                             if getattr(delta, "tool_calls", None):
                                 if not first_token_fired:
                                     first_token_fired = True
                                     _fire_first_token(on_first_token)
                                 for tc in delta.tool_calls:
-                                    idx = tc.index
+                                    idx = getattr(tc, "index", None)
+                                    if idx is None:
+                                        # Servers that omit ``index`` still send
+                                        # ``id`` on the first delta; without a
+                                        # key every call collapsed into one.
+                                        idx = getattr(tc, "id", None) or len(tools_accumulation)
                                     if idx not in tools_accumulation:
                                         tools_accumulation[idx] = {"id": "", "name": "", "arguments": ""}
                                     if getattr(tc, "id", None):
@@ -2003,8 +2263,9 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
                                     if getattr(tc, "function", None):
                                         if tc.function.name:
                                             tools_accumulation[idx]["name"] += tc.function.name
-                                        if tc.function.arguments:
-                                            tools_accumulation[idx]["arguments"] += tc.function.arguments
+                                        _arg_delta = _tool_args_text(tc.function.arguments)
+                                        if _arg_delta:
+                                            tools_accumulation[idx]["arguments"] += _arg_delta
 
                         if chunk.usage:
                             final_tokens = chunk.usage.total_tokens
@@ -2012,10 +2273,12 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
                             final_cached_tokens, final_cache_write_tokens = (
                                 _openai_cache_tokens(chunk.usage)
                             )
+                            final_reasoning_tokens = _openai_reasoning_tokens(chunk.usage)
                     except Exception:
                         pass  # malformed chunk — skip
 
                 _record_stream_breaker(breaker, success=True)
+                _finalize_text()
                 return LLMResponse(
                     content="".join(chunks),
                     model=self.model,
@@ -2024,10 +2287,14 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
                     cache_read_tokens=final_cached_tokens,
                     cache_creation_tokens=final_cache_write_tokens,
                     tool_calls=_accumulated_calls(),
+                    thinking=_thinking_text(),
+                    finish_reason=finish_reason,
+                    reasoning_tokens=final_reasoning_tokens,
                 )
 
             except Exception as exc:
                 last_error = exc
+                await _close_stream()
                 if _is_retryable(exc):
                     _record_stream_breaker(breaker, success=False)
                 # A mid-stream exception used to return the truncated text as a
@@ -2042,6 +2309,7 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
                     attempt += 1
                     continue
                 if chunks or tools_accumulation:
+                    _finalize_text()
                     partial = "".join(chunks)
                     logger.warning(
                         "  [openai] Stream interrupted after %d chars — returning partial",
@@ -2056,6 +2324,9 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
                         cache_creation_tokens=final_cache_write_tokens,
                         partial=True,
                         tool_calls=_accumulated_calls(),
+                        thinking=_thinking_text(),
+                        finish_reason=finish_reason,
+                        reasoning_tokens=final_reasoning_tokens,
                     )
                 break
 

@@ -8,10 +8,50 @@ surface. They never replace explicit arguments: caller-provided ``model``,
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
+_WARNED_UNTRUSTED: set[str] = set()
+
+
+def workspace_profile_files_trusted() -> bool:
+    """Workspace-level ``.clawagents/*profiles.json`` are opt-in.
+
+    They are repo content: a clone can redirect a builtin profile's ``base_url``
+    so the user's env API key is sent elsewhere, or replace the harness system
+    prompt. Same posture as ``.clawagents/hooks.json`` (``external_hooks``).
+    """
+    from clawagents.config.features import is_enabled
+
+    return is_enabled("workspace_profiles")
+
+
+def skip_untrusted_workspace_file(path: Path, *, home: Path | None = None) -> bool:
+    """True when *path* is a workspace-level profile file the user has not opted into."""
+    try:
+        home_dir = (home or Path.home()).resolve()
+        target = path.resolve()
+    except OSError:
+        return False
+    if target == (home_dir / ".clawagents" / path.name):
+        return False
+    if workspace_profile_files_trusted():
+        return False
+    if not path.exists():
+        return True
+    key = str(target)
+    if key not in _WARNED_UNTRUSTED:
+        _WARNED_UNTRUSTED.add(key)
+        logger.warning(
+            "ignoring workspace profile file %s — set CLAW_FEATURE_WORKSPACE_PROFILES=1 "
+            "to trust profile files committed in this repository",
+            path,
+        )
+    return True
 
 
 @dataclass(frozen=True)
@@ -91,7 +131,12 @@ def load_provider_profiles(paths: list[Path] | None = None) -> dict[str, Provide
         os.getenv("glimmer_30B_backend") or os.getenv("GLIMMER_30B_BACKEND") or meta.base_url,
         os.getenv("META_API_KEY") or meta.api_key,
     )
+    explicit_paths = paths is not None
     for path in paths or _profile_paths():
+        # Caller-supplied paths (tests, embedders) are trusted; discovered
+        # workspace files need the opt-in.
+        if not explicit_paths and skip_untrusted_workspace_file(path):
+            continue
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except FileNotFoundError:

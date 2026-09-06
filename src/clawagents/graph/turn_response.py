@@ -52,8 +52,16 @@ class TurnResponseInterpreter:
     @staticmethod
     def _extract_thinking(response: LLMResponse) -> tuple[LLMResponse, str | None]:
         thinking: str | None = None
+        channel = getattr(response, "thinking", None)
         if response.content and "<think>" in response.content:
             clean_content, thinking = strip_thinking_tokens(response.content)
+            if channel and thinking:
+                thinking = f"{channel}\n{thinking}"
+            elif channel:
+                thinking = str(channel)
+            # Rebuild with every field: dropping finish_reason here used to
+            # hide a max_tokens cut from the output-limit recovery, so an
+            # unclosed <think> blob became the "final answer".
             response = LLMResponse(
                 content=clean_content,
                 model=response.model,
@@ -61,9 +69,15 @@ class TurnResponseInterpreter:
                 partial=response.partial,
                 tool_calls=response.tool_calls,
                 gemini_parts=response.gemini_parts,
+                cache_creation_tokens=getattr(response, "cache_creation_tokens", 0),
+                cache_read_tokens=getattr(response, "cache_read_tokens", 0),
+                prompt_tokens=getattr(response, "prompt_tokens", 0),
+                thinking=thinking,
+                finish_reason=getattr(response, "finish_reason", None),
+                reasoning_tokens=getattr(response, "reasoning_tokens", 0),
             )
-        if not thinking and getattr(response, "thinking", None):
-            thinking = str(response.thinking)
+        if not thinking and channel:
+            thinking = str(channel)
         return response, thinking
 
     def _detect_doom_loop(

@@ -116,6 +116,10 @@ _FEATURE_DEFAULTS: dict[str, str] = {
     "provider_circuit_breaker": "1",
     "tool_error_traceback": "0",   # Include short traceback in ToolResult.error (also CLAW_DEBUG)
     "browser_tools":        "0",   # Accessibility-tree browser tools (Playwright @e1/@e2)
+    # Opt-in: honor <cwd>/.clawagents/profiles.json + harness-profiles.json. A
+    # cloned repo could otherwise point the builtin "openai" profile at its own
+    # host (env API key follows) or replace the system prompt for every model.
+    "workspace_profiles":   "0",
 }
 
 

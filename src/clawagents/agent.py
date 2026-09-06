@@ -910,6 +910,27 @@ def create_claw_agent(
             api_key = api_key or "not-needed"
             if wire_api is None:
                 wire_api = "chat_completions"
+            # A custom served name (glimmer_30B_model=…, GEMMA_AGENTIC_MODEL=…)
+            # must keep the model-specific harness, context profile and tool
+            # surface; those resolvers key on the model string.
+            from clawagents.graph.model_profiles import register_model_profile_alias
+            from clawagents.harness_profiles import register_harness_alias
+            from clawagents.providers import glimmer as _glimmer
+
+            if isinstance(model, str) and model.strip():
+                if profile == "meta":
+                    register_harness_alias(model, _glimmer.HARNESS_PROFILE)
+                    register_model_profile_alias(model, _glimmer.CANONICAL_PROFILE_KEY)
+                else:
+                    register_harness_alias(model, "gemma-agentic")
+                    register_model_profile_alias(model, "gemma4-agentic-v2")
+            if profile == "meta":
+                if max_tokens is None:
+                    max_tokens = _glimmer.MAX_OUTPUT_TOKENS
+                # Pin the window like gemma does; the 1M config default would
+                # otherwise budget 750K tokens against a 196K server.
+                if context_window is None or context_window > _glimmer.CONTEXT_WINDOW:
+                    context_window = _glimmer.CONTEXT_WINDOW
         # Declared profile provider drives routing/key fields (not re-inferred
         # solely from the model string — aliases like internal-claude-* need this).
         provider_hint = (resolved_profile.provider or "").strip() or None
@@ -1291,8 +1312,8 @@ def create_claw_agent(
             resolved_instruction = apply_harness_profile_to_prompt(
                 resolved_instruction or "", _harness
             )
-    except Exception:
-        pass
+    except Exception as _harness_exc:
+        logger.warning("harness profile prompt skipped: %s", _harness_exc, exc_info=True)
 
     agent = ClawAgent(
         llm=llm, tools=registry, system_prompt=resolved_instruction,
@@ -1466,7 +1487,10 @@ def create_claw_agent(
 
     if profile == "gemma-agentic":
         # Keep the tuning attached to this model only, including custom aliases.
-        setattr(llm, "_gemma_agentic_model", getattr(llm, "model", ""))
+        # The request builders read the attribute on the inner OpenAIProvider,
+        # so unwrap a FallbackProvider (CLAWAGENTS_FALLBACK_MODELS) first.
+        _tuned = getattr(llm, "primary", None) or llm
+        setattr(_tuned, "_gemma_agentic_model", getattr(_tuned, "model", ""))
         from clawagents.tools.tool_groups import apply_coordination_active_profile
         apply_coordination_active_profile(registry, chat_mode=chat_mode)
 
@@ -1493,8 +1517,10 @@ def create_claw_agent(
                 chat_mode=str(chat_mode or "").strip().lower() or None,
                 goal_mode=bool(goal_mode),
             )
-    except Exception:
-        pass
+    except Exception as _surface_exc:
+        logger.warning(
+            "harness tool-surface profile skipped: %s", _surface_exc, exc_info=True
+        )
 
     return agent
 

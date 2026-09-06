@@ -22,7 +22,17 @@ logger = logging.getLogger(__name__)
 _MAX_GEMINI_ANSWER_NUDGES = 2
 _MAX_GEMINI_EVIDENCE_NUDGES = 2
 
-_HARNESS_USER_MARKERS = (GEMINI_SUMMARIZE_MARKER, GEMINI_EVIDENCE_MARKER)
+# Output-limit recovery. Reasoning models (Muse-Glimmer on SGLang, Gemma with
+# thinking enabled, DeepSeek, …) can spend the whole ``max_tokens`` budget on
+# chain-of-thought and stop with finish_reason="length", empty content and no
+# tool call. Treating that as "the answer" ends the run mid-task; routing it
+# into the Gemini "write the answer now" nudge tells the model to stop working.
+# Instead, ask it to continue, briefly, and count the attempts.
+TRUNCATION_MARKER = "[System] Output limit reached"
+_MAX_TRUNCATION_NUDGES = 2
+_TRUNCATION_PLACEHOLDER = "[output truncated at the token limit]"
+
+_HARNESS_USER_MARKERS = (GEMINI_SUMMARIZE_MARKER, GEMINI_EVIDENCE_MARKER, TRUNCATION_MARKER)
 
 _MD_TABLE_HEADER_RE = re.compile(r"(?m)^\s*\|.+\|\s*$\n^\s*\|[-:| ]+\|")
 _MD_TABLE_SEP_RE = re.compile(r"^\|[-:| ]+\|$")
@@ -249,6 +259,53 @@ def _gemini_nudge_count(messages: list[LLMMessage]) -> int:
     )
 
 
+def _truncation_nudge_count(messages: list[LLMMessage]) -> int:
+    return sum(
+        1
+        for msg in messages
+        if msg.role == "user"
+        and isinstance(msg.content, str)
+        and msg.content.startswith(TRUNCATION_MARKER)
+    )
+
+
+def response_hit_output_limit(response: Any) -> bool:
+    """True when the turn was cut short with no tool call to act on.
+
+    Either the provider stopped for ``max_tokens`` (``finish_reason="length"``)
+    or the stream was interrupted after retries (``partial`` with content —
+    the empty-content case is handled as a cancellation by the turn driver).
+    """
+    if getattr(response, "tool_calls", None):
+        return False
+    if str(getattr(response, "finish_reason", "") or "").lower() == "length":
+        return True
+    return bool(getattr(response, "partial", False)) and bool(
+        (getattr(response, "content", "") or "").strip()
+    )
+
+
+_MAX_TOKENS_BUMP_CAP = 65_536
+
+
+def _grow_output_budget(llm: Any) -> int | None:
+    """Give a nudged retry more room (×1.5, capped) so the same think does not
+    hit the same wall; explicit provider state only, mirrors the doom-loop
+    temperature bump in turn_response."""
+    target = getattr(llm, "primary", None) or llm  # FallbackProvider wrapper
+    current = getattr(target, "_max_tokens", None)
+    if not isinstance(current, int) or isinstance(current, bool) or current <= 0:
+        return None
+    grown = min(_MAX_TOKENS_BUMP_CAP, int(current * 1.5))
+    if grown <= current:
+        return None
+    try:
+        setattr(target, "_max_tokens", grown)
+    except Exception:
+        return None
+    return grown
+
+
 def _gemini_evidence_nudge_count(messages: list[LLMMessage]) -> int:
     return sum(
         1
@@ -323,6 +380,54 @@ class CompletionHandler:
                 ]
             )
             return CompletionDecision("continue")
+
+        if response_hit_output_limit(response):
+            nudges = _truncation_nudge_count(messages)
+            if nudges < _MAX_TRUNCATION_NUDGES:
+                grown = _grow_output_budget(self._llm)
+                self._events.emit(
+                    "warn",
+                    {
+                        "message": (
+                            "output limit reached before a tool call or answer — "
+                            f"asking the model to continue ({nudges + 1}/{_MAX_TRUNCATION_NUDGES})"
+                            + (f", max_tokens → {grown}" if grown else "")
+                        )
+                    },
+                )
+                # Keep a non-empty assistant turn so strict alternating chat
+                # templates (Gemma/llama.cpp) still accept the transcript. The
+                # truncated text itself is not replayed: it is a partial
+                # thought, and re-sending 2-6K tokens of it twice only grows
+                # the context.
+                messages.extend(
+                    [
+                        LLMMessage(
+                            role="assistant",
+                            content=_TRUNCATION_PLACEHOLDER,
+                            thinking=thinking,
+                        ),
+                        LLMMessage(
+                            role="user",
+                            content=(
+                                f"{TRUNCATION_MARKER} before you produced a tool call or a "
+                                "final answer, so that turn was discarded. Continue the task "
+                                "now: keep any reasoning to a few sentences, then emit the "
+                                "next tool call or the final answer in this response."
+                            ),
+                        ),
+                    ]
+                )
+                return CompletionDecision("continue")
+            self._events.emit(
+                "warn",
+                {
+                    "message": (
+                        "output limit reached repeatedly — treating the partial "
+                        "text as the final answer"
+                    )
+                },
+            )
 
         ungrounded = None
         if use_native_tools:

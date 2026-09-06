@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -34,16 +35,28 @@ BUILTIN_HARNESS_PROFILES: dict[str, HarnessProfile] = {
         clear_tool_trigger_ratio=0.60,
         loop_detection_overrides={"warning_threshold": 2, "critical_threshold": 3},
     ),
+    # Muse-Glimmer-30B (SGLang). Reasoning is always on and not cappable
+    # server-side, so the prompt pushes for short deliberation and the loop
+    # recovers output-limit turns; the model also tends to retry a failing
+    # shell approach with cosmetic changes, which the repeated-failure
+    # escalation in the tool results addresses (see graph/loop_tracker.py).
     "meta-glimmer": HarnessProfile(
         name="meta-glimmer",
         match_models=("muse-glimmer-30b",),
         system_prompt_suffix=(
             "Tool efficiency:\n"
+            "- Keep private reasoning short: decide in a few sentences, then act. "
+            "Long deliberation hits the output limit and the turn is lost.\n"
             "- Read the exact paths named by the user before searching elsewhere.\n"
             "- Use native tool calls with the declared JSON arguments; never print tool-call markup.\n"
+            "- Read, write and edit workspace files with read_file / write_file / "
+            "edit_file, not with cat, echo or heredocs through execute. Use execute "
+            "to run tests and commands from the workspace root with relative paths.\n"
             "- Reuse prior tool results instead of repeating identical calls.\n"
+            "- If a tool fails, read the error and change approach. Never repeat a "
+            "failing call unchanged, and never set unsandboxed=true.\n"
             "- Optional tools stay hidden until you call activate_tool_group.\n"
-            "- After editing, run the relevant check, then report the result concisely.\n"
+            "- After editing, run the relevant check once, then fix the failure or report the result concisely.\n"
             "- Stop when the requested result is verified."
         ),
         compaction_headroom_ratio=0.70,
@@ -116,13 +129,30 @@ BUILTIN_HARNESS_PROFILES: dict[str, HarnessProfile] = {
     ),
     "local-ollama": HarnessProfile(
         name="local-ollama",
-        match_models=("llama", "gemma", "mistral", "qwen", "deepseek"),
+        # Token-anchored matching: "codellama" no longer hits via the "llama"
+        # substring, so list it explicitly. Cloud-qualified ids (vendor.model,
+        # geo prefixes) are excluded from this profile in resolve_harness_profile.
+        match_models=("llama", "codellama", "gemma", "mistral", "qwen", "deepseek"),
         system_prompt_suffix="Keep responses short. One tool at a time when uncertain.",
         compaction_headroom_ratio=0.65,
         clear_tool_keep=2,
         clear_tool_trigger_ratio=0.35,
     ),
 }
+
+
+# Served-name aliases → harness profile name. Registered by create_claw_agent
+# for named provider profiles (``meta`` / ``gemma-agentic``) so a custom
+# deployment alias keeps its model-specific harness; every resolver in the loop
+# (bootstrapper thresholds, micro-compact knobs, compaction headroom) goes
+# through resolve_harness_profile, so one registration covers them all.
+_MODEL_ALIASES: dict[str, str] = {}
+
+
+def register_harness_alias(model: str, profile_name: str) -> None:
+    key = str(model or "").strip().lower()
+    if key and profile_name:
+        _MODEL_ALIASES[key] = profile_name
 
 
 def _profile_paths() -> list[Path]:
@@ -132,30 +162,103 @@ def _profile_paths() -> list[Path]:
     ]
 
 
+def _opt_int(value: Any, *, minimum: int = 1) -> int | None:
+    """Positive int or None; strings such as ``"3"`` are accepted, junk is dropped."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        out = int(value)
+    except (TypeError, ValueError):
+        return None
+    return out if out >= minimum else None
+
+
+def _opt_ratio(value: Any) -> float | None:
+    """Ratio in (0, 1]; anything else is dropped so downstream math stays sane."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if out != out or out <= 0.0 or out > 1.0:  # NaN / non-positive / >100%
+        return None
+    return out
+
+
+def _str_tuple(value: Any) -> tuple[str, ...]:
+    if isinstance(value, str):
+        return (value,) if value.strip() else ()
+    if isinstance(value, (list, tuple)):
+        return tuple(str(v) for v in value if isinstance(v, (str, int, float)) and str(v).strip())
+    return ()
+
+
+def _harness_from_spec(name: str, spec: dict[str, Any]) -> HarnessProfile:
+    overrides_raw = spec.get("loop_detection_overrides")
+    overrides: dict[str, Any] = {}
+    if isinstance(overrides_raw, dict):
+        for key in ("warning_threshold", "critical_threshold"):
+            coerced = _opt_int(overrides_raw.get(key))
+            if coerced is not None:
+                overrides[key] = coerced
+    metadata = spec.get("metadata")
+    return HarnessProfile(
+        name=name,
+        match_models=_str_tuple(spec.get("match_models", [])),
+        base_system_prompt=str(spec.get("base_system_prompt") or ""),
+        system_prompt_suffix=str(spec.get("system_prompt_suffix") or ""),
+        excluded_tools=_str_tuple(spec.get("excluded_tools", [])),
+        compaction_headroom_ratio=_opt_ratio(spec.get("compaction_headroom_ratio")),
+        loop_detection_overrides=overrides,
+        metadata=dict(metadata) if isinstance(metadata, dict) else {},
+        # keep=0 means "clear nothing" downstream (``[-0:]`` keeps everything).
+        clear_tool_keep=_opt_int(spec.get("clear_tool_keep"), minimum=1),
+        clear_tool_trigger_ratio=_opt_ratio(spec.get("clear_tool_trigger_ratio")),
+        clear_tool_exclude=_str_tuple(spec.get("clear_tool_exclude", [])),
+    )
+
+
 def load_harness_profiles() -> dict[str, HarnessProfile]:
+    from clawagents.provider_profiles import skip_untrusted_workspace_file
+
     profiles = dict(BUILTIN_HARNESS_PROFILES)
     for path in _profile_paths():
+        if skip_untrusted_workspace_file(path):
+            continue
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (FileNotFoundError, OSError, json.JSONDecodeError):
             continue
+        if not isinstance(raw, dict):
+            continue
         for name, spec in raw.items():
-            if not isinstance(spec, dict):
+            if not isinstance(name, str) or not isinstance(spec, dict):
                 continue
-            profiles[name] = HarnessProfile(
-                name=name,
-                match_models=tuple(spec.get("match_models", [])),
-                base_system_prompt=str(spec.get("base_system_prompt", "")),
-                system_prompt_suffix=str(spec.get("system_prompt_suffix", "")),
-                excluded_tools=tuple(spec.get("excluded_tools", [])),
-                compaction_headroom_ratio=spec.get("compaction_headroom_ratio"),
-                loop_detection_overrides=dict(spec.get("loop_detection_overrides", {})),
-                metadata=dict(spec.get("metadata", {})),
-                clear_tool_keep=spec.get("clear_tool_keep"),
-                clear_tool_trigger_ratio=spec.get("clear_tool_trigger_ratio"),
-                clear_tool_exclude=tuple(spec.get("clear_tool_exclude", [])),
-            )
+            profiles[name] = _harness_from_spec(name, spec)
     return profiles
+
+
+# "vendor.model" (Bedrock / Mantle: ``deepseek.v3.2``, ``meta.llama3-70b``,
+# ``mistral.mistral-large``) or "provider/model" ids are cloud deployments —
+# never local Ollama tags like ``llama3.1`` or ``gemma4:e4b``.
+_CLOUD_QUALIFIED_RE = re.compile(r"^[a-z][a-z0-9_-]*\.(?=[a-z])|/")
+_GEO_PREFIX_RE = re.compile(r"^(global|us|eu|apac|ap|af|me|ca|sa)\.")
+
+
+def _looks_cloud_qualified(model_lower: str) -> bool:
+    return bool(_GEO_PREFIX_RE.match(model_lower) or _CLOUD_QUALIFIED_RE.search(model_lower))
+
+
+def _pattern_matches(pattern: str, model_lower: str, normalized: str) -> bool:
+    """Anchored start or token-boundary hit — ``"codex"`` matches ``gpt-5.3-codex``
+    and ``openai.gpt-5.6`` but ``"llama"`` no longer matches ``codellama``."""
+    p = pattern.strip().lower()
+    if not p:
+        return False
+    if normalized.startswith(p) or model_lower.startswith(p):
+        return True
+    return re.search(r"(?:^|[-_/:.\s])" + re.escape(p), model_lower) is not None
 
 
 def resolve_harness_profile(model: str | None, explicit: str | None = None) -> HarnessProfile | None:
@@ -164,10 +267,24 @@ def resolve_harness_profile(model: str | None, explicit: str | None = None) -> H
         return profiles[explicit]
     if not model:
         return None
-    model_lower = model.lower()
-    for profile in profiles.values():
-        for prefix in profile.match_models:
-            if model_lower.startswith(prefix.lower()) or prefix.lower() in model_lower:
+    model_lower = model.strip().lower()
+    alias = _MODEL_ALIASES.get(model_lower)
+    if alias and alias in profiles:
+        return profiles[alias]
+    from clawagents.graph.model_profiles import normalize_model_id
+
+    normalized = normalize_model_id(model_lower)
+    cloud = _looks_cloud_qualified(model_lower)
+    # User-defined profiles first so a narrower custom entry can beat a
+    # builtin whose pattern is a substring of the same id.
+    ordered = [p for n, p in profiles.items() if n not in BUILTIN_HARNESS_PROFILES] + [
+        p for n, p in profiles.items() if n in BUILTIN_HARNESS_PROFILES
+    ]
+    for profile in ordered:
+        if profile.name == "local-ollama" and cloud:
+            continue
+        for pattern in profile.match_models:
+            if _pattern_matches(pattern, model_lower, normalized):
                 return profile
     return None
 
