@@ -87,6 +87,37 @@ async def test_worker_deadline_returns_incomplete():
     assert 'deadline' in result.error
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_timeout", [False, True])
+async def test_worker_deadline_handles_distinct_asyncio_timeout(monkeypatch, legacy_timeout):
+    import asyncio
+    from clawagents.tools import subagent
+
+    # Python 3.10's asyncio.TimeoutError is not the builtin TimeoutError.
+    class LegacyAsyncioTimeoutError(Exception):
+        pass
+
+    timeout_type = LegacyAsyncioTimeoutError if legacy_timeout else TimeoutError
+
+    async def expired_wait_for(awaitable, *, timeout):
+        awaitable.close()
+        raise timeout_type()
+
+    monkeypatch.setattr(
+        subagent,
+        "asyncio",
+        SimpleNamespace(
+            TimeoutError=LegacyAsyncioTimeoutError,
+            wait_for=expired_wait_for,
+            iscoroutine=asyncio.iscoroutine,
+        ),
+    )
+    tool = TaskTool(None, None, [SubAgentSpec('slow', 'Slow worker', timeout_seconds=0.01)])
+    result = await tool.execute({'description': 'work', 'agent': 'slow'})
+    assert not result.success
+    assert result.error == "Sub-agent incomplete: worker deadline exceeded"
+
+
 @pytest.mark.parametrize('timeout',[0,-1,float('inf'),float('nan')])
 def test_worker_timeout_validation(timeout):
     with pytest.raises(ValueError):
