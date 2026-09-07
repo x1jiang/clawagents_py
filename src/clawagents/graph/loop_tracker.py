@@ -8,6 +8,7 @@ Extracted from ``agent_loop.py`` for modularity.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from typing import TYPE_CHECKING
@@ -129,6 +130,15 @@ READ_TOOLS: frozenset[str] = frozenset(
     }
 )
 
+# Planning text is model-authored, not fresh evidence about the workspace.
+_PLANNING_TOOLS = frozenset({"think", "write_todos", "update_todo", "enter_plan_mode", "exit_plan_mode"})
+_OBSERVATION_TOOLS = READ_TOOLS | SHELL_TOOLS | frozenset(
+    {"web_search", "web_fetch", "memory_search"}
+)
+# Delegation and committing can succeed without changing any source files.
+_FILE_MUTATING_TOOLS = MUTATING_TOOLS - {"task", "subagent", "compose", "git_commit"}
+_MAX_PROGRESS_NUDGES = 2
+
 
 class _ToolCallTracker:
     def __init__(
@@ -138,6 +148,7 @@ class _ToolCallTracker:
         hard_limit: int = 6,
         circuit_breaker_limit: int = 30,
         loop_config: "LoopDetectionConfig | None" = None,
+        progress_nudge_after: int = 0,
     ):
         from clawagents.loop_detection import resolve_loop_detection_config
 
@@ -162,6 +173,13 @@ class _ToolCallTracker:
         # churn": dozens of tiny python -c probes after the code is already
         # correct, until the round cap).
         self._probe_streak = 0
+        # Opt-in model policy. Output novelty is only a weak progress signal:
+        # it postpones the checkpoint, but cannot postpone it indefinitely.
+        self._progress_nudge_after = max(0, progress_nudge_after)
+        self._progress_calls = 0
+        self._stale_observations = 0
+        self._progress_outputs: dict[str, None] = {}
+        self._progress_nudges = 0
 
     def _key(self, tool_name: str, args: dict) -> str:
         try:
@@ -179,20 +197,77 @@ class _ToolCallTracker:
 
     def record(self, tool_name: str, args: dict) -> None:
         if tool_name in MUTATING_TOOLS:
-            self.note_mutation()
+            self.note_mutation(confirmed=False)
         self._history.append(self._key(tool_name, args))
         self._history_epochs.append(self._mutation_epoch)
         if len(self._history) > self._window_size:
             self._history.pop(0)
             self._history_epochs.pop(0)
 
-    def note_mutation(self) -> None:
+    def note_mutation(self, *, confirmed: bool = True) -> None:
         """Workspace state changed: cached reads are stale and identical calls
         made before this point no longer count toward a loop."""
         self._mutation_epoch += 1
         self._probe_streak = 0
         self._result_outputs.clear()
         self._read_history.clear()
+        if confirmed:
+            self._reset_progress_window()
+
+    def _reset_progress_window(self) -> None:
+        self._progress_calls = 0
+        self._stale_observations = 0
+        self._progress_outputs.clear()
+
+    def _progress_directive(
+        self, tool_name: str, output: str, *, success: bool, can_emit: bool
+    ) -> str | None:
+        """Advisory only: never suppress a read or assume every task needs edits."""
+        threshold = self._progress_nudge_after
+        if not threshold or not self._loop_config.enabled:
+            return None
+        if success and tool_name in _FILE_MUTATING_TOOLS:
+            self._reset_progress_window()
+            return None
+        if tool_name not in _OBSERVATION_TOOLS | _PLANNING_TOOLS | _FILE_MUTATING_TOOLS:
+            return None
+        self._progress_calls += 1
+        if success and tool_name in _OBSERVATION_TOOLS and output.strip():
+            # Hash the complete result: new evidence may occur after the first
+            # 500 characters used by the legacy duplicate detector. Do not key
+            # by arguments; cosmetic path/query changes are not new evidence.
+            digest = hashlib.sha256(output.encode("utf-8", errors="replace")).hexdigest()
+            if digest not in self._progress_outputs:
+                self._stale_observations = 0
+            else:
+                self._stale_observations += 1
+            self._progress_outputs[digest] = None
+            if len(self._progress_outputs) > self._window_size:
+                self._progress_outputs.pop(next(iter(self._progress_outputs)))
+        else:
+            self._stale_observations += 1
+        if (
+            not can_emit
+            or self._progress_nudges >= _MAX_PROGRESS_NUDGES
+            or self._progress_calls < threshold
+            or (
+                self._stale_observations < max(1, threshold // 2)
+                and self._progress_calls < 2 * threshold
+            )
+        ):
+            return None
+        calls = self._progress_calls
+        self._progress_nudges += 1
+        self._reset_progress_window()
+        return (
+            f"[System] Progress checkpoint after {calls} inspection/planning calls "
+            "without a confirmed file change. Use the evidence collected to take "
+            "the next task-appropriate action. If changes are requested and the "
+            "cause is clear, make the smallest justified edit and verify it. For "
+            "read-only tasks, synthesize findings when sufficient. Otherwise "
+            "identify the specific missing evidence and retrieve it; avoid "
+            "repeating checks whose outcome is already known."
+        )
 
     def note_context_cleared(self) -> None:
         """Compaction / micro-compact removed earlier tool output from the
@@ -269,8 +344,13 @@ class _ToolCallTracker:
                 directive = self.note_failure(tool_name, output)
         if tool_name in SHELL_TOOLS:
             self._probe_streak += 1
-            if directive is None:
+            if directive is None and not self._progress_nudge_after:
                 directive = probe_streak_directive(self._probe_streak)
+        progress_directive = self._progress_directive(
+            tool_name, output, success=success, can_emit=directive is None
+        )
+        if directive is None:
+            directive = progress_directive
         call_hash = hash_tool_call(tool_name, args)
         self._poll_history.append((tool_name, call_hash, result_hash))
         if len(self._poll_history) > self._window_size:

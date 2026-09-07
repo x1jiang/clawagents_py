@@ -76,6 +76,9 @@ CORE_TOOL_NAMES: frozenset[str] = CODING_TOOL_NAMES | frozenset(
 # Optional groups unlocked via activate_tool_group (includes overlapping editors).
 TOOL_GROUPS_EXTRA_CODING: dict[str, frozenset[str]] = {
     "editors_extra": frozenset({"insert_lines", "tool_program", "read_and_grep"}),
+    # Models with a lean initial surface can restore the full coding workflow,
+    # including hashline/patch editors, planning and skill discovery, on demand.
+    "coding_full": CODING_TOOL_NAMES,
 }
 
 TOOL_GROUPS: dict[str, frozenset[str]] = {
@@ -158,10 +161,20 @@ def apply_mode_active_profile(
     *,
     chat_mode: str | None = None,
     goal_mode: bool = False,
+    initial_tools: Any = None,
 ) -> list[str]:
-    """Restrict schemas/execution to a mode profile ∩ registered tools."""
+    """Restrict schemas to the mode, optionally narrowing ordinary coding."""
     registered = {t.name for t in registry.list_registered()}
     wanted = _profile_for_mode(chat_mode, goal_mode=goal_mode)
+    if (
+        wanted is CODING_TOOL_NAMES
+        and isinstance(initial_tools, (list, tuple, set, frozenset))
+        and initial_tools
+        and all(isinstance(name, str) and name.strip() for name in initial_tools)
+    ):
+        # Treat malformed metadata as absent. A model preference must neither
+        # expand mode permissions nor remove read-only/goal coordination tools.
+        wanted = wanted & {name.strip() for name in initial_tools}
     active = set((wanted & registered) | ({"activate_tool_group"} & registered))
     # Context-protection MCP tools are the bounded-output route, not optional
     # feature surface. Keep them visible even under the reduced Luna profile.

@@ -10,7 +10,6 @@ from typing import Any, Literal
 from clawagents.providers.llm import LLMMessage
 
 from .context_management import (
-    _CONTEXT_BUDGET_RATIO,
     _MAX_OVERFLOW_RETRIES,
     _MICRO_COMPACT_KEEP_RECENT,
     _MICRO_COMPACT_MIN_USAGE_RATIO,
@@ -18,9 +17,12 @@ from .context_management import (
     _micro_compact_tool_results,
     _soft_trim_messages,
     _wal_write,
+    _InputBudgetExceeded,
+    _estimate_native_schema_tokens,
+    _resolve_input_budget,
 )
 from .message_repair import _patch_dangling_tool_calls
-from .model_profiles import resolve_context_budget, resolve_long_context_threshold
+from .model_profiles import resolve_long_context_threshold
 from .run_runtime import RunEvents, SessionMessageJournal
 from .turn_llm import TurnLLMCaller
 
@@ -150,7 +152,13 @@ class TurnDriver:
         """Prepare a request and return a response, retry request, or stop."""
         _wal_write(messages)
         self._session_journal.note(messages, durable=True)
-        messages = await self._prepare_messages(messages)
+        try:
+            messages = await self._prepare_messages(messages)
+        except _InputBudgetExceeded as exc:
+            state.status = "error"
+            state.result = str(exc)
+            self._events.emit("error", {"phase": "context_prepare", "message": str(exc)})
+            return TurnCallOutcome("stop", messages)
         self._session_journal.note(messages, durable=False)
 
         try:
@@ -193,12 +201,17 @@ class TurnDriver:
             else self._budget_tokens(messages)
         )
         # Model-aware budget thresholds.
-        context_budget_window, context_budget_ratio = (
-            resolve_context_budget(self._resolved_model_name, self._context_window)
-            if self._resolved_model_name
-            else (self._context_window, _CONTEXT_BUDGET_RATIO)
+        compaction_budget = self._input_budget()
+        output_bound = compaction_budget < _resolve_input_budget(
+            self._context_window, None, self._resolved_model_name
         )
-        compaction_budget = int(context_budget_window * context_budget_ratio)
+        if output_bound:
+            latest_user = next((m for m in reversed(messages) if m.role == "user"), None)
+            if latest_user is not None and self._budget_tokens([latest_user]) > compaction_budget:
+                raise _InputBudgetExceeded(
+                    "Task incomplete: the user input cannot fit alongside the configured output "
+                    "reserve. Reduce input or max_tokens, or use a larger server context window."
+                )
         soft_trim_budget = int(compaction_budget * _SOFT_TRIM_BUDGET_FRACTION)
         # Mirror the economic cap inside ``_soft_trim_messages``: on models with
         # a pricing long-context cliff (e.g. Luna 272K) the trim must fire below
@@ -220,6 +233,7 @@ class TurnDriver:
                 self._events.emit,
                 self._resolved_model_name,
                 current_tokens,
+                input_budget=compaction_budget,
             )
             if trimmed is not messages:
                 messages = trimmed
@@ -232,7 +246,33 @@ class TurnDriver:
         # Compaction / trim can still leave pairs inconsistent — sanitize again.
         messages = _patch_dangling_tool_calls(messages)
         await self._apply_external_pre_llm(messages)
-        return self._apply_before_llm(messages)
+        messages = self._apply_before_llm(messages)
+        if output_bound and self._budget_tokens(messages) > self._input_budget():
+            raise _InputBudgetExceeded(
+                "Task incomplete: context remains above the input budget after compaction "
+                "with output tokens reserved. Reduce input/tools or max_tokens, or use a "
+                "larger server context window."
+            )
+        return messages
+
+    def _schema_tokens(self) -> int:
+        schemas = getattr(self, "_native_schemas", None)
+        builder = getattr(getattr(self, "_caller", None), "_build_schemas", None)
+        if builder is not None:
+            schemas = builder(
+                use_native_tools=self._use_native_tools,
+                tools_supplied=self._tools_supplied,
+                initial_schemas=schemas,
+                handoffs=self._handoffs,
+                run_context=self._run_context,
+            )
+        return int(_estimate_native_schema_tokens(schemas) * self._token_multiplier)
+
+    def _input_budget(self) -> int:
+        return _resolve_input_budget(
+            self._context_window, getattr(self, "_llm", None),
+            self._resolved_model_name, self._schema_tokens(),
+        )
 
     def _note_context_change(self) -> None:
         """Mark the next request as having a legitimately-rewritten prefix.
@@ -308,6 +348,7 @@ class TurnDriver:
             fire_hook=self._fire_hook,
             savings_history=self._compaction_savings,
             taxonomy_dispatcher=self._taxonomy_dispatcher,
+            native_schema_tokens=self._schema_tokens(),
         )
         return result
 
@@ -403,9 +444,18 @@ class TurnDriver:
             state.result = str(error)
             return TurnCallOutcome("stop", messages)
 
-        observed_ratio = self._context_window / max(self._budget_tokens(messages, 1.0), 1)
-        self._token_multiplier = min(observed_ratio * 1.1, 3.0)
-        self._context_window = max(int(self._context_window * 0.5), 16_000)
+        input_budget = self._input_budget()
+        output_bound = input_budget < _resolve_input_budget(
+            self._context_window, None, self._resolved_model_name
+        )
+        observed_ratio = (input_budget if output_bound else self._context_window) / max(self._budget_tokens(messages, 1.0), 1)
+        if output_bound:
+            # Do not halve the physical server window then subtract output a
+            # second time. Tighten the input estimate while retaining its cap.
+            self._token_multiplier = min(max(self._token_multiplier * 1.25, observed_ratio * 1.1), 3.0)
+        else:
+            self._token_multiplier = min(observed_ratio * 1.1, 3.0)
+            self._context_window = max(int(self._context_window * 0.5), 16_000)
         self._events.emit(
             "context",
             {
@@ -422,6 +472,7 @@ class TurnDriver:
             self._token_multiplier,
             self._events.emit,
             self._resolved_model_name,
+            input_budget=self._input_budget(),
         )
         messages = await self._compact(messages)
         self._rebase_ledger(messages)

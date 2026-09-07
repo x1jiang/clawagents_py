@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import logging
+import math
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -15,6 +16,12 @@ from clawagents.providers.llm import (
     GEMINI_SUMMARIZE_MARKER,
     LLMMessage,
     looks_like_gemini_command_dump,
+)
+
+from .round_scheduler import (
+    DEADLINE_MARKER,
+    deadline_reserve_seconds,
+    remaining_run_seconds,
 )
 
 logger = logging.getLogger(__name__)
@@ -32,7 +39,10 @@ TRUNCATION_MARKER = "[System] Output limit reached"
 _MAX_TRUNCATION_NUDGES = 2
 _TRUNCATION_PLACEHOLDER = "[output truncated at the token limit]"
 
-_HARNESS_USER_MARKERS = (GEMINI_SUMMARIZE_MARKER, GEMINI_EVIDENCE_MARKER, TRUNCATION_MARKER)
+_HARNESS_USER_MARKERS = (
+    GEMINI_SUMMARIZE_MARKER, GEMINI_EVIDENCE_MARKER, TRUNCATION_MARKER,
+    DEADLINE_MARKER,
+)
 
 _MD_TABLE_HEADER_RE = re.compile(r"(?m)^\s*\|.+\|\s*$\n^\s*\|[-:| ]+\|")
 _MD_TABLE_SEP_RE = re.compile(r"^\|[-:| ]+\|$")
@@ -348,6 +358,36 @@ class CompletionHandler:
         self._looks_like_truncated_json = looks_like_truncated_json
         self._sanitize_assistant_text = sanitize_assistant_text
         self._goal_llm_complete = goal_llm_complete
+        self._output_budget_restore: tuple[Any, int, int] | None = None
+
+    def restore_output_budget(self) -> None:
+        """Undo only this run's output-cap change; safe in the run's finally."""
+        restore, self._output_budget_restore = self._output_budget_restore, None
+        if restore is None:
+            return
+        target, original, grown = restore
+        try:
+            # Preserve an intervening configuration change by another caller.
+            if getattr(target, "_max_tokens", None) == grown:
+                target._max_tokens = original
+        except Exception:
+            logger.debug("could not restore run output budget", exc_info=True)
+
+    def _grow_output_budget(self) -> int | None:
+        target = getattr(self._llm, "primary", None) or self._llm
+        original = getattr(target, "_max_tokens", None)
+        grown = _grow_output_budget(self._llm)
+        if grown is not None and isinstance(original, int):
+            if self._output_budget_restore is not None:
+                original = self._output_budget_restore[1]
+            self._output_budget_restore = (target, original, grown)
+        return grown
+
+    def _incomplete(self, state: Any, reason: str) -> CompletionDecision:
+        state.status = "error"
+        state.result = f"Task incomplete: {reason}"
+        self._events.emit("warn", {"message": state.result})
+        return CompletionDecision("done")
 
     async def handle(
         self,
@@ -361,7 +401,12 @@ class CompletionHandler:
         should_final_check: bool,
     ) -> CompletionDecision:
         """Handle a response without tool calls."""
+        remaining = remaining_run_seconds(self._run_context)
         if not use_native_tools and self._looks_like_truncated_json(response.content):
+            if remaining is not None and remaining <= 0:
+                return self._incomplete(
+                    state, "run deadline exhausted during a truncated tool call."
+                )
             self._events.emit(
                 "warn", {"message": "truncated JSON tool call detected — asking LLM to retry"}
             )
@@ -382,9 +427,15 @@ class CompletionHandler:
             return CompletionDecision("continue")
 
         if response_hit_output_limit(response):
+            if remaining is not None and remaining <= 0:
+                return self._incomplete(
+                    state, "run deadline exhausted during output-limit recovery."
+                )
             nudges = _truncation_nudge_count(messages)
             if nudges < _MAX_TRUNCATION_NUDGES:
-                grown = _grow_output_budget(self._llm)
+                grown = None
+                if remaining is None or remaining > deadline_reserve_seconds(self._run_context):
+                    grown = self._grow_output_budget()
                 self._events.emit(
                     "warn",
                     {
@@ -414,19 +465,19 @@ class CompletionHandler:
                                 "final answer, so that turn was discarded. Continue the task "
                                 "now: keep any reasoning to a few sentences, then emit the "
                                 "next tool call or the final answer in this response."
+                                + (
+                                    f" About {math.ceil(remaining)} seconds remain in this run; "
+                                    "leave time for verification and clearly report "
+                                    "any incomplete work."
+                                    if remaining is not None else ""
+                                )
                             ),
                         ),
                     ]
                 )
                 return CompletionDecision("continue")
-            self._events.emit(
-                "warn",
-                {
-                    "message": (
-                        "output limit reached repeatedly — treating the partial "
-                        "text as the final answer"
-                    )
-                },
+            return self._incomplete(
+                state, "output limit reached repeatedly; no complete response was produced.",
             )
 
         ungrounded = None

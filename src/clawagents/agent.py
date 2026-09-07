@@ -1,4 +1,5 @@
 import os
+import logging
 import re
 import asyncio
 import difflib
@@ -18,6 +19,9 @@ from clawagents.lifecycle import RunHooks, AgentHooks
 from clawagents.guardrails import InputGuardrail, OutputGuardrail
 from clawagents.stream_events import StreamEvent
 from clawagents.handoffs import Handoff
+
+
+logger = logging.getLogger(__name__)
 
 
 class LangChainToolAdapter:
@@ -1516,6 +1520,7 @@ def create_claw_agent(
                 registry,
                 chat_mode=str(chat_mode or "").strip().lower() or None,
                 goal_mode=bool(goal_mode),
+                initial_tools=_hp.metadata.get("initial_tools"),
             )
     except Exception as _surface_exc:
         logger.warning(
