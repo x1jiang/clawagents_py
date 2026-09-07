@@ -505,7 +505,10 @@ async def _run_agent_graph_core(
         session_end_tail=session_end_tail,
     )
     rs = await RunBootstrapper(config).bootstrap()
-    return await _execute_loop(rs)
+    try:
+        return await _execute_loop(rs)
+    finally:
+        rs.completion_handler.restore_output_budget()
 
 
 async def _execute_loop(rs: Any) -> AgentState:
@@ -658,4 +661,3 @@ async def _execute_loop(rs: Any) -> AgentState:
         state.messages = messages
 
     return await rs.finalizer.finalize(state, messages, elapsed=elapsed)
-

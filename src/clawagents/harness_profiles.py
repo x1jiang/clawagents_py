@@ -35,9 +35,9 @@ BUILTIN_HARNESS_PROFILES: dict[str, HarnessProfile] = {
         clear_tool_trigger_ratio=0.60,
         loop_detection_overrides={"warning_threshold": 2, "critical_threshold": 3},
     ),
-    # Muse-Glimmer-30B (SGLang). Reasoning is always on and not cappable
-    # server-side, so the prompt pushes for short deliberation and the loop
-    # recovers output-limit turns; the model also tends to retry a failing
+    # Muse-Glimmer-30B (SGLang). The provider applies Meta's documented
+    # reasoning-strength directive; the loop recovers output-limit turns
+    # and catches cross-tool stagnation. The model can retry a failing
     # shell approach with cosmetic changes, which the repeated-failure
     # escalation in the tool results addresses (see graph/loop_tracker.py).
     "meta-glimmer": HarnessProfile(
@@ -59,10 +59,14 @@ BUILTIN_HARNESS_PROFILES: dict[str, HarnessProfile] = {
             "- After editing, run the relevant check once, then fix the failure or report the result concisely.\n"
             "- Stop when the requested result is verified."
         ),
+        metadata={"initial_tools": [
+            "read_file", "edit_file", "write_file", "execute", "ls", "glob",
+            "grep", "activate_tool_group", "retrieve_tool_result", "ask_user",
+        ]},
         compaction_headroom_ratio=0.70,
         clear_tool_keep=2,
         clear_tool_trigger_ratio=0.35,
-        loop_detection_overrides={"warning_threshold": 2, "critical_threshold": 3},
+        loop_detection_overrides={"warning_threshold": 2, "critical_threshold": 3, "progress_nudge_after": 8},
     ),
     # GPT-5.6 / Luna: huge tool schemas + multi-round search churn is the
     # dominant cost driver even when prompt-cache hit rates are excellent.
@@ -198,8 +202,8 @@ def _harness_from_spec(name: str, spec: dict[str, Any]) -> HarnessProfile:
     overrides_raw = spec.get("loop_detection_overrides")
     overrides: dict[str, Any] = {}
     if isinstance(overrides_raw, dict):
-        for key in ("warning_threshold", "critical_threshold"):
-            coerced = _opt_int(overrides_raw.get(key))
+        for key in ("warning_threshold", "critical_threshold", "progress_nudge_after"):
+            coerced = _opt_int(overrides_raw.get(key), minimum=0 if key == "progress_nudge_after" else 1)
             if coerced is not None:
                 overrides[key] = coerced
     metadata = spec.get("metadata")

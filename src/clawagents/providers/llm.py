@@ -1537,17 +1537,18 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
                     "api_key": api_key,
                     "azure_endpoint": base_url,
                     "api_version": api_version,
+                    "max_retries": 0,
                 }
                 if self._http_client is not None:
                     azure_kwargs["http_client"] = self._http_client
                 self.client = AsyncAzureOpenAI(**azure_kwargs)
             except ImportError:
-                client_kwargs: dict[str, Any] = {"api_key": api_key, "base_url": base_url}
+                client_kwargs: dict[str, Any] = {"api_key": api_key, "base_url": base_url, "max_retries": 0}
                 if self._http_client is not None:
                     client_kwargs["http_client"] = self._http_client
                 self.client = AsyncOpenAI(**client_kwargs)
         else:
-            client_kwargs = {"api_key": api_key}
+            client_kwargs = {"api_key": api_key, "max_retries": 0}
             if base_url:
                 client_kwargs["base_url"] = base_url
             if self._http_client is not None:
@@ -1589,6 +1590,10 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
         on_first_token: Any | None = None,
     ) -> LLMResponse:
         formatted = _sanitize_openai_tool_pairs(_openai_chat_messages(messages))
+        from clawagents.providers.glimmer import is_glimmer_model, reasoning_strength_messages
+
+        if is_glimmer_model(self.model):
+            formatted = reasoning_strength_messages(formatted, self._reasoning_effort)
         oai_tools = _to_openai_tools(tools) if tools else None
         # Deferred-tool bookkeeping is computed from the ORIGINAL LLMMessages
         # (the chat-format dicts drop added_tool_names) and kept off the wire

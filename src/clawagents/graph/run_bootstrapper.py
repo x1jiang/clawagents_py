@@ -165,6 +165,7 @@ class RunSession:
     dispatcher: RoundDispatcher
     finalizer: RunFinalizer
     advisor: AdvisorController
+    completion_handler: CompletionHandler
 
     # Config
     max_rounds: int
@@ -268,6 +269,7 @@ class RunBootstrapper:
             dispatcher=collaborators["dispatcher"],
             finalizer=collaborators["finalizer"],
             advisor=advisor,
+            completion_handler=collaborators["completion_handler"],
             max_rounds=effective_max_rounds,
             input_guardrails=self.c.input_guardrails,
         )
@@ -299,6 +301,7 @@ class RunBootstrapper:
 
         # Loop detection thresholds
         _loop_soft, _loop_hard = 3, 6
+        _progress_nudge_after = 0
         _loop_cfg = None
         try:
             from clawagents.harness_profiles import resolve_harness_profile
@@ -311,6 +314,8 @@ class RunBootstrapper:
                     _loop_soft = int(ov["warning_threshold"])
                 if ov.get("critical_threshold") is not None:
                     _loop_hard = int(ov["critical_threshold"])
+                if ov.get("progress_nudge_after") is not None:
+                    _progress_nudge_after = max(0, int(ov["progress_nudge_after"]))
                 _loop_cfg = LoopDetectionConfig(
                     warning_threshold=_loop_soft,
                     critical_threshold=_loop_hard,
@@ -321,6 +326,7 @@ class RunBootstrapper:
             soft_limit=_loop_soft,
             hard_limit=_loop_hard,
             loop_config=_loop_cfg,
+            progress_nudge_after=_progress_nudge_after,
         )
         self._base_emit = c.on_event or _default_on_event
 
@@ -627,6 +633,7 @@ class RunBootstrapper:
             self._native_schemas,
             self._registry,
             self._emit,
+            llm=c.llm,
         )
 
         # Cache system prompt tokens
@@ -969,6 +976,7 @@ class RunBootstrapper:
             "dispatcher": round_dispatcher,
             "finalizer": run_finalizer,
             "advisor": advisor,
+            "completion_handler": completion_handler,
             "started_at": t0,
         }
 

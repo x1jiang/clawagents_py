@@ -41,21 +41,41 @@ reported a 196,608-token context on 2026-09-06; the model profile reserves 20%
 headroom. This is a deployment-specific limit, not a claim about every Glimmer
 server. Tune the profile if your server's context limit differs.
 
-The `meta-glimmer` harness keeps optional tools registered but starts with the
-same smaller core tool surface as Luna. `activate_tool_group` reveals optional
-tools. Concise tool instructions, repeated-call detection, and earlier clearing
+The `meta-glimmer` harness keeps optional tools registered but starts ordinary
+coding with ten tools: file reads/edits/writes, shell execution, listing,
+glob/grep, tool-group activation, result retrieval, and user questions.
+`activate_tool_group` with the `coding_full` group restores the full coding surface, including
+alternative editors and planning tools. Explore, plan, and goal modes retain
+their mode-specific controls; connected context-protection tools stay visible.
+Luna's initial tools are unchanged. Concise instructions and earlier clearing
 of old tool output reduce avoidable context growth. Structured values supplied
 for string tool parameters are serialized as JSON instead of Python repr,
 avoiding invalid file contents and repair loops. Existing text is unchanged.
 
 ## Reasoning channel and output budget
 
-Glimmer always reasons before acting. The deployment returns chain-of-thought
-on a separate `reasoning_content` field (SGLang reasoning parser) and counts it
-in `usage.completion_tokens` and `usage.reasoning_tokens`. Probed on
-2026-09-06: `chat_template_kwargs={"enable_thinking": false}`,
-`reasoning_effort`, and `separate_reasoning` are accepted and ignored, so there
-is no server-side way to cap it. The harness compensates from the outside:
+Glimmer's reasoning strength is controlled by a system-prompt line:
+`Reasoning strength: low`, `medium`, `high`, or `xhigh`. The harness maps
+`reasoning_effort` to this documented control, defaulting to `medium`.
+Use explicit `low` for the measured latency-oriented configuration; the default
+remains `medium` because the small benchmark does not establish general coding
+quality at lower effort. An explicit system-prompt directive takes precedence. `none` / `minimal` map
+to `low` (not reasoning disabled); `max` maps to `xhigh`.
+
+```python
+agent = create_claw_agent(
+    profile="meta", base_url="https://your-meta-server/v1",
+    reasoning_effort="low",
+)
+```
+
+This corrects the earlier conclusion that reasoning was uncontrollable.
+The tested server ignores generic `enable_thinking`, top-level
+`reasoning_effort`, `thinking_budget`, and `separate_reasoning` switches;
+that does not mean it ignores the model's documented system directive.
+Reasoning strength is a soft control rather than an exact token cap.
+See [Meta's best practices](https://huggingface.co/meta-models/Muse-Glimmer-30B#best-practices)
+for the supported system-prompt syntax.
 
 - The OpenAI-compatible transport captures `reasoning_content` (streaming and
   non-streaming) into `LLMResponse.thinking`, so the doom-loop detector's
@@ -71,9 +91,24 @@ is no server-side way to cap it. The harness compensates from the outside:
   loop no longer treats the empty content as the answer or routes it into the
   "write the answer now" nudge. It records the turn as `[output truncated at
   the token limit]`, asks the model to continue with brief reasoning, grows
-  `max_tokens` by 1.5× (capped), and does this at most twice per run. A tool
+  `max_tokens` by 1.5× (capped), and does this at most twice per run.
+  With a run timeout, recovery avoids increasing the cap in the final reserved
+  interval and reports exhausted recovery as incomplete. Temporary increases
+  are restored when the run ends, including cancellation. A tool
   call whose JSON arguments were cut by the limit is dropped rather than run
   on repaired-but-wrong arguments.
+- Explicit smaller context windows now constrain both the initial request and
+  later turns. Input budgeting reserves the live output cap, native tool schemas,
+  and template headroom; internal summarization uses the same reserve. If a
+  protected user request cannot fit, the run stops with an explicit incomplete
+  message instead of clipping that request. Estimates remain approximate across
+  server tokenizers, so context-overflow recovery remains available.
+- A Glimmer progress checkpoint watches mixed reads, searches, planning and
+  shell commands. Novel evidence postpones the checkpoint; successful edits
+  reset it. At most two advisory notices are appended, and reads remain
+  available. Read-only tasks are never required to edit files.
+- OpenAI-compatible SDK retries are disabled; the harness owns the retry
+  budget, avoiding multiplied requests after transient failures.
 - A tool that fails twice with the same normalised error (paths, numbers and
   hashes stripped) gets an escalation appended to its result; the third time
   it says to stop retrying and change approach. This targets the observed
@@ -82,8 +117,9 @@ is no server-side way to cap it. The harness compensates from the outside:
 
 A custom served name (`glimmer_30B_model=Custom-Glimmer`) keeps all of the
 above: `create_claw_agent(profile="meta")` registers the name as an alias for
-the `meta-glimmer` harness and the `muse-glimmer-30b` context profile, and pins
-the context window to the deployment's 196,608 tokens.
+the `meta-glimmer` harness and the `muse-glimmer-30b` context profile. The default
+context window is 196,608 tokens; pass `context_window` explicitly for a smaller
+deployment.
 
 `.clawagents/profiles.json` and `.clawagents/harness-profiles.json` are read
 from `~/.clawagents/` always, and from the workspace only with
@@ -119,6 +155,23 @@ benchmark, not evidence of general coding superiority. Prompt caches are not
 flushed; tokenizers, serving hardware, and reasoning modes differ.
 
 ## Harder coding suite
+
+For a server configured with a 32,768-token context, set the client limit
+explicitly and reserve space for the requested output:
+
+```python
+agent = create_claw_agent(
+    profile="meta",
+    base_url="https://your-meta-server/v1",
+    context_window=32768,
+    max_tokens=16384,
+    reasoning_effort="low",
+)
+result = await agent.invoke("Your coding task", timeout_s=240)
+```
+
+Use the server's actual context capacity. The reasoning setting is a soft
+control; lower effort is a latency tradeoff, not a guarantee of equal accuracy.
 
 See [challenge results](benchmarks/meta_challenge_20260906/REPORT.md) and [methodology](benchmarks/meta_challenge_20260906/METHOD.md). On macOS, run:
 

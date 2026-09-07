@@ -47,6 +47,64 @@ OnEvent = Callable[[str, dict[str, Any]], None]
 _MAX_OVERFLOW_RETRIES = 3
 
 
+class _InputBudgetExceeded(ValueError):
+    """The protected request cannot fit beside the configured output reserve."""
+
+
+def _resolve_input_budget(
+    context_window: int, llm: Any = None, model_name: str | None = None,
+    native_schema_tokens: int = 0,
+) -> int:
+    """Message budget, bounded by the declared window and live output cap.
+
+    Keep established headroom when it already accommodates the output. The
+    extra 256 tokens cover chat-template/control overhead when the output cap
+    binds; estimates are still heuristic, not a tokenizer-level guarantee.
+    """
+    window, ratio = (
+        _resolve_context_budget(model_name, context_window)
+        if model_name else (context_window, _CONTEXT_BUDGET_RATIO)
+    )
+    window = min(context_window, window)
+    budget = int(window * ratio)
+    target = getattr(llm, "primary", None) or llm
+    cap = getattr(target, "_max_tokens", None)
+    if isinstance(cap, int) and not isinstance(cap, bool) and cap > 0:
+        budget = min(budget, max(0, window - cap - native_schema_tokens - 256))
+    return budget
+
+
+def _estimate_native_schema_tokens(schemas: list[NativeToolSchema] | None) -> int:
+    if not schemas:
+        return 0
+    return _estimate_tokens(json.dumps([
+        {"name": s.name, "description": s.description, "parameters": s.parameters}
+        for s in schemas
+    ]))
+
+
+class _OutputReservedCompactionLLM(LLMProvider):
+    """Keep internal summarization requests inside the same output reserve."""
+
+    def __init__(self, provider: Any, context_window: int, model_name: str | None,
+                 token_multiplier: float) -> None:
+        self._provider = provider
+        self._window = context_window
+        self._model_name = model_name
+        self._multiplier = token_multiplier
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._provider, name)
+
+    async def chat(self, messages: list[LLMMessage], *args: Any, **kwargs: Any) -> Any:
+        budget = _resolve_input_budget(self._window, self._provider, self._model_name)
+        if _estimate_messages_tokens(messages, self._multiplier) > budget:
+            raise _InputBudgetExceeded(
+                "Compaction prompt cannot fit alongside the configured output reserve."
+            )
+        return await self._provider.chat(messages, *args, **kwargs)
+
+
 def _preflight_context_check(
     messages: list[LLMMessage],
     context_window: int,
@@ -55,6 +113,7 @@ def _preflight_context_check(
     registry: ToolRegistry | None,
     emit: OnEvent,
     model_name: Optional[str] = None,
+    llm: Any = None,
 ) -> tuple[list[LLMMessage], str, list[NativeToolSchema] | None]:
     """Ensure the initial payload fits in the context budget.
 
@@ -66,20 +125,8 @@ def _preflight_context_check(
       2. Drop text-based tool descriptions if native schemas are available
       3. Truncate the system prompt itself, keeping the core behavior section
     """
-    effective_window, ratio = (
-        _resolve_context_budget(model_name, context_window)
-        if model_name
-        else (context_window, _CONTEXT_BUDGET_RATIO)
-    )
-    budget = int(effective_window * ratio)
-
-    native_schema_tokens = 0
-    if native_schemas:
-        schema_text = json.dumps([
-            {"name": s.name, "description": s.description, "parameters": s.parameters}
-            for s in native_schemas
-        ])
-        native_schema_tokens = _estimate_tokens(schema_text)
+    budget = _resolve_input_budget(context_window, llm, model_name)
+    native_schema_tokens = _estimate_native_schema_tokens(native_schemas)
 
     def _payload_tokens() -> int:
         return _estimate_messages_tokens(messages) + native_schema_tokens
@@ -311,6 +358,7 @@ def _soft_trim_messages(
     emit: OnEvent,
     model_name: Optional[str] = None,
     current_tokens: Optional[int] = None,
+    input_budget: int | None = None,
 ) -> list[LLMMessage]:
     """Remove stale/low-value content from context before hitting compaction threshold."""
     effective_window, budget_ratio = (
@@ -319,6 +367,8 @@ def _soft_trim_messages(
         else (context_window, _CONTEXT_BUDGET_RATIO)
     )
     soft_budget = int(effective_window * budget_ratio * _SOFT_TRIM_BUDGET_FRACTION)
+    if input_budget is not None:
+        soft_budget = min(soft_budget, int(input_budget * _SOFT_TRIM_BUDGET_FRACTION))
     # Cap soft-trim trigger by the model's pricing long-context cliff when set
     # (e.g. Luna 272K) so we shed stale tool dumps before the 2×/1.5× premium.
     long_ctx = _resolve_long_context_threshold(model_name)
@@ -682,14 +732,26 @@ async def _compact_if_needed(
     fire_hook: Optional[Callable[..., Any]] = None,
     savings_history: list[float] | None = None,
     taxonomy_dispatcher: Any | None = None,
+    native_schema_tokens: int = 0,
 ) -> list[LLMMessage]:
+    budget = _resolve_input_budget(context_window, llm, model_name, native_schema_tokens)
+    output_bound = budget < _resolve_input_budget(context_window, None, model_name)
+    if output_bound:
+        llm = _OutputReservedCompactionLLM(llm, context_window, model_name, token_multiplier)
     messages = _truncate_old_tool_args(messages)
 
     # Soft-cap verbose assistant/user turns before heavier compaction.
     try:
         from clawagents.memory.output_trim import trim_verbose_messages
 
-        messages, trimmed_n = trim_verbose_messages(messages)
+        trim_options = {}
+        if output_bound:
+            # Never solve a newly tight output reserve by clipping user text.
+            trim_options["user_chars"] = max(
+                (len(m.content) for m in messages if m.role == "user" and isinstance(m.content, str)),
+                default=16_000,
+            )
+        messages, trimmed_n = trim_verbose_messages(messages, **trim_options)
         if trimmed_n:
             emit("context", {"message": f"trimmed {trimmed_n} verbose turn(s)"})
     except Exception:
@@ -713,7 +775,7 @@ async def _compact_if_needed(
         if model_name
         else (context_window, _CONTEXT_BUDGET_RATIO)
     )
-    budget = int(effective_window * ratio)
+    effective_window = min(context_window, effective_window)
     from clawagents.memory.compact_tool_results import compact_tool_results
     from clawagents.harness_profiles import resolve_harness_profile
 
@@ -1018,7 +1080,7 @@ async def _compact_if_needed(
         safe = await compress_messages_safe(
             llm,
             agent_msgs,
-            context_window=effective_window,
+            context_window=budget if output_bound else effective_window,
             protect_first_n=max(1, len(system_msgs)),
             protect_last_n=_RECENT_MESSAGES_TO_KEEP,
         )
