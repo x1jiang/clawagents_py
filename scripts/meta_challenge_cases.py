@@ -259,7 +259,8 @@ MIGRATION_ORACLE = code("""
     try:migrate(c)
     except sqlite3.DatabaseError:pass
     else:raise AssertionError('injected SQL failure did not fire')
-    c.set_authorizer(None)
+    # Python 3.10 cannot disable the authorizer with None.
+    c.set_authorizer(lambda *_: sql.SQLITE_OK)
     assert list(c.iterdump())==before
     print(json.dumps({'checks':12,'passed':True}))
 """)

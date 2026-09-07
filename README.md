@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.20.78-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.20.79-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -22,8 +22,8 @@ This repo is the **Python framework** (`pip install clawagents`). Ready-made cli
 | Product | Latest | What it is | Link |
 |---------|--------|------------|------|
 | **ClawAgents Desktop** | **v0.4.27** | Native macOS app — project chats, file editor, SSH remotes, Settings (incl. AWS Bedrock), Developer ID signed + notarized | [Repo](https://github.com/x1jiang/clawagents-desktop) · [Download DMG](https://github.com/x1jiang/clawagents-desktop/releases/tag/v0.4.27) |
-| **ClawAgents for VS Code / Cursor** | **v1.0.187** | Editor extension — Glimmer reasoning control, lean tools, and context budgeting; Python 6.20.78 floor | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Releases](https://github.com/x1jiang/clawagents-vscode/releases) |
-| **Python package** | **v6.20.78** | This library — Context Observatory, modular agent loop · `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/) · [Release](https://github.com/x1jiang/clawagents_py/releases) |
+| **ClawAgents for VS Code / Cursor** | **v1.0.188** | Editor extension — Glimmer reasoning control, lean tools, and context budgeting; Python 6.20.79 floor | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Releases](https://github.com/x1jiang/clawagents-vscode/releases) |
+| **Python package** | **v6.20.79** | This library — Context Observatory, modular agent loop · `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/) · [Release](https://github.com/x1jiang/clawagents_py/releases) |
 | **TypeScript package** | **v6.12.13** | Node/TS sibling — `npm install git+https://github.com/x1jiang/clawagents.git` | [Repo](https://github.com/x1jiang/clawagents) |
 
 For **Meta / Muse-Glimmer-30B** setup, reasoning control, context limits, and benchmarks, see [Meta Glimmer integration](META_GLIMMER.md).

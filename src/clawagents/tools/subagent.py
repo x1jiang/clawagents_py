@@ -613,7 +613,8 @@ class TaskTool:
             if self._use_queue:
                 return await enqueue_command_in_lane(CommandLane.Subagent.value, do_run)
             return await do_run()
-        except TimeoutError:
+        except (asyncio.TimeoutError, TimeoutError):
+            # asyncio.TimeoutError only became a builtin alias in Python 3.11.
             return ToolResult(success=False, output="", error="Sub-agent incomplete: worker deadline exceeded")
         except Exception as e:
             return ToolResult(success=False, output="", error=f"Sub-agent error: {str(e)}")
