@@ -492,6 +492,7 @@ class ToolCallRunner:
         call: ParsedToolCall,
         *,
         call_id: str,
+        followup: Any = None,
     ) -> ToolResult:
         self._events.typed(
             "tool_started",
@@ -512,15 +513,22 @@ class ToolCallRunner:
                 },
             )
         else:
+            execution_kwargs: dict[str, Any] = {"run_context": self._run_context}
+            if "then_run" in call.args:
+                async def run_followup(args: dict[str, Any], unchanged: Any) -> Any:
+                    return await followup(args, unchanged, call_id=f"{call_id}:then_run")
+                execution_kwargs["followup"] = run_followup if followup is not None else None
             result = await run_with_heartbeat(
                 self._registry.execute_tool(
-                    call.tool_name, call.args, run_context=self._run_context
+                    call.tool_name, call.args, **execution_kwargs
                 ),
                 on_event=self._legacy_on_event,
                 kind="tool_heartbeat",
                 payload={"tool_name": call.tool_name, "call_id": call_id},
                 interval=DEFAULT_ACTIVITY_HEARTBEAT_INTERVAL_S,
             )
+            if getattr(result, "mutation_success", None) is True:
+                self._tracker.note_mutation()
             if result.success:
                 self._tracker.cache_result_output(
                     call.tool_name, call.args, str(result.output or "")
@@ -548,6 +556,7 @@ class ToolCallRunner:
         calls: list[ParsedToolCall],
         *,
         call_ids: list[str],
+        followup: Any = None,
     ) -> list[ToolResult]:
         """Execute an approved batch while preserving call-to-result order.
 
@@ -558,6 +567,14 @@ class ToolCallRunner:
         """
         if len(calls) != len(call_ids):
             raise ValueError("calls and call_ids must have matching lengths")
+
+        # A fused command has unknown workspace side effects. Keep the whole
+        # batch ordered, and use the same policy path as a serial tool call.
+        if any("then_run" in call.args for call in calls):
+            return [
+                await self.execute(call, call_id=call_id, followup=followup)
+                for call, call_id in zip(calls, call_ids)
+            ]
 
         for call, call_id in zip(calls, call_ids):
             self._events.typed(
@@ -666,6 +683,7 @@ class ToolResultProcessor:
                             output=hook_result["output"],
                             error=hook_result.get("error"),
                             return_direct=getattr(result, "return_direct", False) and bool(hook_result["success"]),
+                            mutation_success=getattr(result, "mutation_success", None),
                         )
                 except Exception as exc:
                     self._events.emit(
@@ -748,14 +766,26 @@ class ToolResultProcessor:
         else:
             from clawagents.tool_output_artifacts import prepare_tool_output_for_context
 
+            from clawagents.efficiency import get_efficiency
+            counters = get_efficiency(self._run_context)
+            command = call.args.get("command")
+            if isinstance(call.args.get("then_run"), dict):
+                command = call.args["then_run"].get("command")
             output, artifact_id = prepare_tool_output_for_context(
                 tool_name=call.tool_name,
                 tool_use_id=call_id,
                 output=raw_output,
                 workspace=_run_context_workspace(self._run_context),
                 success=bool(result.success),
+                command=command if isinstance(command, str) else None,
+                efficiency=counters,
             )
             if artifact_id is not None:
+                from .tool_observation import _estimate_tokens as estimate_tokens
+                counters["tokens_avoided_by_handles"] += max(
+                    0, estimate_tokens(raw_output) - estimate_tokens(output),
+                )
+
                 self._events.emit(
                     "context", {"message": f"tool output crushed/stored id={artifact_id}"}
                 )
@@ -764,7 +794,7 @@ class ToolResultProcessor:
         output = _post_tool_side_effects(
             call.tool_name,
             call.args if isinstance(call.args, dict) else {},
-            result.success,
+            result.success or getattr(result, "mutation_success", False) is True,
             output,
             emit=self._events.emit,
             run_context=self._run_context,
@@ -772,11 +802,17 @@ class ToolResultProcessor:
         if isinstance(output, str):
             preview = output[: self._preview_chars]
 
+        from clawagents.efficiency import efficiency_snapshot
+        efficiency_event = {"efficiency": efficiency_snapshot(self._run_context)}
+        self._events.emit("efficiency", efficiency_event)
+        self._events.typed("efficiency", efficiency_event)
+
         self._events.emit(
             "tool_result",
             {
                 "name": call.tool_name,
                 "success": result.success,
+                "mutation_success": getattr(result, "mutation_success", None),
                 "preview": preview,
                 "output": ui_text,
             },
@@ -787,6 +823,7 @@ class ToolResultProcessor:
                 "tool_name": call.tool_name,
                 "call_id": call_id,
                 "success": result.success,
+                "mutation_success": getattr(result, "mutation_success", None),
                 "output": ui_text,
                 "error": result.error if not result.success else None,
             },

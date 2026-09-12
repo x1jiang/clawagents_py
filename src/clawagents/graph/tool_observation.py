@@ -372,7 +372,7 @@ def _post_tool_side_effects(
         logger.debug("shadow checkpoint failed", exc_info=True)
 
     try:
-        if is_enabled("auto_verify") and isinstance(out, str):
+        if is_enabled("auto_verify") and isinstance(out, str) and "then_run" not in args:
             from clawagents.tools.auto_verify import maybe_verify_after_edit
 
             extra = maybe_verify_after_edit(tool_name, success)

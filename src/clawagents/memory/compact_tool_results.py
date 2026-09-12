@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from clawagents.memory.content_budgets import ContentBudgets, DEFAULT_CONTENT_BUDGETS
 from clawagents.providers.llm import LLMMessage
+from clawagents.efficiency import contains_evidence_receipt
 
 
 def _content_chars(content: str | list) -> int:
@@ -40,6 +41,9 @@ def compact_tool_results(
     for idx in tool_indices:
         m = messages[idx]
         content = m.content if isinstance(m.content, str) else str(m.content)
+        # Keep verified diagnostic evidence intact for the summarizer.
+        if contains_evidence_receipt(content):
+            continue
         if len(content) > per_tool_chars:
             out[idx] = LLMMessage(
                 role=m.role,

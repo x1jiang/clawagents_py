@@ -8,11 +8,12 @@ approval, executes serial or parallel calls, and appends their observations.
 from __future__ import annotations
 
 import json
+from functools import partial
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from clawagents.providers.llm import LLMMessage, NativeToolCall
-from clawagents.tools.registry import ParsedToolCall
+from clawagents.tools.registry import ParsedToolCall, ToolResult
 
 from .tool_batch import (
     RethinkController,
@@ -189,7 +190,10 @@ class ToolTurnExecutor:
         ):
             return
 
-        tool_result = await self._call_runner.execute(call, call_id=call_id)
+        runner_kwargs = {}
+        if "then_run" in call.args:
+            runner_kwargs["followup"] = partial(self._execute_followup, messages=messages, state=state)
+        tool_result = await self._call_runner.execute(call, call_id=call_id, **runner_kwargs)
         state.tool_calls += 1
         [tool_result] = await self._result_processor.apply_middleware([call], [tool_result])
         prepared = self._result_processor.prepare(
@@ -234,6 +238,76 @@ class ToolTurnExecutor:
             state.result = str(tool_result.output)
             return
         await self._maybe_rethink(messages, state, round_index)
+
+    async def _execute_followup(
+        self,
+        args: dict[str, Any],
+        unchanged: Any,
+        *,
+        call_id: str,
+        messages: list[LLMMessage],
+        state: Any,
+    ) -> tuple[str, ToolResult]:
+        """Execute the fused suffix through normal command policy and lifecycle."""
+        # The edit just succeeded. Batch calls were recorded before execution,
+        # so their earlier invalidation cannot cover prior fused suffixes.
+        self._loop_tracker.note_mutation()
+        reason = "Command blocked by pre-tool policy."
+
+        async def on_skipped(candidate: ToolCandidate, why: str, source: str) -> None:
+            nonlocal reason
+            reason = why
+
+        call = ParsedToolCall("execute", args)
+        approved = await self._policy_gate.filter(
+            [ToolCandidate(0, call)], messages=messages, on_skipped=on_skipped,
+        )
+        if not approved:
+            return "skipped", ToolResult(False, reason)
+        call = approved[0].call
+        approval = self._run_context.is_tool_approved(call_id, tool_name="execute")
+        tool = self._registry.get("execute")
+        needs_approval = "execute" in self._require_approval_set or bool(getattr(tool, "require_approval", False))
+        if approval is None and needs_approval:
+            self._events.emit("approval_required", {"name": "execute", "id": call_id, "args": call.args})
+            self._events.typed("approval_required", {"tool_name": "execute", "call_id": call_id, "args": call.args})
+            # A missing handler is not consent for a command hidden in an edit.
+            approval = False if self._approval_handler is None else await _wait_for_tool_approval(
+                self._run_context, call_id, "execute", call.args,
+                approval_handler=self._approval_handler, emit=self._events.emit,
+            )
+        if approval is False:
+            return "skipped", ToolResult(False, "Command approval denied or unavailable; edit kept.")
+        if self._loop_tracker.is_circuit_broken() or self._loop_tracker.is_hard_looping("execute", call.args):
+            return "skipped", ToolResult(False, "Command blocked by loop protection; edit kept.")
+        # Approval and hooks may have waited while an external editor changed
+        # the file. Check again immediately before dispatching the command.
+        if not await unchanged():
+            return "skipped", ToolResult(False, "File changed after edit; command was not run.")
+        self._events.emit("tool_call", {"name": "execute", "args": call.args})
+        self._loop_tracker.record("execute", call.args)
+        result = await self._call_runner.execute(call, call_id=call_id)
+        state.tool_calls += 1
+        [result] = await self._result_processor.apply_middleware([call], [result])
+        from .tool_observation import _post_tool_side_effects, _tool_observation
+        full_output = result.raw_output if result.raw_output is not None else result.output
+        post_output = _post_tool_side_effects(
+            "execute", call.args, result.success, full_output,
+            emit=self._events.emit, run_context=self._run_context,
+        )
+        if post_output != full_output:
+            result = ToolResult(
+                result.success, post_output, result.error, raw_output=post_output,
+                added_tool_names=result.added_tool_names,
+            )
+        observation = _tool_observation(result)
+        self._loop_tracker.record_result("execute", call.args, str(observation), success=result.success)
+        # The outer edit owns the provider tool-result message and compression;
+        # emit command completion for hosts without creating an orphan tool id.
+        self._events.emit("tool_result", {"name": "execute", "success": result.success, "output": str(observation)})
+        self._events.typed("tool_result", {"tool_name": "execute", "call_id": call_id, "success": result.success,
+                                           "output": str(observation), "error": result.error})
+        return ("succeeded" if result.success else "failed"), result
 
     async def _is_single_call_approved(
         self,
@@ -389,7 +463,10 @@ class ToolTurnExecutor:
         for call in calls:
             self._events.emit("tool_call", {"name": call.tool_name})
         self._loop_tracker.record_batch(calls)
-        results = await self._call_runner.execute_parallel(calls, call_ids=call_ids)
+        runner_kwargs = {}
+        if any("then_run" in call.args for call in calls):
+            runner_kwargs["followup"] = partial(self._execute_followup, messages=messages, state=state)
+        results = await self._call_runner.execute_parallel(calls, call_ids=call_ids, **runner_kwargs)
         state.tool_calls += len(calls)
         results = await self._result_processor.apply_middleware(calls, results)
 

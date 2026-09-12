@@ -67,6 +67,7 @@ class ToolResultEvent(StreamEvent):
     output: str = ""
     error: str | None = None
     kind: str = "tool_result"
+    mutation_success: bool | None = None
 
 
 @dataclass
@@ -87,6 +88,12 @@ class ApprovalRequiredEvent(StreamEvent):
 
 
 @dataclass
+class EfficiencyEvent(StreamEvent):
+    efficiency: dict[str, Any] = field(default_factory=dict)
+    kind: str = "efficiency"
+
+
+@dataclass
 class UsageEvent(StreamEvent):
     prompt_tokens: int = 0
     input_tokens: int = 0
@@ -101,6 +108,7 @@ class UsageEvent(StreamEvent):
     peak_memory_bytes: int = 0
     model: str = ""
     kind: str = "usage"
+    efficiency: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -165,6 +173,7 @@ AnyStreamEvent = Union[
     ToolProgressEvent,
     ApprovalRequiredEvent,
     UsageEvent,
+    EfficiencyEvent,
     GuardrailTrippedEvent,
     CompactProgressEvent,
     HandoffOccurredEvent,
@@ -184,6 +193,7 @@ _KIND_TO_CLS: dict[str, type[StreamEvent]] = {
     "tool_progress": ToolProgressEvent,
     "approval_required": ApprovalRequiredEvent,
     "usage": UsageEvent,
+    "efficiency": EfficiencyEvent,
     "guardrail_tripped": GuardrailTrippedEvent,
     "compact_progress": CompactProgressEvent,
     "handoff_occurred": HandoffOccurredEvent,

@@ -6,15 +6,16 @@ import json
 import os
 from typing import Any
 
-from clawagents.tool_output_artifacts import load_tool_artifact, search_tool_artifacts
+from clawagents.tool_output_artifacts import load_tool_artifact_page, search_tool_artifacts
 from clawagents.tools.registry import Tool, ToolResult
 
 
 class RetrieveToolResultTool:
     name = "retrieve_tool_result"
     description = (
-        "Fetch the full text of a tool output that was crushed or offloaded to "
-        "save context. Pass the artifact id from a [Crushed tool output … id=…] "
+        "Fetch a page of a tool output that was crushed or offloaded to "
+        "save context (default 16000 characters / 400 lines). Continue with "
+        "offset=next_offset from the returned header. Pass the artifact id from a [Crushed tool output … id=…] "
         "or [Tool output truncated] message. "
         "Alternatively pass query= to search stored artifacts locally."
     )
@@ -31,7 +32,22 @@ class RetrieveToolResultTool:
         },
         "max_chars": {
             "type": "integer",
-            "description": "Optional cap on returned characters (default 100000)",
+            "description": "Page character ceiling (default 16000, maximum 500000)",
+            "required": False,
+        },
+        "offset": {
+            "type": "integer",
+            "description": "Zero-based Unicode character offset, normally prior next_offset; mutually exclusive with line_start",
+            "required": False,
+        },
+        "line_start": {
+            "type": "integer",
+            "description": "First line to read, 1-based (LF-delimited); mutually exclusive with offset",
+            "required": False,
+        },
+        "line_count": {
+            "type": "integer",
+            "description": "Maximum lines in this page (default 400, maximum 10000); max_chars may split a long line",
             "required": False,
         },
         "limit": {
@@ -63,21 +79,25 @@ class RetrieveToolResultTool:
         if not artifact_id:
             return ToolResult(success=False, output="", error="id or query is required")
         try:
-            max_chars = int(args.get("max_chars") or 100_000)
+            page_args = {}
+            for name in ("offset", "line_start", "line_count", "max_chars"):
+                if args.get(name) is not None:
+                    value = args[name]
+                    if isinstance(value, bool) or isinstance(value, float):
+                        raise ValueError(name)
+                    page_args[name] = int(value)
         except (TypeError, ValueError):
-            max_chars = 100_000
-        max_chars = max(1_000, min(max_chars, 500_000))
-        ok, text, meta = load_tool_artifact(
-            artifact_id, workspace=self._workspace, max_chars=max_chars
+            return ToolResult(success=False, output="", error="Page ranges must be integers")
+        ok, text, meta = load_tool_artifact_page(
+            artifact_id, workspace=self._workspace, **page_args
         )
         if not ok:
             return ToolResult(success=False, output="", error=text)
-        header = ""
-        if meta:
-            header = (
-                f"tool={meta.get('tool_name', '?')} kind={meta.get('kind', '?')} "
-                f"chars={meta.get('chars', '?')}\n\n"
-            )
+        meta = meta or {}
+        header = (
+            f"[artifact id={meta.get('id', artifact_id)} offset={meta['offset']} next_offset={meta['next_offset']} eof={str(meta['eof']).lower()}]\n"
+            f"tool={meta.get('tool_name', '?')} kind={meta.get('kind', '?')} line_start={meta['line_start']}; continue with next_offset\n"
+        )
         return ToolResult(success=True, output=header + text)
 
 

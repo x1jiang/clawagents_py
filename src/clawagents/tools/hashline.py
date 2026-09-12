@@ -9,6 +9,8 @@ Additive to ``read_file`` / ``edit_file`` — does not replace them.
 
 from __future__ import annotations
 
+from clawagents.tools.action_fusion import THEN_RUN_PARAMETER
+
 import json
 from dataclasses import dataclass, field
 from enum import Enum
@@ -1041,6 +1043,7 @@ class HashlineEditTool:
         "Prefer: hashline_grep → hashline_edit for multi-hunk work."
     )
     parameters: Dict[str, Dict[str, Any]] = {
+        "then_run": THEN_RUN_PARAMETER,
         "path": {"type": "string", "description": "Path of the file to edit", "required": True},
         "edits": {
             "type": "array",
