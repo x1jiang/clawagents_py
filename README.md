@@ -2,7 +2,7 @@
   <h1 align="center">🦞 ClawAgents</h1>
   <p align="center"><strong>A lean, full-stack agentic AI framework — ~2,500 LOC</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-6.20.81-blue" alt="Version">
+    <img src="https://img.shields.io/badge/version-6.20.82-blue" alt="Version">
     <img src="https://img.shields.io/badge/python-≥3.10-green" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
     <img src="https://img.shields.io/badge/LOC-~2500-purple" alt="LOC">
@@ -22,8 +22,8 @@ This repo is the **Python framework** (`pip install clawagents`). Ready-made cli
 | Product | Latest | What it is | Link |
 |---------|--------|------------|------|
 | **ClawAgents Desktop** | **v0.4.27** | Native macOS app — project chats, file editor, SSH remotes, Settings (incl. AWS Bedrock), Developer ID signed + notarized | [Repo](https://github.com/x1jiang/clawagents-desktop) · [Download DMG](https://github.com/x1jiang/clawagents-desktop/releases/tag/v0.4.27) |
-| **ClawAgents for VS Code / Cursor** | **v1.0.192** | Editor extension — fused verification, paged recall, and efficiency usage; Python 6.20.81 floor | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Releases](https://github.com/x1jiang/clawagents-vscode/releases) |
-| **Python package** | **v6.20.81** | This library — Context Observatory, modular agent loop · `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/) · [Release](https://github.com/x1jiang/clawagents_py/releases) |
+| **ClawAgents for VS Code / Cursor** | **v1.0.193** | Editor extension — fused verification, paged recall, and efficiency usage; Python 6.20.82 floor | [Repo](https://github.com/x1jiang/clawagents-vscode) · [Releases](https://github.com/x1jiang/clawagents-vscode/releases) |
+| **Python package** | **v6.20.82** | This library — Context Observatory, modular agent loop · `pip install -U 'clawagents[bedrock]'` | [PyPI](https://pypi.org/project/clawagents/) · [Release](https://github.com/x1jiang/clawagents_py/releases) |
 | **TypeScript package** | **v6.12.13** | Node/TS sibling — `npm install git+https://github.com/x1jiang/clawagents.git` | [Repo](https://github.com/x1jiang/clawagents) |
 
 For **Meta / Muse-Glimmer-30B** setup, reasoning control, context limits, and benchmarks, see [Meta Glimmer integration](META_GLIMMER.md).
@@ -36,6 +36,10 @@ For **Meta / Muse-Glimmer-30B** setup, reasoning control, context limits, and be
 - Preserve successful file edits when follow-up verification fails; prevent stale verification reuse and symlink lock races.
 
 See [implementation details and limitations](SOL_PI_EFFICIENCY.md). Live-model token savings remain unbenchmarked.
+
+## Release 6.20.82
+
+Current model catalogs and request compatibility are refreshed across providers. Claude signed thinking is preserved through tool turns and session restore. See the [model audit](MODEL_CATALOG_AUDIT.md) for exact IDs, limits, pricing sources and regional prerequisites.
 
 ## Release 6.20.81
 
@@ -1794,3 +1798,5 @@ Set `CLAWAGENTS_PYTHON` to the full interpreter path before starting ClawAgents,
 ### Gemma Q4 coordination
 
 Use `create_claw_agent(profile="gemma-agentic")` for the local Gemma agentic Q4_K_M backend. See [setup, independent worker routing and verified completion](GEMMA_COORDINATION.md) and [the controlled coordination comparison](benchmarks/gemma_coordination_20260906/REPORT.md).
+
+Model catalog refresh: [verified models, provider constraints and source audit](MODEL_CATALOG_AUDIT.md) (Python 6.20.82 / extension 1.0.193).

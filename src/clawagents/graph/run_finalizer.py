@@ -142,8 +142,17 @@ class RunFinalizer:
         # after a tool round whose content was already stored.
         final = getattr(state, "result", "")
         if isinstance(final, str) and final.strip():
-            if self._last_persisted_assistant() != final:
-                self._session_writer.write_assistant_message(final)
+            last_assistant = next((m for m in reversed(getattr(state, "messages", []))
+                                   if m.role == "assistant"), None)
+            blocks = (getattr(last_assistant, "anthropic_blocks", None)
+                      if last_assistant is not None and last_assistant.content == final
+                      and not last_assistant.tool_calls_meta else None)
+            # Retain the actual tool-free response marker across resume. Never
+            # attach provider blocks to a rewritten guardrail/error message.
+            if self._last_persisted_assistant() != final or blocks:
+                self._session_writer.write_assistant_message(
+                    final, **({"anthropic_blocks": blocks} if blocks else {}),
+                )
         self._session_writer.write_turn_completed(
             state.iterations,
             state.tool_calls,

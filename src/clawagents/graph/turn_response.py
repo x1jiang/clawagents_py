@@ -69,6 +69,7 @@ class TurnResponseInterpreter:
                 partial=response.partial,
                 tool_calls=response.tool_calls,
                 gemini_parts=response.gemini_parts,
+                anthropic_blocks=getattr(response, "anthropic_blocks", None),
                 cache_creation_tokens=getattr(response, "cache_creation_tokens", 0),
                 cache_read_tokens=getattr(response, "cache_read_tokens", 0),
                 prompt_tokens=getattr(response, "prompt_tokens", 0),

@@ -97,26 +97,65 @@ class ToolTurnExecutor:
                     )
             self._write_assistant_tool_message(response, native_tool_calls, thinking)
 
-        if len(tool_calls) == 1:
-            await self._execute_single(
+        start_index = len(messages)
+        blocks = getattr(response, "anthropic_blocks", None)
+        signed_transcript = self._use_native_tools and blocks and native_tool_calls
+        processor_writer = self._result_processor._session_writer if signed_transcript else None
+        pending_results: dict[str, tuple[bool, str | None]] = {}
+
+        def capture_result(call_id: str, name: str, success: bool, output: Any, error: str | None = None) -> None:
+            pending_results[call_id] = (success, error)
+
+        if signed_transcript:
+            # Persist final observations after loop directives and skipped-call
+            # normalization, rather than the intermediate tool payload.
+            from types import SimpleNamespace
+            self._result_processor._session_writer = SimpleNamespace(write_tool_result=capture_result)
+        try:
+            if len(tool_calls) == 1:
+                await self._execute_single(
+                    state=state,
+                    messages=messages,
+                    response=response,
+                    thinking=thinking,
+                    call=tool_calls[0],
+                    native_call=native_tool_calls[0] if native_tool_calls else None,
+                    round_index=round_index,
+                )
+                return
+            await self._execute_batch(
                 state=state,
                 messages=messages,
                 response=response,
                 thinking=thinking,
-                call=tool_calls[0],
-                native_call=native_tool_calls[0] if native_tool_calls else None,
+                tool_calls=tool_calls,
+                native_tool_calls=native_tool_calls,
                 round_index=round_index,
             )
-            return
-        await self._execute_batch(
-            state=state,
-            messages=messages,
-            response=response,
-            thinking=thinking,
-            tool_calls=tool_calls,
-            native_tool_calls=native_tool_calls,
-            round_index=round_index,
-        )
+
+        finally:
+            if signed_transcript:
+                self._result_processor._session_writer = processor_writer
+                authored = messages[start_index:]
+                outputs = {m.tool_call_id: m for m in authored if m.role == "tool" and m.tool_call_id}
+                extras = [m for m in authored if m.role not in ("assistant", "tool")]
+                messages[start_index:] = [LLMMessage(
+                    role="assistant", content=response.content or "", thinking=thinking,
+                    anthropic_blocks=blocks,
+                    tool_calls_meta=[{"id": c.tool_call_id, "name": c.tool_name, "args": c.args} for c in native_tool_calls],
+                )]
+                for call in native_tool_calls:
+                    messages.append(outputs.get(call.tool_call_id) or LLMMessage(
+                        role="tool", tool_call_id=call.tool_call_id,
+                        content="[Tool Skipped] No result is available; execution was skipped or interrupted.",
+                    ))
+                messages.extend(extras)
+                if self._session_writer:
+                    for call, message in zip(native_tool_calls, messages[start_index + 1:]):
+                        success, error = pending_results.get(call.tool_call_id, (False, None))
+                        self._session_writer.write_tool_result(
+                            call.tool_call_id, call.tool_name, success, message.content, error=error,
+                        )
 
     def _write_assistant_tool_message(
         self,
@@ -134,6 +173,7 @@ class ToolTurnExecutor:
             response.content or "",
             tool_calls=metadata or None,
             thinking=thinking,
+            **({"anthropic_blocks": response.anthropic_blocks} if getattr(response, "anthropic_blocks", None) is not None else {}),
         )
 
     async def _execute_single(
@@ -230,6 +270,7 @@ class ToolTurnExecutor:
             output=output,
             thinking=thinking,
             gemini_parts=getattr(response, "gemini_parts", None),
+            anthropic_blocks=getattr(response, "anthropic_blocks", None),
             use_native_tools=self._use_native_tools,
             added_tool_names=getattr(tool_result, "added_tool_names", None),
         )
@@ -396,6 +437,7 @@ class ToolTurnExecutor:
                         }
                     ],
                     gemini_parts=getattr(response, "gemini_parts", None),
+                    anthropic_blocks=getattr(response, "anthropic_blocks", None),
                     thinking=thinking,
                 )
             )
@@ -517,6 +559,7 @@ class ToolTurnExecutor:
             summaries=summaries,
             thinking=thinking,
             gemini_parts=getattr(response, "gemini_parts", None),
+            anthropic_blocks=getattr(response, "anthropic_blocks", None),
             use_native_tools=self._use_native_tools,
         )
         await self._maybe_rethink(messages, state, round_index)

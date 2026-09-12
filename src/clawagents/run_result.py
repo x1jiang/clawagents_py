@@ -16,6 +16,8 @@ def _message_to_dict(m: LLMMessage) -> dict[str, Any]:
         data["tool_calls_meta"] = m.tool_calls_meta
     if m.thinking:
         data["thinking"] = m.thinking
+    if getattr(m, "anthropic_blocks", None) is not None:
+        data["anthropic_blocks"] = m.anthropic_blocks
     return data
 
 
@@ -26,6 +28,7 @@ def _dict_to_message(d: dict[str, Any]) -> LLMMessage:
         tool_call_id=d.get("tool_call_id"),
         tool_calls_meta=d.get("tool_calls_meta"),
         thinking=d.get("thinking"),
+        anthropic_blocks=d.get("anthropic_blocks"),
     )
 
 

@@ -207,5 +207,9 @@ def count_messages_tokens(
         ):
             total += cached_system_tokens + _PER_MESSAGE_OVERHEAD
         else:
-            total += count_tokens_content(m.content, model, multiplier) + _PER_MESSAGE_OVERHEAD
+            blocks = getattr(m, "anthropic_blocks", None)
+            # The provider replays full blocks, including hidden reasoning and
+            # tool inputs, instead of the shorter display content.
+            content = json.dumps(blocks, ensure_ascii=False) if blocks else m.content
+            total += count_tokens_content(content, model, multiplier) + _PER_MESSAGE_OVERHEAD
     return total

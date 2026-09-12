@@ -96,7 +96,7 @@ def test_claude_dotted_minor_beats_family_fallback() -> None:
 )
 def test_gemini_1m(model: str) -> None:
     window, ratio = resolve_context_budget(model, 128_000)
-    assert window == 1_000_000
+    assert window == (1_048_576 if model.startswith("gemini-3.8") else 1_000_000)
     assert ratio == pytest.approx(0.90)
 
 

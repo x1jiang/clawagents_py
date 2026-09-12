@@ -413,7 +413,7 @@ class CompletionHandler:
             messages.extend(
                 [
                     LLMMessage(
-                        role="assistant", content=response.content, thinking=thinking
+                        role="assistant", content=response.content, thinking=thinking, anthropic_blocks=getattr(response, "anthropic_blocks", None)
                     ),
                     LLMMessage(
                         role="user",
@@ -597,7 +597,7 @@ class CompletionHandler:
         block_reason = self._completion_block_reason()
         if block_reason:
             messages.append(
-                LLMMessage(role="assistant", content=response.content, thinking=thinking)
+                LLMMessage(role="assistant", content=response.content, thinking=thinking, anthropic_blocks=getattr(response, "anthropic_blocks", None))
             )
             messages.append(LLMMessage(role="user", content=block_reason))
             return CompletionDecision("continue")
@@ -617,7 +617,7 @@ class CompletionHandler:
         )
         if not assistant_appended:
             messages.append(
-                LLMMessage(role="assistant", content=response.content, thinking=thinking)
+                LLMMessage(role="assistant", content=response.content, thinking=thinking, anthropic_blocks=getattr(response, "anthropic_blocks", None))
             )
         return CompletionDecision("done")
 
@@ -656,7 +656,7 @@ class CompletionHandler:
         if not code:
             return None
         messages.append(
-            LLMMessage(role="assistant", content=response.content, thinking=thinking)
+            LLMMessage(role="assistant", content=response.content, thinking=thinking, anthropic_blocks=getattr(response, "anthropic_blocks", None))
         )
         self._events.emit("tool_call", {"name": "codeact", "args": {"code": code[:500]}})
         result = run_code_action(
@@ -715,7 +715,7 @@ class CompletionHandler:
     ) -> bool | None:
         if not should_final_check:
             return False
-        messages.append(LLMMessage(role="assistant", content=response.content, thinking=thinking))
+        messages.append(LLMMessage(role="assistant", content=response.content, thinking=thinking, anthropic_blocks=getattr(response, "anthropic_blocks", None)))
         await consult_advisor(messages, "final-check")
         last_message = messages[-1] if messages else None
         if (
@@ -751,7 +751,7 @@ class CompletionHandler:
                 return assistant_appended
             if not assistant_appended:
                 messages.append(
-                    LLMMessage(role="assistant", content=response.content, thinking=thinking)
+                    LLMMessage(role="assistant", content=response.content, thinking=thinking, anthropic_blocks=getattr(response, "anthropic_blocks", None))
                 )
                 assistant_appended = True
             orchestrator = GoalOrchestrator(

@@ -140,16 +140,16 @@ def test_mantle_anthropic_provider_uses_bearer_auth():
     from clawagents.providers.llm import MantleAnthropicProvider
 
     cfg = EngineConfig(
-        openai_base_url="https://bedrock-mantle.us-west-2.api.aws/v1",
+        openai_base_url="https://bedrock-mantle.us-east-1.api.aws/v1",
         anthropic_api_key="mantle-key",
         anthropic_model="anthropic.claude-sonnet-5",
-        anthropic_base_url="https://bedrock-mantle.us-west-2.api.aws/anthropic",
+        anthropic_base_url="https://bedrock-mantle.us-east-1.api.aws/anthropic",
     )
     provider = MantleAnthropicProvider(cfg)
     headers = {k.lower(): v for k, v in provider.client.auth_headers.items()}
     assert headers.get("authorization") == "Bearer mantle-key"
     assert "x-api-key" not in headers
-    assert "bedrock-mantle.us-west-2.api.aws/anthropic" in str(provider.client.base_url)
+    assert "bedrock-mantle.us-east-1.api.aws/anthropic" in str(provider.client.base_url)
 
 
 @pytest.mark.parametrize(

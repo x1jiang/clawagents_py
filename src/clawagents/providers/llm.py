@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import hashlib
 import inspect
 import json
@@ -42,7 +43,9 @@ class LLMMessage:
         gemini_parts: list[dict[str, Any]] | None = None,
         thinking: str | None = None,
         added_tool_names: list[str] | None = None,
+        anthropic_blocks: list[dict[str, Any]] | None = None,
     ):
+        self.anthropic_blocks = deepcopy(anthropic_blocks)
         self.role = role
         self.content = content
         self.tool_call_id = tool_call_id          # For role="tool": the ID this result belongs to
@@ -95,7 +98,9 @@ class LLMResponse:
         thinking: str | None = None,
         finish_reason: str | None = None,
         reasoning_tokens: int = 0,
+        anthropic_blocks: list[dict[str, Any]] | None = None,
     ):
+        self.anthropic_blocks = deepcopy(anthropic_blocks)
         self.content = content
         self.model = model
         self.tokens_used = tokens_used
@@ -906,7 +911,7 @@ def _bare_openai_model_id(model: str) -> str:
     helpers must all strip the same way or routing/reasoning drift (400s).
     """
     m = (model or "").strip().lower()
-    for prefix in ("openai.", "azure.", "mantle."):
+    for prefix in ("openai.", "azure.", "mantle.", "xai."):
         if m.startswith(prefix):
             m = m[len(prefix) :]
     return m
@@ -1021,7 +1026,7 @@ def clamp_reasoning_effort_for_model(model: str, effort: str | None) -> str | No
 
     if _bare_openai_model_id(model).startswith("gpt-6-astra"):
         return "low" if effort in ("none", "minimal") else effort
-    if not is_grok_model(model):
+    if not is_grok_model(_bare_openai_model_id(model)):
         return effort
     if effort in _GROK_EFFORT_LEVELS:
         return effort
@@ -2925,6 +2930,28 @@ def _gemini_part_from_block(part: Any) -> dict[str, Any] | None:
     return None
 
 
+def _gemini_38_model(model: str) -> bool:
+    # Keep the migration scoped to 3.8; 3.7 and older retain their sampling API.
+    return bool(_re.search(r"(?:^|/)gemini-3\.8(?:-|$)", (model or "").lower()))
+
+
+def _gemini_function_retry_config(config: Any) -> Any:
+    """Keep generation/structured-output settings when recovering a tool call."""
+    options = {}
+    for attr in ("max_output_tokens", "temperature", "system_instruction", "tools",
+                 "thinking_config", "response_mime_type", "response_schema", "response_json_schema"):
+        value = getattr(config, attr, None)
+        if value is not None:
+            options[attr] = value
+    options["tool_config"] = {"function_calling_config": {"mode": "ANY"}}
+    return types.GenerateContentConfig(**options)
+
+
+def _gemini_thought_tokens(usage: Any) -> int:
+    value = getattr(usage, "thoughts_token_count", 0)
+    return max(0, value) if isinstance(value, int) else 0
+
+
 class GeminiProvider(LLMProvider):
     name = "gemini"
 
@@ -2935,6 +2962,7 @@ class GeminiProvider(LLMProvider):
         self.model = config.gemini_model
         self._max_tokens = config.max_tokens
         self._temperature = config.temperature
+        self._reasoning_effort = normalize_reasoning_effort(config.reasoning_effort)
 
     async def chat(
         self,
@@ -3003,10 +3031,19 @@ class GeminiProvider(LLMProvider):
         # it so Gemini never receives the stray internal marker.
         system_instruction = "\n".join(system_parts).replace("__CACHE_BOUNDARY__", "").strip()
 
-        config_opts: dict[str, Any] = {
-            "max_output_tokens": self._max_tokens,
-            "temperature": self._temperature,
-        }
+        config_opts: dict[str, Any] = {"max_output_tokens": self._max_tokens}
+        if _gemini_38_model(self.model):
+            # 3.8 rejects sampling controls and minimal thinking. Omitting the
+            # level preserves its medium default; shared UI effort maps safely.
+            config_opts["max_output_tokens"] = min(self._max_tokens, 65_536)
+            effort = getattr(self, "_reasoning_effort", None)
+            if effort:
+                level = "low" if effort in ("none", "minimal", "low") else (
+                    "medium" if effort == "medium" else "high"
+                )
+                config_opts["thinking_config"] = {"thinking_level": level}
+        else:
+            config_opts["temperature"] = self._temperature
         if system_instruction:
             config_opts["system_instruction"] = system_instruction
         if tools:
@@ -3115,18 +3152,13 @@ class GeminiProvider(LLMProvider):
         fr_str = str(finish_reason) if finish_reason else ""
         if not _malformed_retry and "MALFORMED_FUNCTION_CALL" in fr_str and not fn_calls:
             logger.warning("  [gemini] MALFORMED_FUNCTION_CALL detected — retrying with mode=ANY")
-            retry_opts: dict[str, Any] = {}
-            for attr in ("max_output_tokens", "temperature", "system_instruction", "tools"):
-                val = getattr(gemini_config, attr, None)
-                if val is not None:
-                    retry_opts[attr] = val
-            retry_opts["tool_config"] = {"function_calling_config": {"mode": "ANY"}}
-            retry_config = types.GenerateContentConfig(**retry_opts)
+            retry_config = _gemini_function_retry_config(gemini_config)
             return await self._request_once(user_contents, retry_config, _malformed_retry=True)
 
         _um = resp.usage_metadata
         _prompt_tokens = (getattr(_um, "prompt_token_count", 0) or 0) if _um else 0
-        _output_tokens = (getattr(_um, "candidates_token_count", 0) or 0) if _um else 0
+        _thought_tokens = _gemini_thought_tokens(_um)
+        _output_tokens = ((getattr(_um, "candidates_token_count", 0) or 0) if _um else 0) + _thought_tokens
         _cache_read = (
             int(getattr(_um, "cached_content_token_count", 0) or 0) if _um else 0
         )
@@ -3138,6 +3170,7 @@ class GeminiProvider(LLMProvider):
             tokens_used=_prompt_tokens + _output_tokens,
             prompt_tokens=_prompt_tokens,
             cache_read_tokens=_cache_read,
+            reasoning_tokens=_thought_tokens,
             tool_calls=fn_calls,
             gemini_parts=raw_parts,
         )
@@ -3182,6 +3215,7 @@ class GeminiProvider(LLMProvider):
             chunks: list[str] = []
             final_tokens = 0
             final_prompt_tokens = 0
+            final_thought_tokens = 0
             final_cache_read = 0
             fn_calls: list[NativeToolCall] = []
             all_stream_parts: list[Any] = []
@@ -3202,6 +3236,7 @@ class GeminiProvider(LLMProvider):
                             model=self.model,
                             tokens_used=final_tokens,
                             prompt_tokens=final_prompt_tokens,
+                            reasoning_tokens=final_thought_tokens,
                             cache_read_tokens=final_cache_read,
                             partial=True,
                             tool_calls=fn_calls if fn_calls else None,
@@ -3246,9 +3281,10 @@ class GeminiProvider(LLMProvider):
                         if hasattr(chunk, "usage_metadata") and chunk.usage_metadata:
                             _um = chunk.usage_metadata
                             final_prompt_tokens = getattr(_um, "prompt_token_count", 0) or 0
+                            final_thought_tokens = _gemini_thought_tokens(_um)
                             final_tokens = final_prompt_tokens + (
                                 getattr(_um, "candidates_token_count", 0) or 0
-                            )
+                            ) + final_thought_tokens
                             final_cache_read = int(
                                 getattr(_um, "cached_content_token_count", 0) or 0
                             )
@@ -3258,13 +3294,7 @@ class GeminiProvider(LLMProvider):
                 fr_str = str(last_finish_reason) if last_finish_reason else ""
                 if "MALFORMED_FUNCTION_CALL" in fr_str and not fn_calls:
                     logger.warning("  [gemini] MALFORMED_FUNCTION_CALL in stream — retrying with mode=ANY (non-stream)")
-                    retry_opts: dict[str, Any] = {}
-                    for attr in ("max_output_tokens", "temperature", "system_instruction", "tools"):
-                        val = getattr(gemini_config, attr, None)
-                        if val is not None:
-                            retry_opts[attr] = val
-                    retry_opts["tool_config"] = {"function_calling_config": {"mode": "ANY"}}
-                    retry_config = types.GenerateContentConfig(**retry_opts)
+                    retry_config = _gemini_function_retry_config(gemini_config)
                     return await self._request_once(user_contents, retry_config, _malformed_retry=True)
 
                 _record_stream_breaker(breaker, success=True)
@@ -3273,6 +3303,7 @@ class GeminiProvider(LLMProvider):
                     model=self.model,
                     tokens_used=final_tokens,
                     prompt_tokens=final_prompt_tokens,
+                    reasoning_tokens=final_thought_tokens,
                     cache_read_tokens=final_cache_read,
                     tool_calls=fn_calls if fn_calls else None,
                     gemini_parts=_stamp_function_call_ids(
@@ -3305,6 +3336,7 @@ class GeminiProvider(LLMProvider):
                         model=self.model,
                         tokens_used=final_tokens,
                         prompt_tokens=final_prompt_tokens,
+                        reasoning_tokens=final_thought_tokens,
                         partial=True,
                         tool_calls=fn_calls if fn_calls else None,
                         gemini_parts=_stamp_function_call_ids(
@@ -3325,6 +3357,32 @@ try:
 except ImportError:
     _anthropic_mod = None  # type: ignore
     _HAS_ANTHROPIC = False
+
+
+def _serialize_anthropic_blocks(blocks: Any) -> list[dict[str, Any]] | None:
+    """Preserve response blocks verbatim, including empty signed/redacted thought."""
+    output = []
+    for block in blocks or []:
+        if isinstance(block, dict):
+            output.append(deepcopy(block))
+            continue
+        dump = getattr(block, "model_dump", None)
+        data = dump(mode="json", exclude_none=True) if callable(dump) else None
+        if isinstance(data, dict):
+            output.append(data)
+            continue
+        # Small protocol-compatible providers/test doubles without SDK models.
+        kind = getattr(block, "type", None)
+        fields = {"text": ("text",), "thinking": ("thinking", "signature"),
+                  "redacted_thinking": ("data",), "tool_use": ("id", "name", "input")}.get(kind if isinstance(kind, str) else "")
+        if fields:
+            data = {"type": kind}
+            for key in fields:
+                value = getattr(block, key, None)
+                if isinstance(value, (str, dict)):
+                    data[key] = deepcopy(value)
+            output.append(data)
+    return output or None
 
 
 def _anthropic_message_content(content: Any) -> Any:
@@ -3450,6 +3508,29 @@ class _DeferredToolsMixin:
         return True
 
 
+def _current_anthropic_model(model: str) -> str | None:
+    # Accept direct, Mantle and regional Bedrock IDs, including dated snapshots.
+    match = _re.search(
+        r"(?:^|[./])claude-(fable-5-1|fable-5|opus-5|sonnet-5)"
+        r"(?:$|-(?:\d{8}(?:-v\d+)?|v\d+)(?::\d+)?$)",
+        (model or "").strip().lower(),
+    )
+    return match.group(1) if match else None
+
+
+def _apply_current_anthropic_effort(kwargs: dict[str, Any], model: str, effort: str | None) -> None:
+    """Current Claude 5 models default to adaptive thinking; older models do not."""
+    current = _current_anthropic_model(model)
+    if not current or not effort:
+        return
+    if effort == "none" and not current.startswith("fable-"):
+        kwargs["thinking"] = {"type": "disabled"}
+    # Fable thinking is always adaptive; never send its rejected disabled mode.
+    # low also satisfies Opus 5's effort ceiling when thinking is disabled.
+    effective = "low" if effort in ("none", "minimal") else effort
+    kwargs.setdefault("output_config", {})["effort"] = effective
+
+
 class AnthropicProvider(_DeferredToolsMixin, LLMProvider):
     name = "anthropic"
 
@@ -3467,6 +3548,7 @@ class AnthropicProvider(_DeferredToolsMixin, LLMProvider):
         self.model = config.anthropic_model
         self._max_tokens = config.max_tokens
         self._temperature = config.temperature
+        self._reasoning_effort = normalize_reasoning_effort(config.reasoning_effort)
 
     async def chat(
         self,
@@ -3513,7 +3595,7 @@ class AnthropicProvider(_DeferredToolsMixin, LLMProvider):
     ) -> LLMResponse:
         _ = session_id
         system_parts = []
-        api_messages = []
+        api_messages: list[dict[str, Any]] = []
 
         # Cache-preserving tool activation: tools introduced mid-run are sent
         # as deferred schemas + a transcript-level reference, leaving the
@@ -3570,6 +3652,10 @@ class AnthropicProvider(_DeferredToolsMixin, LLMProvider):
                     prev["content"].extend(extra_blocks)
                 else:
                     api_messages.append({"role": "user", "content": [block, *extra_blocks]})
+            elif m.role == "assistant" and getattr(m, "anthropic_blocks", None):
+                # Signed thinking is an opaque transcript block, not display
+                # text. Never rebuild/filter it or duplicate its tool_use list.
+                api_messages.append({"role": "assistant", "content": deepcopy(m.anthropic_blocks)})
             elif m.role == "assistant" and m.tool_calls_meta:
                 content_blocks = []
                 if m.content:
@@ -3596,9 +3682,15 @@ class AnthropicProvider(_DeferredToolsMixin, LLMProvider):
         except Exception:
             pass
 
+        from clawagents.graph.model_profiles import resolve_model_profile
+
+        profile = resolve_model_profile(self.model) or {}
+        output_limit = min(
+            self._max_tokens, int(profile.get("max_output_tokens", self._max_tokens))
+        )
         kwargs: dict[str, Any] = {
             "model": self.model,
-            "max_tokens": self._max_tokens,
+            "max_tokens": output_limit,
             "messages": api_messages,
         }
         if system_parts:
@@ -3636,6 +3728,14 @@ class AnthropicProvider(_DeferredToolsMixin, LLMProvider):
                 kwargs["output_config"] = {"format": anthropic_output_format(schema)}
             except Exception:
                 pass
+        _apply_current_anthropic_effort(
+            kwargs, self.model, getattr(self, "_reasoning_effort", None)
+        )
+        if _current_anthropic_model(self.model) == "fable-5-1":
+            # Documented recovery for edited/compacted prefixes. Send original
+            # blocks; the server alone decides which bindings are invalid.
+            kwargs["thinking"] = {"type": "adaptive", "block_binding": {"prefix_mismatch_behavior": "drop_block"}}
+            kwargs["extra_headers"] = {"anthropic-beta": "thinking-binding-controls-2026-08-01"}
         if tools:
             from clawagents.providers.tool_schema import emit_openai_schema_node
 
@@ -3704,6 +3804,8 @@ class AnthropicProvider(_DeferredToolsMixin, LLMProvider):
             cache_creation_tokens=cache_creation,
             cache_read_tokens=cache_read,
             prompt_tokens=prompt_total,
+            anthropic_blocks=_serialize_anthropic_blocks(resp.content),
+            finish_reason=getattr(resp, "stop_reason", None),
         )
 
     async def _stream_with_retry(
@@ -3749,6 +3851,12 @@ class AnthropicProvider(_DeferredToolsMixin, LLMProvider):
             cache_read = 0
             prompt_tokens = 0
             first_token_fired = False
+            preserved: dict[int, dict[str, Any]] = {}
+            complete_blocks: set[int] = set()
+            finish_reason: str | None = None
+
+            def completed_content() -> list[dict[str, Any]] | None:
+                return [deepcopy(preserved[i]) for i in sorted(complete_blocks) if i in preserved] or None
 
             try:
                 async with self.client.messages.stream(**kwargs) as stream:
@@ -3762,7 +3870,26 @@ class AnthropicProvider(_DeferredToolsMixin, LLMProvider):
                                 tool_calls=tool_calls if tool_calls else None,
                                 cache_creation_tokens=cache_creation,
                                 cache_read_tokens=cache_read,
+                                anthropic_blocks=completed_content(),
+                                finish_reason=finish_reason,
                             )
+
+                        index = getattr(event, "index", 0)
+                        if event.type == "content_block_start":
+                            blocks = _serialize_anthropic_blocks([event.content_block])
+                            if blocks:
+                                preserved[index] = blocks[0]
+                        elif event.type == "content_block_delta" and index in preserved:
+                            block = preserved[index]
+                            delta = event.delta
+                            for key in ("text", "thinking", "signature"):
+                                value = getattr(delta, key, None)
+                                if isinstance(value, str):
+                                    block[key] = str(block.get(key, "")) + value
+                        elif event.type == "content_block_stop":
+                            if index in preserved and preserved[index].get("type") == "tool_use" and current_tool and current_tool["input_json"]:
+                                preserved[index]["input"] = _repair_json(current_tool["input_json"] or "{}")
+                            complete_blocks.add(index)
 
                         if event.type == "message_start" and hasattr(event, "message"):
                             u = getattr(event.message, "usage", None)
@@ -3780,6 +3907,7 @@ class AnthropicProvider(_DeferredToolsMixin, LLMProvider):
                                         "id": event.content_block.id,
                                         "name": event.content_block.name,
                                         "input_json": "",
+                                        "input": getattr(event.content_block, "input", {}) or {},
                                     }
                         elif event.type == "content_block_delta":
                             if hasattr(event.delta, "text"):
@@ -3797,11 +3925,14 @@ class AnthropicProvider(_DeferredToolsMixin, LLMProvider):
                             if current_tool:
                                 tool_calls.append(NativeToolCall(
                                     tool_name=current_tool["name"],
-                                    args=_repair_json(current_tool["input_json"] or "{}"),
+                                    args=_repair_json(current_tool["input_json"]) if current_tool["input_json"] else current_tool["input"],
                                     tool_call_id=current_tool["id"],
                                 ))
                                 current_tool = None
                         elif event.type == "message_delta":
+                            stop = getattr(getattr(event, "delta", None), "stop_reason", None)
+                            if isinstance(stop, str):
+                                finish_reason = stop
                             if hasattr(event.usage, "output_tokens"):
                                 output_tokens = event.usage.output_tokens
 
@@ -3816,6 +3947,8 @@ class AnthropicProvider(_DeferredToolsMixin, LLMProvider):
                     cache_creation_tokens=cache_creation,
                     cache_read_tokens=cache_read,
                     prompt_tokens=prompt_tokens + cache_creation + cache_read,
+                    anthropic_blocks=completed_content(),
+                    finish_reason=finish_reason,
                 )
 
             except Exception as exc:
@@ -3840,6 +3973,8 @@ class AnthropicProvider(_DeferredToolsMixin, LLMProvider):
                         tool_calls=tool_calls if tool_calls else None,
                         cache_creation_tokens=cache_creation,
                         cache_read_tokens=cache_read,
+                        anthropic_blocks=completed_content(),
+                        finish_reason=finish_reason,
                     )
                 break
 
@@ -3962,6 +4097,7 @@ class BedrockProvider(AnthropicProvider):
         )
         self._max_tokens = config.max_tokens
         self._temperature = config.temperature
+        self._reasoning_effort = normalize_reasoning_effort(config.reasoning_effort)
 
 
 class MantleAnthropicProvider(AnthropicProvider):
@@ -3993,6 +4129,16 @@ class MantleAnthropicProvider(AnthropicProvider):
         if not base and config.openai_base_url:
             base = mantle_anthropic_base_url(config.openai_base_url)
         region = _mantle_region_from_url(base or config.openai_base_url)
+        if _current_anthropic_model(config.anthropic_model) in ("opus-5", "sonnet-5"):
+            # AWS model cards list these Mantle regions. Never silently move a
+            # configured workload across regions to make a model available.
+            supported = ("us-east-1", "eu-north-1", "eu-west-1", "ap-southeast-4", "us-gov-west-1")
+            if region not in supported:
+                raise ValueError(
+                    f"{config.anthropic_model} is unavailable through Bedrock Mantle in {region}. "
+                    f"Choose a supported Mantle region: {', '.join(supported)}. "
+                    "Your configured region has not been changed."
+                )
         mantle_cls = getattr(_anthropic_mod, "AsyncAnthropicBedrockMantle", None)
         if mantle_cls is not None:
             client_kwargs: dict[str, Any] = {"aws_region": region, "api_key": key}
@@ -4019,6 +4165,7 @@ class MantleAnthropicProvider(AnthropicProvider):
         self.model = (config.anthropic_model or "").strip()
         self._max_tokens = config.max_tokens
         self._temperature = config.temperature
+        self._reasoning_effort = normalize_reasoning_effort(config.reasoning_effort)
 
 
 def _converse_content_blocks(content: Any) -> list[dict[str, Any]]:
@@ -4130,7 +4277,12 @@ class BedrockConverseProvider(LLMProvider):
             (config.bedrock_model or "").strip()
             or "amazon.nova-pro-v1:0"
         )
-        self._max_tokens = config.max_tokens
+        from clawagents.graph.model_profiles import resolve_model_profile
+
+        profile = resolve_model_profile(self.model) or {}
+        self._max_tokens = min(
+            config.max_tokens, int(profile.get("max_output_tokens", config.max_tokens))
+        )
         self._temperature = config.temperature
 
     async def chat(
@@ -4362,6 +4514,8 @@ def _mantle_openai_model_id(model: str) -> str:
     m = (model or "").strip()
     if not m:
         return m
+    if m.lower() == "grok-4.6":
+        return "xai.grok-4.6"
     if m.lower().startswith("openai.") or is_mantle_xai_model(m):
         return m
     if is_mantle_openai_responses_model(m):
@@ -4411,7 +4565,7 @@ def create_provider(
     # no base_url configured. An explicit base_url still wins (proxies/gateways).
     from clawagents.providers.model_classify import XAI_BASE_URL, is_grok_model
 
-    if is_grok_model(ref.raw or model_name):
+    if is_grok_model(ref.raw or model_name) and not _is_mantle_url(config.openai_base_url):
         if not (config.openai_base_url or "").strip():
             config.openai_base_url = XAI_BASE_URL
         if not (config.openai_api_key or "").strip():
@@ -4464,6 +4618,15 @@ def create_provider(
                 "GPT-6 Astra on Bedrock Mantle requires us-west-2 (Oregon). "
                 "Set the AWS region and Mantle base URL to us-west-2."
             )
+        if (
+            _bare_openai_model_id(model_name) == "grok-4.6"
+            and _mantle_region_from_url(config.openai_base_url) != "us-west-2"
+        ):
+            raise ValueError(
+                "Grok 4.6 on Bedrock Mantle requires us-west-2 (Oregon). "
+                "Set the AWS region and Mantle base URL to us-west-2. "
+                "Your configured region has not been changed."
+            )
         # Every Mantle path is Bearer-authenticated; none accept a placeholder
         # or a vendor key, so fail here instead of on an opaque 401.
         mantle_key = _mantle_gateway_key(config)
@@ -4492,8 +4655,18 @@ def create_provider(
             # GPT-5.x needs ``openai.`` prefix; xAI keeps ``xai.grok-*``.
             config.openai_model = _mantle_openai_model_id(model_name)
             return OpenAIProvider(config)
-        # Chat-completions catalog: keep …/v1 (or normalize to it).
-        if _normalize_wire_api(config.openai_wire_api) == "auto":
+        # These verified catalog models only serve Chat Completions. A model
+        # switch can retain Astra's /openai/v1 + responses settings, so reset
+        # both while keeping the configured regional origin and credentials.
+        if model_name.lower() in {
+            "minimax.minimax-m2.5", "mistral.devstral-2-123b",
+            "qwen.qwen3-coder-next", "nvidia.nemotron-super-3-120b",
+            "mistral.mistral-large-3-675b-instruct",
+        }:
+            config.openai_base_url = _mantle_origin(config.openai_base_url) + "/v1"
+            config.openai_wire_api = "chat_completions"
+        # Unknown/custom models keep an explicitly chosen transport.
+        elif _normalize_wire_api(config.openai_wire_api) == "auto":
             config.openai_wire_api = "chat_completions"
 
     if kind == "anthropic" or lower.startswith("claude") or lower.startswith("anthropic"):
@@ -4522,3 +4695,26 @@ def create_provider(
         return OpenAIProvider(config)
     config.openai_model = model_name
     return OpenAIProvider(config)
+
+
+def has_active_anthropic_tool_turn(messages: list[LLMMessage], provider: Any) -> bool:
+    """Protect signed reasoning until the model consumes its tool results.
+
+    A later tool-free assistant response closes the round. Restrict the guard
+    to the Anthropic transport; histories switched to another provider need
+    not retain Anthropic's encrypted reasoning prefix.
+    """
+    from clawagents.providers.fallback import FallbackProvider
+
+    if isinstance(provider, FallbackProvider):
+        return any(has_active_anthropic_tool_turn(messages, candidate)
+                   for candidate in [provider.primary, *provider.fallbacks])
+    if not isinstance(provider, AnthropicProvider):
+        return False
+    for message in reversed(messages):
+        blocks = getattr(message, "anthropic_blocks", None) or []
+        if message.role == "assistant" and blocks:
+            return bool(message.tool_calls_meta) and any(
+                block.get("type") in ("thinking", "redacted_thinking") for block in blocks
+            )
+    return False
