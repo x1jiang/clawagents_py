@@ -771,15 +771,23 @@ class ToolResultProcessor:
             command = call.args.get("command")
             if isinstance(call.args.get("then_run"), dict):
                 command = call.args["then_run"].get("command")
-            output, artifact_id = prepare_tool_output_for_context(
-                tool_name=call.tool_name,
-                tool_use_id=call_id,
-                output=raw_output,
-                workspace=_run_context_workspace(self._run_context),
-                success=bool(result.success),
-                command=command if isinstance(command, str) else None,
-                efficiency=counters,
-            )
+            from clawagents.memory.observation_projection import archive_observation, should_delay_observation
+            if should_delay_observation(self._run_context, call.tool_name, raw_output, bool(result.success)):
+                archived = archive_observation(
+                    self._run_context, tool_name=call.tool_name, call_id=call_id,
+                    output=raw_output, success=bool(result.success),
+                )
+                output, artifact_id = archived or raw_output, None
+            else:
+                output, artifact_id = prepare_tool_output_for_context(
+                    tool_name=call.tool_name,
+                    tool_use_id=call_id,
+                    output=raw_output,
+                    workspace=_run_context_workspace(self._run_context),
+                    success=bool(result.success),
+                    command=command if isinstance(command, str) else None,
+                    efficiency=counters,
+                )
             if artifact_id is not None:
                 from .tool_observation import _estimate_tokens as estimate_tokens
                 counters["tokens_avoided_by_handles"] += max(

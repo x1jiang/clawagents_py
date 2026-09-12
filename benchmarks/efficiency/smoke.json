@@ -1,0 +1,153 @@
+{
+  "name": "Public numeric smoke tasks; not private held-out evidence",
+  "evidence_scope": "smoke",
+  "tasks": [
+    {
+      "id": "clamp",
+      "split": "development",
+      "function": "clamp",
+      "parameters": [
+        "value",
+        "lower",
+        "upper"
+      ],
+      "prompt": "Clamp value to inclusive lower/upper bounds (lower <= upper). Fix answer.py, preserving its signature. Use a single return expression; min, max, abs and numeric operators are allowed. Run verify.",
+      "source": "def clamp(value, lower, upper):\n    return 0\n",
+      "solution": "def clamp(value, lower, upper):\n    return min(max(value, lower), upper)\n",
+      "checks": [
+        {
+          "args": [
+            -2,
+            0,
+            10
+          ],
+          "expected": 0
+        },
+        {
+          "args": [
+            15,
+            0,
+            10
+          ],
+          "expected": 10
+        },
+        {
+          "args": [
+            4,
+            0,
+            10
+          ],
+          "expected": 4
+        }
+      ]
+    },
+    {
+      "id": "distance",
+      "split": "development",
+      "function": "distance",
+      "parameters": [
+        "left",
+        "right"
+      ],
+      "prompt": "Return the absolute numeric distance between left and right. Fix answer.py, preserving its signature. Use a single return expression; min, max, abs and numeric operators are allowed. Run verify.",
+      "source": "def distance(left, right):\n    return 0\n",
+      "solution": "def distance(left, right):\n    return abs(left - right)\n",
+      "checks": [
+        {
+          "args": [
+            2,
+            7
+          ],
+          "expected": 5
+        },
+        {
+          "args": [
+            7,
+            2
+          ],
+          "expected": 5
+        },
+        {
+          "args": [
+            -4,
+            3
+          ],
+          "expected": 7
+        }
+      ]
+    },
+    {
+      "id": "ceiling_division",
+      "split": "heldout",
+      "function": "ceiling_division",
+      "parameters": [
+        "value",
+        "divisor"
+      ],
+      "prompt": "Return mathematical ceiling of value divided by strictly positive divisor, including negative value. Fix answer.py, preserving its signature. Use a single return expression; min, max, abs and numeric operators are allowed. Run verify.",
+      "source": "def ceiling_division(value, divisor):\n    return 0\n",
+      "solution": "def ceiling_division(value, divisor):\n    return -(-value // divisor)\n",
+      "checks": [
+        {
+          "args": [
+            1,
+            3
+          ],
+          "expected": 1
+        },
+        {
+          "args": [
+            6,
+            3
+          ],
+          "expected": 2
+        },
+        {
+          "args": [
+            0,
+            3
+          ],
+          "expected": 0
+        },
+        {
+          "args": [
+            -4,
+            3
+          ],
+          "expected": -1
+        }
+      ]
+    },
+    {
+      "id": "sign",
+      "split": "heldout",
+      "function": "sign",
+      "parameters": [
+        "value"
+      ],
+      "prompt": "Return -1 for negative value, 0 for zero, and 1 for positive value. Fix answer.py, preserving its signature. Use a single return expression; min, max, abs and numeric operators are allowed. Run verify.",
+      "source": "def sign(value):\n    return 0\n",
+      "solution": "def sign(value):\n    return 1 if value > 0 else (-1 if value < 0 else 0)\n",
+      "checks": [
+        {
+          "args": [
+            -5
+          ],
+          "expected": -1
+        },
+        {
+          "args": [
+            0
+          ],
+          "expected": 0
+        },
+        {
+          "args": [
+            8
+          ],
+          "expected": 1
+        }
+      ]
+    }
+  ]
+}

@@ -102,7 +102,7 @@ updates and final/restored usage; cache-read and cache-write counts are preserve
 Older sidecar payloads without the new fields remain accepted.
 
 The later research items—LLM reduction, economic plan-boundary compaction,
-full-send projection experiments, deduplication, and held-out efficiency CI—remain
+deduplication and automated private held-out efficiency CI—remain
 separate work requiring capability and efficiency benchmarks.
 
 ## Implementation map and verification
@@ -129,3 +129,15 @@ passes. The expanded fusion mypy check reports 18 existing diagnostics in three
 files; comparison against HEAD confirms the diagnostic set is unchanged.
 
 Existing unrelated working-tree changes were preserved. VS Code 1.0.191 requires Python 6.20.80 so installed clients receive these backend features together.
+
+## 6.20.81: delayed-observation experiment and paired evaluation
+
+Pass `RunContext(observation_full_sends=1)` or `2` to `agent.invoke(..., run_context=context)` to test delayed compression. Zero remains the default. Eligible successful text outputs from `read_file`, `grep`, and `execute` between 10,000 and 600,000 characters are archived exactly and sent in full for the selected number of successful harness model calls, then represented by a short excerpt and paged-recall handle. Hidden transport retries are not counted. Failures, receipts, skill instructions, and recall pages retain their existing handling.
+
+Projection is a disposable provider view. Budget preparation uses that same view, while durable history retains the full observation. Archive failure preserves the original output; missing/corrupt archives prevent substitution. Existing emergency budget protections take precedence over the full-send allowance. Counters reset on each invocation/branch; old observations loaded from a previous invocation remain subject to the normal compaction ladder rather than inheriting send counts. Compacted observations release their in-memory projection records while their archives remain available.
+
+`tokens_avoided_by_handles` includes estimated per-request removal by this experiment, not cash savings. Use `scripts/benchmark_efficiency.py` and `benchmarks/efficiency/README.md` to freeze, run, and compare arms. Public fixture/smoke cases validate the machinery and cannot qualify an efficiency claim. Private held-out live cases and complete provider usage are required for qualification. The default has not changed based on fixture outcomes.
+
+Astra is selectable as `gpt-6-astra` for OpenAI or `openai.gpt-6-astra` for Mantle in VS Code 1.0.192. Mantle uses Responses in us-west-2; unsupported regions produce an actionable error without silently moving requests. Limits and list-price estimates follow the official [OpenAI model card](https://developers.openai.com/api/docs/models/gpt-6-astra) and [AWS model card](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-6-astra.html).
+
+The initial bounded OpenAI Astra smoke comparison passed all four task verifiers but rejected the one-full-send candidate on cost. See [initial results](benchmarks/efficiency/INITIAL_RESULTS.md). This is why the projection policy remains opt-in.

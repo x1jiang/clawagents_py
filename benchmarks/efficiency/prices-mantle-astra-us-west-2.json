@@ -1,0 +1,8 @@
+{
+  "input_tokens": 11.0,
+  "cached_input_tokens": 1.1,
+  "cache_creation_tokens": 13.75,
+  "output_tokens": 55.0,
+  "max_prompt_tokens": 272000,
+  "source": "Amazon Bedrock Mantle GPT-6 Astra in-region us-west-2 pricing, checked 2026-09-12: https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-6-astra.html"
+}

@@ -395,6 +395,8 @@ class RunBootstrapper:
         run_context._metadata["session_id"] = self._provider_session_id
         run_context._metadata["sessionId"] = self._provider_session_id
         run_context.efficiency = empty_efficiency()
+        # A resumed/forked run must not inherit another branch's send counts.
+        run_context._observations = {}
         self._usage = run_context.usage
 
         # Iteration budget

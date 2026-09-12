@@ -601,6 +601,7 @@ class _AgentAsTool:
                     run_context,
                     todos=[],
                     efficiency=empty_efficiency(),
+                    _observations={},
                     active_skills=dict(run_context.active_skills),
                     _metadata=dict(run_context._metadata),
                 )

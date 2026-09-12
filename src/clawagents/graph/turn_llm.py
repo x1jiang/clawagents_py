@@ -23,6 +23,7 @@ class LLMCallResult:
     response: LLMResponse
     resolved_model_name: str | None
     time_to_first_token_ms: float | None = None
+    request_messages: list[LLMMessage] | None = None
 
 
 # ── Provider session-aware chat wrapper ──────────────────────────────────
@@ -126,6 +127,10 @@ class TurnLLMCaller:
         usage = run_context.usage
         usage.sample_memory()
 
+        from clawagents.memory.observation_projection import project_observations, commit_projection
+        projection = project_observations(request_messages, run_context)
+        request_messages = projection.messages
+
         response = await _llm_chat(
             self._llm,
             request_messages,
@@ -135,6 +140,7 @@ class TurnLLMCaller:
             session_id=self._provider_session_id,
             on_first_token=_record_first_token if streaming else None,
         )
+        commit_projection(projection, run_context)
         model_name = resolved_model_name or response.model
 
         # Record provider-reported token counts and telemetry.
@@ -170,6 +176,7 @@ class TurnLLMCaller:
             response=response,
             resolved_model_name=model_name,
             time_to_first_token_ms=time_to_first_token_ms,
+            request_messages=request_messages,
         )
 
     @property
