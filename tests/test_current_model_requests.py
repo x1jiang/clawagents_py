@@ -539,8 +539,12 @@ def test_signed_round_guard_handles_advisor_messages_and_fallback_wrappers(anthr
 
 async def test_fable_binding_controls_reach_real_sdk_request_without_network():
     import json
-    import httpx
     import anthropic
+    from anthropic import _base_client
+
+    # Anthropic 1.x moved to httpx2; construct the transport from the SDK
+    # dependency so this wire test exercises both supported SDK generations.
+    httpx = getattr(_base_client, "httpx2", None) or _base_client.httpx
     captured = []
     def respond(request):
         captured.append(request)
