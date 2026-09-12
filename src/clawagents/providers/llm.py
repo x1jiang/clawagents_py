@@ -924,7 +924,7 @@ def openai_model_rejects_temperature(model: str) -> bool:
     m = _bare_openai_model_id(model)
     if m.startswith(("o1", "o3", "o4")):
         return True
-    if m.startswith(("gpt-5.3", "gpt-5.4", "gpt-5.5", "gpt-5.6")):
+    if m.startswith(("gpt-5.3", "gpt-5.4", "gpt-5.5", "gpt-5.6", "gpt-6-astra")):
         return True
     if m.startswith("gpt-5") and "codex" in m:
         return True
@@ -1019,6 +1019,8 @@ def clamp_reasoning_effort_for_model(model: str, effort: str | None) -> str | No
         return effort
     from clawagents.providers.model_classify import is_grok_model
 
+    if _bare_openai_model_id(model).startswith("gpt-6-astra"):
+        return "low" if effort in ("none", "minimal") else effort
     if not is_grok_model(model):
         return effort
     if effort in _GROK_EFFORT_LEVELS:
@@ -1036,7 +1038,7 @@ def model_supports_reasoning_effort(model: str) -> bool:
         return True
     if m.startswith(("o1", "o3", "o4")):
         return True
-    if m.startswith(("gpt-5.5", "gpt-5.6")):
+    if m.startswith(("gpt-5.5", "gpt-5.6", "gpt-6-astra")):
         return True
     # Bare gpt-5 / gpt-5-codex family (not gpt-5-nano/micro as primary chat)
     if m == "gpt-5" or m.startswith("gpt-5-"):
@@ -1089,7 +1091,7 @@ def prefers_responses_api(
         return False
     if "codex" in m:
         return True
-    if m.startswith(("gpt-5.5", "gpt-5.6")):
+    if m.startswith(("gpt-5.5", "gpt-5.6", "gpt-6-astra")):
         return True
     # Other GPT-5 / o-series: Responses when tools + non-none effort so the
     # API accepts both (Chat Completions often forces effort=none).
@@ -1143,7 +1145,9 @@ def _apply_responses_reasoning(
     preferred: str | None = None,
 ) -> None:
     """Responses API uses ``reasoning={"effort": ...}`` (tools keep effort)."""
-    effort = normalize_reasoning_effort(preferred)
+    effort = clamp_reasoning_effort_for_model(
+        str(kwargs.get("model") or ""), normalize_reasoning_effort(preferred)
+    )
     if effort:
         kwargs["reasoning"] = {"effort": effort}
 
@@ -1556,7 +1560,12 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
             self.client = AsyncOpenAI(**client_kwargs)
 
         self.model = config.openai_model
-        self._max_tokens = config.max_tokens
+        from clawagents.graph.model_profiles import resolve_model_profile
+
+        profile = resolve_model_profile(self.model) or {}
+        self._max_tokens = min(
+            config.max_tokens, int(profile.get("max_output_tokens", config.max_tokens))
+        )
         self._temperature = _resolve_temperature(config.openai_model, config.temperature)
         self._reasoning_effort = normalize_reasoning_effort(
             getattr(config, "reasoning_effort", None) or None
@@ -4320,7 +4329,7 @@ def is_mantle_openai_responses_model(model: str) -> bool:
         m = m[len("openai.") :]
     if "gpt-oss" in m:
         return False
-    return any(token in m for token in ("gpt-5.3", "gpt-5.4", "gpt-5.5", "gpt-5.6"))
+    return any(token in m for token in ("gpt-5.3", "gpt-5.4", "gpt-5.5", "gpt-5.6", "gpt-6-astra"))
 
 
 def is_mantle_xai_model(model: str) -> bool:
@@ -4445,6 +4454,16 @@ def create_provider(
     # openai.gpt-5.* / xai.grok-* → /openai/v1 (responses);
     # chat-ok catalog (gpt-oss, deepseek, qwen, …) → /v1/chat/completions.
     if config.openai_base_url and _is_mantle_url(config.openai_base_url):
+        # AWS Astra model card: Mantle is available only in Oregon. Do not
+        # silently move requests (or regional credentials) to another region.
+        if (
+            _bare_openai_model_id(model_name).startswith("gpt-6-astra")
+            and _mantle_region_from_url(config.openai_base_url) != "us-west-2"
+        ):
+            raise ValueError(
+                "GPT-6 Astra on Bedrock Mantle requires us-west-2 (Oregon). "
+                "Set the AWS region and Mantle base URL to us-west-2."
+            )
         # Every Mantle path is Bearer-authenticated; none accept a placeholder
         # or a vendor key, so fail here instead of on an opaque 401.
         mantle_key = _mantle_gateway_key(config)

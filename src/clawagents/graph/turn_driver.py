@@ -185,7 +185,9 @@ class TurnDriver:
         if self._token_ledger is not None:
             prompt_tokens = int(getattr(result.response, "prompt_tokens", 0) or 0)
             if prompt_tokens > 0:
-                self._token_ledger.record_provider_usage(messages, prompt_tokens)
+                self._token_ledger.record_provider_usage(
+                    getattr(result, 'request_messages', None) or messages, prompt_tokens,
+                )
         if result.response.partial and not result.response.content.strip():
             self._events.emit("warn", {"message": "interrupted — no content received"})
             state.status = "done"
@@ -195,6 +197,9 @@ class TurnDriver:
 
     async def _prepare_messages(self, messages: list[LLMMessage]) -> list[LLMMessage]:
         messages = _patch_dangling_tool_calls(messages)
+        from clawagents.memory.observation_projection import project_observations, restore_observations
+        projection = project_observations(messages, getattr(self, '_run_context', None))
+        messages = projection.messages
         # Use ledger for incremental estimation when available.
         current_tokens = (
             self._token_ledger.estimate(messages)
@@ -256,7 +261,7 @@ class TurnDriver:
                 "with output tokens reserved. Reduce input/tools or max_tokens, or use a "
                 "larger server context window."
             )
-        return messages
+        return restore_observations(messages, projection)
 
     def _schema_tokens(self) -> int:
         schemas = getattr(self, "_native_schemas", None)

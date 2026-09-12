@@ -6,6 +6,13 @@ from __future__ import annotations
 # keys first so e.g. "gpt-5.4-medium" resolves to the "gpt-5.4" profile
 # rather than falling back to "gpt-5".
 MODEL_PROFILES: dict[str, dict[str, int | float]] = {
+    # https://developers.openai.com/api/docs/models/gpt-6-astra
+    "gpt-6-astra": {
+        "max_input_tokens": 1_050_000,
+        "max_output_tokens": 128_000,
+        "budget_ratio": 0.85,
+        "long_context_threshold": 272_000,
+    },
     # Deployment /v1/models reports max_model_len=196608 (2026-09-06).
     "muse-glimmer-30b": {"max_input_tokens": 196_608, "budget_ratio": 0.80},
     # ── OpenAI — GPT-5.6 (~1.05M context) ──────────────────────────────

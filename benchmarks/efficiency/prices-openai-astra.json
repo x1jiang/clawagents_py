@@ -1,0 +1,8 @@
+{
+  "input_tokens": 10.0,
+  "cached_input_tokens": 1.0,
+  "cache_creation_tokens": 12.5,
+  "output_tokens": 50.0,
+  "max_prompt_tokens": 272000,
+  "source": "OpenAI GPT-6 Astra model pricing, checked 2026-09-12: https://developers.openai.com/api/docs/models/gpt-6-astra"
+}

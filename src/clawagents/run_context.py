@@ -105,7 +105,13 @@ class RunContext(Generic[TContext]):
     _metadata: dict[str, Any] = field(default_factory=dict)
     todos: list[dict[str, Any]] = field(default_factory=list)
     efficiency: dict[str, Any] = field(default_factory=empty_efficiency)
+    observation_full_sends: int = 0
+    _observations: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
     _budget_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if type(self.observation_full_sends) is not int or self.observation_full_sends not in (0, 1, 2):
+            raise ValueError('observation_full_sends must be 0 (existing behavior), 1, or 2')
 
     def activate_skill(
         self,
