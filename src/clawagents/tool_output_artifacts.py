@@ -11,6 +11,7 @@ for reads outside that directory.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
@@ -18,10 +19,18 @@ import uuid
 from pathlib import Path
 from typing import Any, Optional
 
-from clawagents.memory.content_crush import CrushResult, crush_tool_output
+from clawagents.memory.content_crush import (
+    EVIDENCE_RECEIPT_PREFIX,
+    CrushResult,
+    build_failed_diagnostic_receipt,
+    crush_tool_output,
+    is_diagnostic_command,
+)
 
 DEFAULT_INLINE_CHARS = 12_000
 DEFAULT_PREVIEW_CHARS = 2_000
+DEFAULT_RECALL_CHARS = 16_000
+DEFAULT_RECALL_LINES = 400
 
 
 def _safe_name(tool_name: str) -> str:
@@ -65,7 +74,7 @@ def _body_for_meta(directory: Path, meta: dict[str, Any], meta_file: Path) -> Pa
     aid = _safe_id(str(meta.get("id") or meta_file.stem.replace(".meta", "")))
     derived = _body_path(directory, aid)
     if derived.is_file():
-        return derived
+        return _path_under_dir(directory, derived)
     # Legacy absolute/relative path in meta — only if contained in the artifact dir.
     raw = str(meta.get("path") or "").strip()
     if not raw:
@@ -188,13 +197,11 @@ def store_exec_artifact_from_spills(
     return artifact_id, body, chars
 
 
-def load_tool_artifact(
+def _find_tool_artifact(
     artifact_id: str,
     *,
     workspace: str | Path | None = None,
-    max_chars: int | None = None,
-) -> tuple[bool, str, dict[str, Any] | None]:
-    """Load full (or capped) artifact text. Returns (ok, text_or_error, meta)."""
+) -> tuple[Path | None, dict[str, Any] | None]:
     directory = tool_artifact_dir(workspace)
     aid = _safe_id(artifact_id)
     meta_file = _meta_path(directory, aid)
@@ -202,18 +209,13 @@ def load_tool_artifact(
     meta: dict[str, Any] | None = None
     if meta_file.exists():
         try:
-            meta = json.loads(meta_file.read_text(encoding="utf-8"))
+            value = json.loads(meta_file.read_text(encoding="utf-8"))
+            meta = value if isinstance(value, dict) else None
         except (OSError, json.JSONDecodeError):
             meta = None
 
-    def _read(path: Path, m: dict[str, Any] | None) -> tuple[bool, str, dict[str, Any] | None]:
-        text = path.read_text(encoding="utf-8", errors="replace")
-        if max_chars is not None and len(text) > max_chars:
-            text = text[:max_chars] + f"\n... [truncated at {max_chars} chars]"
-        return True, text, m
-
     if body.is_file():
-        return _read(body, meta)
+        return _path_under_dir(directory, body), meta
 
     # Legacy / alternate ids — scan metas; body path must stay under directory.
     for candidate in directory.glob("*.meta.json"):
@@ -221,11 +223,105 @@ def load_tool_artifact(
             m = json.loads(candidate.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if m.get("id") == artifact_id or m.get("tool_use_id") == artifact_id:
+        if isinstance(m, dict) and (m.get("id") == artifact_id or m.get("tool_use_id") == artifact_id):
             path = _body_for_meta(directory, m, candidate)
             if path is not None:
-                return _read(path, m)
-    return False, f"No tool artifact found for id={artifact_id!r}", None
+                return path, m
+    return None, None
+
+
+def load_tool_artifact(
+    artifact_id: str,
+    *,
+    workspace: str | Path | None = None,
+    max_chars: int | None = None,
+) -> tuple[bool, str, dict[str, Any] | None]:
+    """Backward-compatible full/capped loader; use the page helper for recall."""
+    path, meta = _find_tool_artifact(artifact_id, workspace=workspace)
+    if path is None:
+        return False, f"No tool artifact found for id={artifact_id!r}", None
+    try:
+        with path.open(encoding="utf-8", errors="replace", newline="") as handle:
+            text = handle.read() if max_chars is None else handle.read(max(0, max_chars) + 1)
+        if max_chars is not None and len(text) > max_chars:
+            text = text[:max_chars] + f"\n... [truncated at {max_chars} chars]"
+        return True, text, meta
+    except OSError as exc:
+        return False, f"Cannot read tool artifact: {exc}", meta
+
+
+def load_tool_artifact_page(
+    artifact_id: str,
+    *,
+    workspace: str | Path | None = None,
+    offset: int | None = None,
+    line_start: int | None = None,
+    line_count: int = DEFAULT_RECALL_LINES,
+    max_chars: int = DEFAULT_RECALL_CHARS,
+) -> tuple[bool, str, dict[str, Any] | None]:
+    """Read bounded characters, preserving newlines and Unicode exactly.
+
+    Offsets count Python Unicode characters, not UTF-8 bytes. Lines are 1-based
+    and delimited by LF. A page may end inside an oversized line: next_offset
+    always resumes at the first unread character. Prefix scans use bounded
+    chunks rather than readline(), which could allocate a huge single line.
+    """
+    if offset is not None and line_start is not None:
+        return False, "Use offset or line_start, not both", None
+    if (offset is not None and offset < 0) or (line_start is not None and line_start < 1) or line_count < 1 or max_chars < 1:
+        return False, "offset must be nonnegative; line_start, line_count and max_chars must be positive", None
+    max_chars = min(max_chars, 500_000)
+    line_count = min(line_count, 10_000)
+    path, meta = _find_tool_artifact(artifact_id, workspace=workspace)
+    if path is None:
+        return False, f"No tool artifact found for id={artifact_id!r}", None
+    position = 0
+    skipped_lines = 0
+    pending = ""
+    try:
+        with path.open(encoding="utf-8", errors="replace", newline="") as handle:
+            if line_start is not None:
+                while skipped_lines < line_start - 1:
+                    chunk = handle.read(8192)
+                    if not chunk:
+                        break
+                    cut = 0
+                    while skipped_lines < line_start - 1:
+                        index = chunk.find("\n", cut)
+                        if index < 0:
+                            cut = len(chunk)
+                            break
+                        cut = index + 1
+                        skipped_lines += 1
+                    position += cut
+                    pending = chunk[cut:]
+            else:
+                remaining = offset or 0
+                while remaining:
+                    chunk = handle.read(min(8192, remaining))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+                    position += len(chunk)
+                    skipped_lines += chunk.count("\n")
+            sample = pending[:max_chars + 1]
+            if len(sample) < max_chars + 1:
+                sample += handle.read(max_chars + 1 - len(sample))
+            end = min(len(sample), max_chars)
+            cut = 0
+            for _ in range(line_count):
+                index = sample.find("\n", cut, end)
+                if index < 0:
+                    break
+                cut = index + 1
+            else:
+                end = cut
+            page = sample[:end]
+            info = dict(meta or {})
+            info.update(offset=position, next_offset=position + len(page), eof=(end == len(sample) and len(pending) <= len(sample)), line_start=skipped_lines + 1)
+            return True, page, info
+    except OSError as exc:
+        return False, f"Cannot read tool artifact: {exc}", meta
 
 
 def offload_tool_output_if_needed(
@@ -350,6 +446,47 @@ def prepare_tool_output_for_context(
     inline_limit: int | None = None,
     target_chars: int | None = None,
     success: bool | None = None,
+    command: str | None = None,
+    efficiency: dict[str, Any] | None = None,
+) -> tuple[str, Optional[str]]:
+    """Prepare an optional compact view, preserving original output on error.
+
+    Publish efficiency changes only after transformation succeeds. Nested
+    receipt fallback counters are copied because reducers mutate them in place.
+    """
+    try:
+        pending = dict(efficiency) if efficiency is not None else None
+        if pending is not None and isinstance(pending.get("reducer_fallbacks"), dict):
+            pending["reducer_fallbacks"] = dict(pending["reducer_fallbacks"])
+        prepared = _prepare_tool_output_for_context(
+            tool_name=tool_name, tool_use_id=tool_use_id, output=output,
+            workspace=workspace, crush_threshold=crush_threshold,
+            inline_limit=inline_limit, target_chars=target_chars,
+            success=success, command=command, efficiency=pending,
+        )
+        if efficiency is not None and pending is not None:
+            efficiency.update(pending)
+        return prepared
+    except Exception:
+        logging.getLogger(__name__).debug(
+            "Tool output transformation failed; preserving original output",
+            exc_info=True,
+        )
+        return output, None
+
+
+def _prepare_tool_output_for_context(
+    *,
+    tool_name: str,
+    tool_use_id: str,
+    output: str,
+    workspace: str | Path | None = None,
+    crush_threshold: int | None = None,
+    inline_limit: int | None = None,
+    target_chars: int | None = None,
+    success: bool | None = None,
+    command: str | None = None,
+    efficiency: dict[str, Any] | None = None,
 ) -> tuple[str, Optional[str]]:
     """Crush oversized outputs and store full text when crushed or huge.
 
@@ -363,33 +500,132 @@ def prepare_tool_output_for_context(
     Control-plane tools (``use_skill``, ``list_skills``, ``retrieve_tool_result``)
     are never crushed — skill instructions must stay verbatim.
 
-    Failed tool results (``success=False``) are never aggressively crushed —
-    denial paths (e.g. credentials.db EPERM) must stay verbatim for diagnosis.
+    Failed diagnostic commands may become verified, artifact-backed receipts.
+    Other failures keep the existing verbatim/archive behavior.
     """
     if not isinstance(output, str):
         output = str(output)
 
-    if tool_name in _CONTROL_PLANE_NO_CRUSH:
+    if tool_name in _CONTROL_PLANE_NO_CRUSH or EVIDENCE_RECEIPT_PREFIX in output:
         return output, None
 
-    # Failures: keep full text in context (still archive if enormous).
+    # Edit confirmations and harness status markers are never reduced. Only
+    # the follow-up command's suffix is eligible for independent compression.
+    fusion = re.search(r"(?m)^\[then_run:(succeeded|failed|skipped)\][^\n]*(?:\n|$)", output)
+    if fusion and tool_name in {"edit_file", "apply_patch", "write_file", "hashline_edit"}:
+        if fusion.group(1) == "skipped":
+            return output, None
+        prefix, suffix = output[:fusion.end()], output[fusion.end():]
+        payload_prefix = ""
+        payload_trailer = ""
+        try:
+            json_start = suffix.find("{")
+            if json_start < 0:
+                raise ValueError("No execute payload")
+            payload, json_end = json.JSONDecoder().raw_decode(suffix[json_start:])
+            payload_prefix = suffix[:json_start]
+            payload_trailer = suffix[json_start + json_end:]
+        except (ValueError, TypeError):
+            payload = None
+        if isinstance(payload, dict) and payload.get("command_executed"):
+            # Archive this decoded, exact-text view; JSON escape sequences do
+            # not share the source line/character coordinates of stream text.
+            parts = [payload_prefix, f"Command exited with code {payload.get('exit_code', '?')}"]
+            for stream in ("stdout", "stderr"):
+                if isinstance(payload.get(stream), str) and payload[stream]:
+                    parts.append(f"{stream}:\n{payload[stream]}")
+            for field in ("interpretation", "warning"):
+                if isinstance(payload.get(field), str) and payload[field]:
+                    parts.append(f"{field}: {payload[field]}")
+            if payload_trailer:
+                parts.append(payload_trailer)
+            suffix = "\n".join(parts)
+        reduced, aid = prepare_tool_output_for_context(
+            tool_name="execute", tool_use_id=tool_use_id + "-then-run",
+            output=suffix, workspace=workspace, crush_threshold=crush_threshold,
+            inline_limit=inline_limit, target_chars=target_chars,
+            success=fusion.group(1) == "succeeded", command=command, efficiency=efficiency,
+        )
+        # If no reduction occurred, preserve the original complete payload.
+        return (prefix + reduced, aid) if aid else (output, None)
+
+    # Prefer complete spilled command streams to an inline preview. Receipts
+    # must point at the exact source whose hash and line numbers they report.
+    source = output
+    source_id: str | None = None
+    diagnostic = success is False and tool_name in {"execute", "execute_command", "bash", "run_command"} and is_diagnostic_command(command)
+    archive = re.search(r"\[Complete command output archived id=([\w.-]+); (\d+) chars\.", output) if diagnostic else None
+    if archive:
+        if int(archive.group(2)) > 600_000:
+            diagnostic = False
+        else:
+            ok, full_source, _meta = load_tool_artifact(archive.group(1), workspace=workspace, max_chars=600_001)
+            if (
+                ok and len(full_source) <= 600_000 and _meta
+                and _meta.get("complete_command_output") is True
+                and _meta.get("command") == (command or "")[:1000]
+                and _meta.get("chars") == len(full_source) == int(archive.group(2))
+            ):
+                source, source_id = full_source, archive.group(1)
+            else:
+                diagnostic = False
+
+    # Only command-gated, bounded diagnostics are eligible for receipts.
+    if diagnostic and 4096 <= len(source) <= 600_000:
+        candidate_id = source_id or _safe_id(tool_use_id)
+        receipt, reason = build_failed_diagnostic_receipt(
+            source, artifact_id=candidate_id, command=command or "",
+            target_chars=target_chars if target_chars is not None else 3500,
+        )
+        if receipt is not None and (len(receipt) >= len(output) or len(receipt.encode("utf-8")) >= len(output.encode("utf-8"))):
+            receipt, reason = None, "receipt-not-smaller"
+        if receipt is not None:
+            try:
+                artifact_id = source_id
+                if artifact_id is None:
+                    artifact_id, _path = store_tool_artifact(
+                        tool_name=tool_name, tool_use_id=tool_use_id, output=source,
+                        kind="log", workspace=workspace,
+                        extra_meta={"did_crush": True, "evidence_receipt": EVIDENCE_RECEIPT_PREFIX},
+                    )
+                if artifact_id != candidate_id:
+                    receipt, reason = build_failed_diagnostic_receipt(
+                        source, artifact_id=artifact_id, command=command or "",
+                        target_chars=target_chars if target_chars is not None else 3500,
+                    )
+            except OSError:
+                receipt, reason = None, "artifact-write-failed"
+            if receipt is not None:
+                if efficiency is not None:
+                    efficiency["reducer_bytes_saved"] = efficiency.get("reducer_bytes_saved", 0) + max(0, len(output.encode("utf-8")) - len(receipt.encode("utf-8")))
+                return receipt, artifact_id
+        if efficiency is not None:
+            fallbacks = efficiency.setdefault("reducer_fallbacks", {})
+            key = reason or "receipt-rejected"
+            fallbacks[key] = fallbacks.get(key, 0) + 1
+
+    # Non-diagnostic failures and rejected receipts retain the existing view.
     if success is False:
         hard_cap = 48_000
         if len(output) <= hard_cap:
             return output, None
-        artifact_id, _path = store_tool_artifact(
-            tool_name=tool_name,
-            tool_use_id=tool_use_id,
-            output=output,
-            kind="prose",
-            workspace=workspace,
-            extra_meta={"did_crush": False, "failed_tool_verbatim": True},
-        )
+        try:
+            artifact_id, _path = store_tool_artifact(
+                tool_name=tool_name,
+                tool_use_id=tool_use_id,
+                output=output,
+                kind="prose",
+                workspace=workspace,
+                extra_meta={"did_crush": False, "failed_tool_verbatim": True},
+            )
+        except OSError:
+            # A receipt/preview without recoverable evidence is unsafe.
+            return output, None
         preview = output[:12_000]
         header = (
             f"[Failed tool output archived id={artifact_id}]\n"
             f"Original: {len(output)} chars (not crushed). "
-            f"Call retrieve_tool_result(id=\"{artifact_id}\") for the remainder.\n\n"
+            f"Call retrieve_tool_result(id=\"{artifact_id}\") for pages (16000 chars / 400 lines); continue with next_offset.\n\n"
         )
         return header + preview, artifact_id
 
@@ -430,7 +666,7 @@ def prepare_tool_output_for_context(
 
     # Always store when we crushed or when still over inline limit.
     need_store = crush.did_crush or len(output) > inline
-    artifact_id: str | None = None
+    artifact_id = None
     if need_store:
         artifact_id, _path = store_tool_artifact(
             tool_name=tool_name,
@@ -451,7 +687,7 @@ def prepare_tool_output_for_context(
         header = (
             f"[Crushed tool output kind={crush.kind} id={artifact_id}]\n"
             f"Original: {crush.original_chars} chars → {crush.crushed_chars} chars. "
-            f"Call retrieve_tool_result(id=\"{artifact_id}\") for the full output.\n\n"
+            f"Call retrieve_tool_result(id=\"{artifact_id}\") for pages (16000 chars / 400 lines); continue with next_offset.\n\n"
         )
         return header + crush.text, artifact_id
 

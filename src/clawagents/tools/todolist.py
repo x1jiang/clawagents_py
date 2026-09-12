@@ -1,13 +1,14 @@
 """TodoList planning tools for structured multi-step task execution.
 
 Provides write_todos and update_todo tools that let the agent plan
-before acting. Stores state per-invocation (module-level).
+before acting. Agent runs own their todo state; direct calls retain a legacy store.
 """
 
 import json
 from typing import Any, Dict, List
 
 from clawagents.tools.registry import Tool, ToolResult
+from clawagents.run_context import RunContext
 
 
 # Module-level state (reset on import / new process)
@@ -31,7 +32,7 @@ class WriteTodosTool:
         }
     }
 
-    async def execute(self, args: Dict[str, Any]) -> ToolResult:
+    async def execute(self, args: Dict[str, Any], run_context: RunContext | None = None) -> ToolResult:
         global _todos
         raw = args.get("todos", [])
 
@@ -44,8 +45,12 @@ class WriteTodosTool:
         if not isinstance(raw, list):
             return ToolResult(success=False, output="", error="Expected a JSON array of strings")
 
-        _todos = [{"text": str(item), "done": False} for item in raw]
-        return ToolResult(success=True, output=_format_todos())
+        todos = [{"text": str(item), "done": False} for item in raw]
+        if run_context is None:
+            _todos = todos
+        else:
+            run_context.todos = todos
+        return ToolResult(success=True, output=_format_todos(todos))
 
 
 class UpdateTodoTool:
@@ -63,29 +68,39 @@ class UpdateTodoTool:
         }
     }
 
-    async def execute(self, args: Dict[str, Any]) -> ToolResult:
-        global _todos
+    async def execute(self, args: Dict[str, Any], run_context: RunContext | None = None) -> ToolResult:
+        todos = _todos if run_context is None else run_context.todos
         try:
             idx = int(args.get("index", -1))
         except (TypeError, ValueError):
             idx = -1
 
-        if not _todos:
+        if not todos:
             return ToolResult(success=False, output="", error="No todo list exists. Use write_todos first.")
-        if idx < 0 or idx >= len(_todos):
-            return ToolResult(success=False, output="", error=f"Index {idx} out of range (0-{len(_todos) - 1})")
+        if idx < 0 or idx >= len(todos):
+            return ToolResult(success=False, output="", error=f"Index {idx} out of range (0-{len(todos) - 1})")
 
-        _todos[idx]["done"] = True
-        return ToolResult(success=True, output=_format_todos())
+        todos[idx]["done"] = True
+        return ToolResult(success=True, output=_format_todos(todos))
 
 
-def _format_todos() -> str:
-    if not _todos:
+def pending_todos(run_context: RunContext | None) -> list[str]:
+    """Only the current run can supply compaction state."""
+    return [
+        str(todo["text"])
+        for todo in getattr(run_context, "todos", ())
+        if not todo["done"]
+    ]
+
+
+def _format_todos(todos: list[dict[str, Any]] | None = None) -> str:
+    todos = _todos if todos is None else todos
+    if not todos:
         return "(no todos)"
     lines = []
-    done = sum(1 for t in _todos if t["done"])
-    lines.append(f"## Progress: {done}/{len(_todos)} complete\n")
-    for i, t in enumerate(_todos):
+    done = sum(1 for t in todos if t["done"])
+    lines.append(f"## Progress: {done}/{len(todos)} complete\n")
+    for i, t in enumerate(todos):
         mark = "[x]" if t["done"] else "[ ]"
         lines.append(f"{i}. {mark} {t['text']}")
     return "\n".join(lines)

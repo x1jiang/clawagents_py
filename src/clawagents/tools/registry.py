@@ -15,7 +15,7 @@ from typing import Any, Dict, Iterable, List, Optional, Protocol
 
 
 class ToolResult:
-    __slots__ = ("success", "output", "error", "raw_output", "added_tool_names", "return_direct")
+    __slots__ = ("success", "output", "error", "raw_output", "added_tool_names", "return_direct", "mutation_success")
 
     def __init__(
         self,
@@ -26,7 +26,9 @@ class ToolResult:
         raw_output: str | list[dict[str, Any]] | None = None,
         added_tool_names: Optional[list[str]] = None,
         return_direct: bool = False,
+        mutation_success: bool | None = None,
     ):
+        self.mutation_success = mutation_success
         self.return_direct = return_direct
         self.success = success
         self.output = output
@@ -762,6 +764,23 @@ class ToolRegistry:
         args: Dict[str, Any],
         *,
         run_context: Any = None,
+        followup: Any = None,
+    ) -> ToolResult:
+        from clawagents.tools.action_fusion import FUSION_TOOLS, execute_edit
+
+        if tool_name in FUSION_TOOLS:
+            return await execute_edit(
+                self, tool_name, args, run_context=run_context, followup=followup,
+            )
+        return await self._execute_tool(tool_name, args, run_context=run_context)
+
+    async def _execute_tool(
+        self,
+        tool_name: str,
+        args: Dict[str, Any],
+        *,
+        run_context: Any = None,
+        canonical_path: str | None = None,
     ) -> ToolResult:
         tool = self.get(tool_name)
         if not tool:
@@ -1019,6 +1038,10 @@ class ToolRegistry:
                         effective_args,
                         run_context=run_context,
                     )
+            # Permissions above see the caller's original path. Once approved,
+            # pin a locked edit's actual target before any filesystem awaits.
+            if canonical_path is not None:
+                effective_args = {**effective_args, "path": canonical_path}
             # File snapshot before write tools (Claude Code pattern: fileHistoryMakeSnapshot)
             _snapshot_before_write(tool_name, effective_args)
 
@@ -1062,6 +1085,8 @@ class ToolRegistry:
                         ws = getattr(run_context, "workspace", None) or getattr(
                             run_context, "cwd", None
                         )
+                    if ws is None:
+                        ws = getattr(getattr(tool, "_sb", None), "cwd", None)
                     full_output = append_syntax_gate(
                         tool_name,
                         effective_args if isinstance(effective_args, dict) else {},

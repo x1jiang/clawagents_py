@@ -6,6 +6,7 @@ import difflib
 import unicodedata
 import warnings
 from pathlib import Path
+from dataclasses import replace
 from typing import Callable, Optional, List, Dict, Any, Union
 
 from clawagents.providers.llm import LLMProvider
@@ -591,11 +592,19 @@ class _AgentAsTool:
                 )
 
         try:
-            # Forward the parent's run context so the child inherits its
-            # permission_mode (and approvals). Without this the child ran with a
-            # fresh DEFAULT context, letting an agent-as-tool execute write/exec
-            # tools while the parent was in plan mode — a plan-mode escape.
-            child_state = await self._agent.invoke(task, run_context=run_context)
+            # Preserve permissions, approvals, user context and the existing
+            # shared usage/budget contract, but isolate task state and counters.
+            child_context = None
+            if run_context is not None:
+                from clawagents.efficiency import empty_efficiency
+                child_context = replace(
+                    run_context,
+                    todos=[],
+                    efficiency=empty_efficiency(),
+                    active_skills=dict(run_context.active_skills),
+                    _metadata=dict(run_context._metadata),
+                )
+            child_state = await self._agent.invoke(task, run_context=child_context)
         except Exception as e:
             return ToolResult(
                 success=False, output="", error=f"{self.name} raised: {e}"

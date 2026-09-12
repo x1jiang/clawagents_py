@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
 from clawagents.providers.llm import LLMMessage
+from clawagents.efficiency import empty_efficiency, efficiency_snapshot
 
 
 def _message_to_dict(m: LLMMessage) -> dict[str, Any]:
@@ -41,6 +43,7 @@ class RunResult:
     session_file: str = ""
     interruptions: list[dict[str, Any]] = field(default_factory=list)
     new_items: list[LLMMessage] = field(default_factory=list)
+    efficiency: dict[str, Any] = field(default_factory=empty_efficiency)
 
     @classmethod
     def from_agent_state(
@@ -51,6 +54,7 @@ class RunResult:
         interruptions: list[dict[str, Any]] | None = None,
     ) -> "RunResult":
         return cls(
+            efficiency=deepcopy(state.efficiency) if hasattr(state, "efficiency") else efficiency_snapshot(getattr(state, "run_context", None)),
             messages=list(state.messages),
             task=str(state.current_task),
             status=str(state.status),
@@ -68,6 +72,7 @@ class RunResult:
     @classmethod
     def from_state(cls, state: dict[str, Any]) -> "RunResult":
         return cls(
+            efficiency={**empty_efficiency(), **deepcopy(state.get("efficiency") or {})},
             messages=[_dict_to_message(m) for m in state.get("messages", [])],
             task=str(state.get("task", "")),
             status=str(state.get("status", "")),
@@ -84,6 +89,7 @@ class RunResult:
 
     def to_state(self) -> dict[str, Any]:
         return {
+            "efficiency": deepcopy(self.efficiency),
             "messages": [_message_to_dict(m) for m in self.messages],
             "task": self.task,
             "status": self.status,

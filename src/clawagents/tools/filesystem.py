@@ -8,6 +8,8 @@ Default export uses LocalBackend (real filesystem). Call
 
 from __future__ import annotations
 
+from clawagents.tools.action_fusion import THEN_RUN_PARAMETER
+
 import difflib
 import re
 import time
@@ -251,6 +253,7 @@ class WriteFileTool:
     keywords = ["create file", "save file", "overwrite file", "write content"]
     description = "Write content to a file. Creates parent directories if needed."
     parameters: Dict[str, Dict[str, Any]] = {
+        "then_run": THEN_RUN_PARAMETER,
         "path": {"type": "string", "description": "Path to write the file", "required": True},
         "content": {"type": "string", "description": "Content to write to the file", "required": True},
     }
@@ -284,6 +287,7 @@ class EditFileTool:
         "new file (only when the path does not already exist)."
     )
     _BASE_PARAMETERS: Dict[str, Dict[str, Any]] = {
+        "then_run": THEN_RUN_PARAMETER,
         "path": {"type": "string", "description": "Path to the file to edit", "required": True},
         "target": {"type": "string", "description": "The exact block of text to replace", "required": True},
         "replacement": {"type": "string", "description": "The new text", "required": True},

@@ -70,6 +70,7 @@ Keep working until the task is fully complete.
 - NEVER re-read a file you already have in context. Use the data from previous tool results.
 - NEVER call the same tool with the same arguments twice. If you already have the result, use it.
 - Batch independent tool calls into a single response when possible (use the array syntax).
+- When an edit will be followed by a build/test/run command, pass it as then_run instead of a separate call. A failed command keeps the edit; inspect its output before changing or retrying it.
 - Prefer fewer, well-targeted tool calls over many exploratory ones.
 - Use todo/planning tools only for broad or long-running tasks. Skip todo bookkeeping for bounded lookup, read, compare, or JSON-report tasks.
 - Once tool results contain enough evidence to answer, stop calling tools and answer directly. Do not call tools only to mark progress complete."""

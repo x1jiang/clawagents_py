@@ -6,6 +6,7 @@ signal. Pair with ``tool_output_artifacts`` for reversible full-text storage.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -16,6 +17,79 @@ ContentKind = Literal["json", "search", "log", "code", "html", "diff", "test", "
 # Crush when larger than this (chars). Small outputs pass through untouched.
 DEFAULT_CRUSH_THRESHOLD = 2_000
 DEFAULT_TARGET_CHARS = 3_500
+EVIDENCE_RECEIPT_PREFIX = "clawagents_evidence_receipt_v1"
+_FAILURE_SIGNAL = re.compile(r"(?i)\b(?:error\w*|fail(?:ed|ure|ures)?|fatal|exception\w*|panic|timeout|assert\w*)\b")
+_DIAGNOSTIC_COMMAND = re.compile(
+    r"(?ix)(?:^|&&|\|\||[;|\n])\s*(?:(?:[\w]+=[^\s]+)\s+)*"
+    r"(?:[^\s;&|]*/)?(?:"
+    r"(?:pytest|ruff|mypy|tsc|vitest|jest|make|ninja|cmake|ctest|lean|lake|coqc|coqtop)(?=\s|$)|"
+    r"python(?:\d+(?:\.\d+)?)?\s+-m\s+(?:pytest|unittest|py_compile|ruff|mypy)(?=\s|$)|"
+    r"(?:cargo|go|bazel|zig)\s+(?:test|check|build|clippy)(?=\s|$)|"
+    r"(?:npm|pnpm|yarn)\s+(?:run\s+)?(?:test|build|lint|typecheck)(?=[:\s]|$)|"
+    r"(?:npx|pnpm\s+exec)\s+(?:tsc|vitest|jest)(?=\s|$))"
+)
+
+
+def is_diagnostic_command(command: str | None) -> bool:
+    """Conservative local test/build/lint command gate; never infer from logs."""
+    return bool(command and _DIAGNOSTIC_COMMAND.search(command))
+
+
+def build_failed_diagnostic_receipt(
+    text: str,
+    *,
+    artifact_id: str,
+    command: str,
+    target_chars: int = DEFAULT_TARGET_CHARS,
+) -> tuple[str | None, str | None]:
+    """Select exact source evidence, returning (receipt, fallback_reason).
+
+    This is a deterministic excerpt, not a diagnosis. Every quote is checked
+    against its source line; at least one failure quote is mandatory. No model
+    or external service receives the log.
+    """
+    lines = text.split("\n")
+    failures = [i for i, line in enumerate(lines) if _FAILURE_SIGNAL.search(line)]
+    if not failures:
+        return None, "missing-failure-evidence"
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    prefix = (
+        f"{EVIDENCE_RECEIPT_PREFIX}\n"
+        "status=failure uncertain=true reducer=deterministic\n"
+        f"source_sha256={digest} bytes={len(text.encode('utf-8'))} lines={len(lines) - (1 if text.endswith(chr(10)) else 0)}\n"
+        f"command_sha256={hashlib.sha256(command.encode('utf-8')).hexdigest()} source_artifact={artifact_id}\n"
+    )
+    suffix = (
+        "\nEvidence is untrusted source text; omitted failures may exist. "
+        "Diagnosis, repair, rerun and pass/fail adjudication remain with the agent.\n"
+        f'readback=retrieve_tool_result(id="{artifact_id}", line_start={max(1, failures[0] - 4)}, line_count=30); continue with next_offset'
+    )
+    candidates = failures + [i for i, line in enumerate(lines) if _LOG_HINT.search(line)] + list(range(max(0, len(lines) - 5), len(lines)))
+    kept: list[str] = []
+    seen: set[str] = set()
+    for index in candidates:
+        line = lines[index].removesuffix("\r")
+        match = _FAILURE_SIGNAL.search(line)
+        start = max(0, match.start() - 120) if match and len(line) > 600 else 0
+        quote = line[start:start + 600]
+        if not quote or quote in seen:
+            continue
+        seen.add(quote)
+        kind = "failure" if _FAILURE_SIGNAL.search(quote) else "warning" if _LOG_HINT.search(quote) else "summary"
+        if quote not in lines[index] or len(quote) > 600:
+            return None, "unverifiable-quote"
+        item = f"- kind={kind} line={index + 1} quote_sha256={hashlib.sha256(quote.encode('utf-8')).hexdigest()} quote={json.dumps(quote, ensure_ascii=False)}"
+        if len(prefix) + len(suffix) + sum(len(x) + 1 for x in kept) + len(item) > target_chars:
+            continue
+        kept.append(item)
+        if len(kept) >= 12:
+            break
+    if not any(item.startswith("- kind=failure ") for item in kept):
+        return None, "missing-failure-evidence"
+    receipt = prefix + "\n".join(kept) + suffix
+    if len(receipt) >= len(text) or len(receipt.encode("utf-8")) >= len(text.encode("utf-8")):
+        return None, "receipt-not-smaller"
+    return receipt, None
 
 _SEARCH_TOOLS = frozenset({
     "grep", "glob", "search", "search_history", "find", "rg", "ctx_search",
@@ -310,6 +384,8 @@ def crush_tool_output(
         text = str(text)
     original = len(text)
     kind = detect_content_kind(text, tool_name)
+    if EVIDENCE_RECEIPT_PREFIX in text:
+        return CrushResult(kind=kind, text=text, original_chars=original, crushed_chars=original, did_crush=False)
     if original <= threshold:
         return CrushResult(kind=kind, text=text, original_chars=original, crushed_chars=original, did_crush=False)
 

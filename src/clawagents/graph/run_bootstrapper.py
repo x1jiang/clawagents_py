@@ -24,6 +24,7 @@ from clawagents.lifecycle import RunHooks
 from clawagents.prompts import append_model_identity, build_system_prompt
 from clawagents.providers.llm import LLMMessage, LLMProvider, LLMResponse, NativeToolSchema
 from clawagents.run_context import RunContext
+from clawagents.efficiency import empty_efficiency, efficiency_snapshot
 from clawagents.tools.registry import ToolRegistry
 from clawagents.usage import RequestUsage, Usage
 
@@ -241,6 +242,7 @@ class RunBootstrapper:
             max_iterations=self.c.max_iterations,
             tool_calls=0,
             usage=self._usage,
+            efficiency=self._run_context.efficiency,
             run_context=self._run_context,
         )
 
@@ -392,6 +394,7 @@ class RunBootstrapper:
         run_context.session_id = self._provider_session_id
         run_context._metadata["session_id"] = self._provider_session_id
         run_context._metadata["sessionId"] = self._provider_session_id
+        run_context.efficiency = empty_efficiency()
         self._usage = run_context.usage
 
         # Iteration budget
@@ -800,6 +803,7 @@ class RunBootstrapper:
             events_ref.typed(
                 "usage",
                 {
+                    "efficiency": efficiency_snapshot(run_context),
                     "prompt_tokens": req.prompt_tokens,
                     "input_tokens": req.input_tokens,
                     "output_tokens": req.output_tokens,

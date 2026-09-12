@@ -39,6 +39,7 @@ from clawagents.providers.llm import LLMProvider, LLMMessage, LLMResponse, Nativ
 from clawagents.tools.registry import ToolRegistry, ParsedToolCall, ToolResult
 from clawagents.run_context import RunContext
 from clawagents.usage import Usage, RequestUsage
+from clawagents.efficiency import empty_efficiency
 from clawagents.lifecycle import RunHooks, AgentHooks
 from clawagents.guardrails import (
     InputGuardrail,
@@ -289,6 +290,8 @@ class AgentState:
     run_context: RunContext = field(default_factory=RunContext)
     final_output: Any = None
     guardrail_triggered: Optional[str] = None
+
+    efficiency: dict[str, Any] = field(default_factory=empty_efficiency)
 
 
 # Built-in base prompt now lives in clawagents.prompts.base (configurable via

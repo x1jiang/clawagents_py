@@ -21,6 +21,7 @@ from typing import Any, Generic, TypeVar
 from clawagents.iteration_budget import IterationBudget
 from clawagents.permissions.mode import PermissionMode
 from clawagents.usage import Usage
+from clawagents.efficiency import empty_efficiency
 
 TContext = TypeVar("TContext")
 
@@ -102,6 +103,8 @@ class RunContext(Generic[TContext]):
     _approvals: dict[str, ApprovalRecord] = field(default_factory=dict)
     _always_approvals: dict[str, ApprovalRecord] = field(default_factory=dict)
     _metadata: dict[str, Any] = field(default_factory=dict)
+    todos: list[dict[str, Any]] = field(default_factory=list)
+    efficiency: dict[str, Any] = field(default_factory=empty_efficiency)
     _budget_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False, compare=False)
 
     def activate_skill(

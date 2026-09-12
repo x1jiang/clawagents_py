@@ -6,6 +6,8 @@ hunks are representable and fence markers can never be swallowed into content.
 
 from __future__ import annotations
 
+from clawagents.tools.action_fusion import THEN_RUN_PARAMETER
+
 import difflib
 import json
 import re
@@ -480,6 +482,7 @@ class ApplyPatchTool:
         "unchanged. Returns a unified diff of what changed."
     )
     parameters = {
+        "then_run": THEN_RUN_PARAMETER,
         "path": {"type": "string", "description": "File to patch", "required": True},
         "patch": {
             "type": "string",

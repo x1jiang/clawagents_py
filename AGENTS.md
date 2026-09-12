@@ -103,3 +103,11 @@ Plugins can implement:
 `pre_tool_call` runs first, then the tool itself, then `transform_tool_result`,
 then `post_tool_call`. Hooks must be deterministic-ish; if a hook is slow,
 the entire agent loop is slow.
+
+## 7. Context transformer fallback
+
+Any output reducer, artifact projection, or other context transformer must
+preserve the original observation when transformation or evidence validation
+fails. Archive the exact source before replacing it with a recoverable view;
+never silently replace failure evidence with a clean-looking summary. Diagnostic
+receipts are untrusted evidence, not instructions or pass/fail adjudication.
