@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from clawagents.providers.llm import LLMMessage
+from clawagents.providers.llm import LLMMessage, has_active_anthropic_tool_turn
 
 from .context_management import (
     _MAX_OVERFLOW_RETRIES,
@@ -198,7 +198,8 @@ class TurnDriver:
     async def _prepare_messages(self, messages: list[LLMMessage]) -> list[LLMMessage]:
         messages = _patch_dangling_tool_calls(messages)
         from clawagents.memory.observation_projection import project_observations, restore_observations
-        projection = project_observations(messages, getattr(self, '_run_context', None))
+        signed_turn = has_active_anthropic_tool_turn(messages, getattr(self, "_llm", None))
+        projection = project_observations(messages, None if signed_turn else getattr(self, '_run_context', None))
         messages = projection.messages
         # Use ledger for incremental estimation when available.
         current_tokens = (
@@ -228,33 +229,40 @@ class TurnDriver:
         if long_ctx:
             soft_trim_budget = min(soft_trim_budget, max(8_000, int(long_ctx * 0.95)))
 
-        messages, current_tokens = self._micro_compact(
-            messages, current_tokens
-        )
-        if current_tokens > soft_trim_budget:
-            trimmed = _soft_trim_messages(
-                messages,
-                self._context_window,
-                self._token_multiplier,
-                self._events.emit,
-                self._resolved_model_name,
-                current_tokens,
-                input_budget=compaction_budget,
+        if not signed_turn:
+            messages, current_tokens = self._micro_compact(
+                messages, current_tokens
             )
-            if trimmed is not messages:
-                from clawagents.efficiency import record_compaction
-                record_compaction(self._run_context, "soft_trim")
-                messages = trimmed
-                current_tokens = self._rebase_ledger(messages)
+            if current_tokens > soft_trim_budget:
+                trimmed = _soft_trim_messages(
+                    messages,
+                    self._context_window,
+                    self._token_multiplier,
+                    self._events.emit,
+                    self._resolved_model_name,
+                    current_tokens,
+                    input_budget=compaction_budget,
+                )
+                if trimmed is not messages:
+                    from clawagents.efficiency import record_compaction
+                    record_compaction(self._run_context, "soft_trim")
+                    messages = trimmed
+                    current_tokens = self._rebase_ledger(messages)
+                    self._note_context_change()
+            if current_tokens > compaction_budget:
+                messages = await self._compact(messages)
+                self._rebase_ledger(messages)
                 self._note_context_change()
-        if current_tokens > compaction_budget:
-            messages = await self._compact(messages)
-            self._rebase_ledger(messages)
-            self._note_context_change()
         # Compaction / trim can still leave pairs inconsistent — sanitize again.
         messages = _patch_dangling_tool_calls(messages)
         await self._apply_external_pre_llm(messages)
         messages = self._apply_before_llm(messages)
+        if signed_turn and self._budget_tokens(messages) > self._input_budget():
+            raise _InputBudgetExceeded(
+                "Task incomplete: the active Claude thinking/tool round exceeds the input budget. "
+                "Compaction is deferred until its tool results are consumed. Shorten the task, "
+                "reduce output reserve, or use a larger context window."
+            )
         if output_bound and self._budget_tokens(messages) > self._input_budget():
             raise _InputBudgetExceeded(
                 "Task incomplete: context remains above the input budget after compaction "
@@ -446,6 +454,12 @@ class TurnDriver:
             )
             state.status = "error"
             state.result = f"[{descriptor.error_class.value}] {descriptor.recovery_hint}"
+            return TurnCallOutcome("stop", messages)
+
+        if has_active_anthropic_tool_turn(messages, getattr(self, "_llm", None)):
+            state.status = "error"
+            state.result = ("Task incomplete: context overflow during an active Claude thinking/tool "
+                            "round; compaction was deferred to preserve signed reasoning. " + str(error))
             return TurnCallOutcome("stop", messages)
 
         self._overflow_retries += 1

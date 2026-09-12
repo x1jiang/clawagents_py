@@ -128,7 +128,10 @@ class TurnLLMCaller:
         usage.sample_memory()
 
         from clawagents.memory.observation_projection import project_observations, commit_projection
-        projection = project_observations(request_messages, run_context)
+        from clawagents.providers.llm import has_active_anthropic_tool_turn
+        projection = project_observations(
+            request_messages, None if has_active_anthropic_tool_turn(request_messages, self._llm) else run_context
+        )
         request_messages = projection.messages
 
         response = await _llm_chat(

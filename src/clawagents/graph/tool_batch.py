@@ -307,6 +307,7 @@ class ToolTranscriptWriter:
         thinking: str | None,
         gemini_parts: Any,
         use_native_tools: bool,
+        anthropic_blocks: list[dict[str, Any]] | None = None,
         added_tool_names: list[str] | None = None,
     ) -> None:
         if use_native_tools and native_call and native_call.tool_call_id:
@@ -322,6 +323,7 @@ class ToolTranscriptWriter:
                         }
                     ],
                     gemini_parts=gemini_parts,
+                    anthropic_blocks=anthropic_blocks,
                     thinking=thinking,
                 )
             )
@@ -364,6 +366,7 @@ class ToolTranscriptWriter:
         thinking: str | None,
         gemini_parts: Any,
         use_native_tools: bool,
+        anthropic_blocks: list[dict[str, Any]] | None = None,
     ) -> None:
         if use_native_tools and native_calls:
             metadata = []
@@ -377,6 +380,7 @@ class ToolTranscriptWriter:
                     content=response_content,
                     tool_calls_meta=metadata,
                     gemini_parts=gemini_parts,
+                    anthropic_blocks=anthropic_blocks,
                     thinking=thinking,
                 )
             )
@@ -841,7 +845,7 @@ class ToolResultProcessor:
                 session_call_id if session_call_id is not None else call_id,
                 call.tool_name,
                 result.success,
-                str(result.output)[:2000],
+                output,
                 error=result.error if not result.success else None,
             )
         return PreparedToolResult(result=result, output=output, preview=preview)

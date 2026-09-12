@@ -27,7 +27,7 @@ def trim_verbose_messages(
     changed = 0
     out: list[LLMMessage] = []
     for m in messages:
-        if m.role == "tool" or not isinstance(m.content, str):
+        if m.role == "tool" or getattr(m, "anthropic_blocks", None) or not isinstance(m.content, str):
             out.append(m)
             continue
         limit = assistant_chars if m.role == "assistant" else user_chars

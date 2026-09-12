@@ -23,6 +23,11 @@ BEDROCK_FM_PREFIXES: tuple[str, ...] = (
     "deepseek.",
     "openai.",  # Bedrock GPT-OSS / Mantle OpenAI catalog
     "qwen.",
+    "minimax.",
+    "nvidia.",
+    "moonshotai.",
+    "zai.",
+    "xai.",
 )
 
 # LiteLLM-style routing prefixes stripped before the SDK sees the model id.

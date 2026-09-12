@@ -121,6 +121,7 @@ async def session_get_items(
                     tool_call_id=item.get("tool_call_id"),
                     tool_calls_meta=item.get("tool_calls_meta"),
                     thinking=item.get("thinking"),
+                    anthropic_blocks=item.get("anthropic_blocks"),
                 )
             )
     return messages

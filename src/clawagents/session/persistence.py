@@ -108,23 +108,26 @@ class SessionWriter:
         self, content: str,
         tool_calls: list[dict[str, Any]] | None = None,
         thinking: str | None = None,
+        anthropic_blocks: list[dict[str, Any]] | None = None,
     ) -> None:
         data: dict[str, Any] = {"content": content}
         if tool_calls:
             data["tool_calls"] = tool_calls
         if thinking:
             data["thinking"] = thinking
+        if anthropic_blocks is not None:
+            data["anthropic_blocks"] = anthropic_blocks
         self.append("assistant_message", data)
 
     def write_tool_result(
         self, tool_call_id: str, tool_name: str,
-        success: bool, output: str, error: str | None = None,
+        success: bool, output: str | list[dict[str, Any]], error: str | None = None,
     ) -> None:
         data: dict[str, Any] = {
             "tool_call_id": tool_call_id,
             "name": tool_name,
             "success": success,
-            "output": output[:2000],  # cap for file size
+            "output": output,  # preserve the exact provider observation on resume
         }
         if error:
             data["error"] = error[:500]
@@ -198,6 +201,7 @@ class SessionReader:
                     content=ev.get("content", ""),
                     tool_calls_meta=tool_calls_meta,
                     thinking=ev.get("thinking"),
+                    anthropic_blocks=ev.get("anthropic_blocks"),
                 ))
 
             elif ev_type == "tool_result":
