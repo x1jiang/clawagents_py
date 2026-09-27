@@ -28,6 +28,13 @@ os.environ["CLAW_FEATURE_SMART_MEMORY"] = "0"
 # discovery off entirely.
 os.environ["CLAWAGENTS_SKIP_DOTENV"] = "1"
 
+# EngineConfig is a BaseSettings, so a shell-exported endpoint override (e.g.
+# a proxy, or ANTHROPIC_BASE_URL set by Claude Code) leaks into every config a
+# test builds and silently reroutes provider selection. Tests that need an
+# endpoint pass it explicitly or use monkeypatch.setenv.
+for _k in ("ANTHROPIC_BASE_URL", "OPENAI_BASE_URL"):
+    os.environ.pop(_k, None)
+
 # With dotenv skipped, no real provider key is present. Modern provider SDKs
 # (openai>=2) raise at *construction* on an empty key, so tests that build a
 # real agent purely to inspect tool registration would crash offline. Inject
