@@ -1800,3 +1800,16 @@ Set `CLAWAGENTS_PYTHON` to the full interpreter path before starting ClawAgents,
 Use `create_claw_agent(profile="gemma-agentic")` for the local Gemma agentic Q4_K_M backend. See [setup, independent worker routing and verified completion](GEMMA_COORDINATION.md) and [the controlled coordination comparison](benchmarks/gemma_coordination_20260906/REPORT.md).
 
 Model catalog refresh: [verified models, provider constraints and source audit](MODEL_CATALOG_AUDIT.md) (Python 6.20.82 / extension 1.0.193).
+
+### GPT-6 family support (6.20.83)
+
+Select `gpt-6-astra`, `gpt-6-sol`, or `gpt-6-luna` with the OpenAI provider.
+All three use Responses by default, with a 1,050,000-token context window and
+a 128,000-token output cap. Sol and Luna support reasoning efforts `none`,
+`low`, `medium`, `high`, `xhigh`, and `max`; Astra starts at `low`. Legacy
+`minimal` maps to `low`. Explicit Chat Completions on Sol/Luna uses `none`
+when function tools are present. Existing model defaults are unchanged.
+
+References: [OpenAI GPT-6 guide](https://developers.openai.com/api/docs/guides/latest-model),
+[Sol](https://developers.openai.com/api/docs/models/gpt-6-sol),
+[Luna](https://developers.openai.com/api/docs/models/gpt-6-luna).

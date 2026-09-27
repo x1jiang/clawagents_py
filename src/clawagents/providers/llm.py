@@ -929,7 +929,7 @@ def openai_model_rejects_temperature(model: str) -> bool:
     m = _bare_openai_model_id(model)
     if m.startswith(("o1", "o3", "o4")):
         return True
-    if m.startswith(("gpt-5.3", "gpt-5.4", "gpt-5.5", "gpt-5.6", "gpt-6-astra")):
+    if m.startswith(("gpt-5.3", "gpt-5.4", "gpt-5.5", "gpt-5.6", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna")):
         return True
     if m.startswith("gpt-5") and "codex" in m:
         return True
@@ -979,14 +979,14 @@ def anthropic_model_rejects_sampling_params(model: str) -> bool:
 def _chat_completions_needs_reasoning_none(model: str) -> bool:
     """True when Chat Completions rejects tools + default reasoning_effort.
 
-    GPT-5.5 / GPT-5.6 default to a non-``none`` reasoning effort. On
+    GPT-5.5 / GPT-5.6 / GPT-6 Sol and Luna default to reasoning. On
     ``/v1/chat/completions``, that combination with function tools returns
     HTTP 400 ("use /v1/responses or set reasoning_effort to 'none'"). Prefer
     Responses for those models; this force-none is only for the Chat Completions
     fallback path.
     """
     m = _bare_openai_model_id(model)
-    return m.startswith("gpt-5.5") or m.startswith("gpt-5.6")
+    return m.startswith(("gpt-5.5", "gpt-5.6", "gpt-6-sol", "gpt-6-luna"))
 
 
 _REASONING_EFFORT_VALUES = frozenset({
@@ -1026,6 +1026,8 @@ def clamp_reasoning_effort_for_model(model: str, effort: str | None) -> str | No
 
     if _bare_openai_model_id(model).startswith("gpt-6-astra"):
         return "low" if effort in ("none", "minimal") else effort
+    if _bare_openai_model_id(model).startswith(("gpt-6-sol", "gpt-6-luna")):
+        return "low" if effort == "minimal" else effort
     if not is_grok_model(_bare_openai_model_id(model)):
         return effort
     if effort in _GROK_EFFORT_LEVELS:
@@ -1043,7 +1045,7 @@ def model_supports_reasoning_effort(model: str) -> bool:
         return True
     if m.startswith(("o1", "o3", "o4")):
         return True
-    if m.startswith(("gpt-5.5", "gpt-5.6", "gpt-6-astra")):
+    if m.startswith(("gpt-5.5", "gpt-5.6", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna")):
         return True
     # Bare gpt-5 / gpt-5-codex family (not gpt-5-nano/micro as primary chat)
     if m == "gpt-5" or m.startswith("gpt-5-"):
@@ -1096,7 +1098,7 @@ def prefers_responses_api(
         return False
     if "codex" in m:
         return True
-    if m.startswith(("gpt-5.5", "gpt-5.6", "gpt-6-astra")):
+    if m.startswith(("gpt-5.5", "gpt-5.6", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna")):
         return True
     # Other GPT-5 / o-series: Responses when tools + non-none effort so the
     # API accepts both (Chat Completions often forces effort=none).
@@ -1133,13 +1135,13 @@ def _apply_tool_reasoning_compat(
     has_tools: bool,
     preferred: str | None = None,
 ) -> None:
-    """Chat Completions reasoning_effort (forces none for GPT-5.5/5.6 + tools)."""
+    """Chat Completions reasoning_effort (forces none for GPT-5.5/5.6 and GPT-6 Sol/Luna + tools)."""
     effort = clamp_reasoning_effort_for_model(
         model, normalize_reasoning_effort(preferred)
     )
     if effort:
         kwargs["reasoning_effort"] = effort
-    # Chat Completions + tools on GPT-5.5/5.6 still requires none.
+    # Chat Completions tools on these models require none.
     if has_tools and _chat_completions_needs_reasoning_none(model):
         kwargs["reasoning_effort"] = "none"
 
