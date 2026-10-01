@@ -1,4 +1,4 @@
-"""Deploy this app only, using the named UTHealth account and a scoped secret."""
+"""Deploy the public app using the named UTHealth account and a scoped secret."""
 
 import json
 import subprocess
@@ -29,10 +29,7 @@ def cloud(args, *, capture=False, check=True, input=None):
 
 def main():
     # A rejected login stops before uploading code or creating any resource.
-    project = json.loads(
-        cloud(["projects", "describe", PROJECT, "--format=json"], capture=True).stdout
-    )
-    number = project["projectNumber"]
+    cloud(["projects", "describe", PROJECT, "--format=json"], capture=True)
     services = json.loads(
         cloud(
             ["run", "services", "list", f"--region={REGION}", "--format=json"],
@@ -60,7 +57,6 @@ def main():
             "cloudbuild.googleapis.com",
             "artifactregistry.googleapis.com",
             "secretmanager.googleapis.com",
-            "iap.googleapis.com",
             "iam.googleapis.com",
         ]
     )
@@ -133,39 +129,16 @@ def main():
             f"--region={REGION}",
             f"--service-account={IDENTITY}",
             f"--set-secrets=OPENAI_API_KEY={SECRET}:{version}",
-            "--no-allow-unauthenticated",
-            "--iap",
+            "--no-invoker-iam-check",
+            "--no-iap",
             "--cpu=1",
             "--memory=512Mi",
             "--min-instances=0",
             "--max-instances=2",
+            "--max=2",
             "--concurrency=1",
             "--timeout=3600",
             "--labels=app=hip-report-review",
-        ]
-    )
-    cloud(
-        [
-            "run",
-            "services",
-            "add-iam-policy-binding",
-            SERVICE,
-            f"--region={REGION}",
-            f"--member=serviceAccount:service-{number}@gcp-sa-iap.iam.gserviceaccount.com",
-            "--role=roles/run.invoker",
-        ]
-    )
-    cloud(
-        [
-            "beta",
-            "iap",
-            "web",
-            "add-iam-policy-binding",
-            f"--region={REGION}",
-            "--resource-type=cloud-run",
-            f"--service={SERVICE}",
-            f"--member=user:{ACCOUNT}",
-            "--role=roles/iap.httpsResourceAccessor",
         ]
     )
     cloud(
