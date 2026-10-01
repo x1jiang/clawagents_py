@@ -2,7 +2,7 @@
 
 A stateless research web app around the tested ClawAgents `gpt-6-luna` annotation agent.
 
-Upload a values-only `.xlsx` or UTF-8 `.csv`, select a worksheet and report column, optionally select case IDs and reference labels, and run. Or paste reports separated with `---` on its own line. The dashboard shows subtype counts, obturator screening flags, review flags, errors, and expandable verbatim evidence. Download the session results as CSV before leaving.
+Upload a values-only `.xlsx` or UTF-8 `.csv`, select a worksheet and report column, optionally select case IDs and reference labels, and run. Or paste reports separated with `---` on its own line. The dashboard shows subtype counts, obturator screening flags, review flags, errors, and expandable verbatim evidence. Reports, predictions, and reference metadata remain available in memory for review until you download the CSV. Starting the download automatically clears the entire session: uploaded files, worksheet data, pasted text, original report bodies, predictions, reference metadata, and dashboard. Manual clearing or leaving also clears the session.
 
 Reference labels are used for browser-side agreement calculations only; they are never submitted to the model. Duplicate case IDs remain separate report rows. This app does not merge observations into patient-level diagnoses. Provided-example agreement is not independent validation.
 
@@ -22,7 +22,7 @@ Open `http://127.0.0.1:8096`. The launcher reads the existing parent project `.e
 - Jobs/results exist only inside the active HTTP request and browser session. No database, object-storage bucket, disk archive, session cache, analytics, or browser local/session storage.
 - The agent has only report-read and validated-label tools. Its memory/persistence features are disabled. In-memory text blocks bypass file-backed tool-output archival, including for long reports.
 - Framework/provider logging is disabled; HTTP access logging is disabled. Cloud Run infrastructure logs may still record request metadata such as timing and route, not report bodies through this app.
-- Responses carry `Cache-Control: no-store`; clearing the session or leaving clears browser-held reports/results. Explicit CSV downloads are user-controlled files.
+- Responses carry `Cache-Control: no-store`; starting a CSV download automatically clears browser-held reports/results; manual clearing or leaving also clears them. Explicit CSV downloads are user-controlled files.
 - OpenAI Responses requests use `store=False`. This does not establish zero provider retention or any institutional compliance arrangement.
 - Runtime is a non-root user; application source is read-only to that user. Local container smoke tests also use a read-only root filesystem.
 
@@ -47,6 +47,7 @@ The installed Google Cloud CLI exposes IAP through `gcloud beta`. A project with
 scripts/run_tests.sh tests/test_hip_dislocation_agent.py tests/test_hip_dislocation_web.py
 .venv/bin/ruff check examples/hip_dislocation/agent.py examples/hip_dislocation/web tests/test_hip_dislocation_web.py
 node --check examples/hip_dislocation/web/static/app.js
+node --test tests/test_hip_dislocation_web_client.cjs
 ```
 
 The UI includes synthetic examples. They verify the complete flow; their agreement score is not a performance estimate. The prior 42-report benchmark and its evaluation limitations are documented in the parent example folder.
