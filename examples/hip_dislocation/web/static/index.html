@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Hip Report Review</title><link rel="stylesheet" href="/static/style.css"><script src="/static/app.js" defer></script></head>
+<body>
+<header><div class="brand"><span class="mark" aria-hidden="true">H</span><strong>Hip Report Review</strong><span class="research">RESEARCH TOOL</span></div><button id="clear" class="quiet">Clear session</button></header>
+<main>
+<section class="intro"><p class="eyebrow">REPORT ANNOTATION · GPT-6-LUNA</p><h1>From reports to a clearer picture.</h1><p>Classify hip-dislocation descriptions, inspect the supporting text, and bring uncertain cases into review.</p></section>
+<div class="workspace">
+<aside aria-label="Report input">
+<h2>1. Add your reports</h2>
+<div class="tabs" role="tablist" aria-label="Input method"><button id="upload-tab" role="tab" aria-selected="true" aria-controls="upload-panel">Upload file</button><button id="paste-tab" role="tab" aria-selected="false" aria-controls="paste-panel" tabindex="-1">Paste text</button></div>
+<div id="upload-panel" role="tabpanel" aria-labelledby="upload-tab">
+<label class="drop" for="file"><span class="upload-icon" aria-hidden="true">↑</span><strong>Choose an Excel or CSV file</strong><span>.xlsx or .csv · up to 5 MB</span><input id="file" type="file" accept=".xlsx,.csv"></label>
+<p id="file-name" class="muted">First row should contain column names.</p>
+<div id="mapping" hidden>
+<label for="sheet">Worksheet</label><select id="sheet"></select>
+<label for="report-column">Report text column <span class="required">Required</span></label><select id="report-column"></select>
+<label for="id-column">Case ID column <span class="muted">Optional</span></label><select id="id-column"></select>
+<label for="reference-column">Reference label column <span class="muted">Optional</span></label><select id="reference-column"></select>
+<p class="hint">Reference labels stay separate from the AI. Add them to measure agreement.</p>
+<p id="preview" class="preview"></p>
+</div>
+</div>
+<div id="paste-panel" role="tabpanel" aria-labelledby="paste-tab" hidden>
+<label for="text">Imaging report text</label><textarea id="text" autocomplete="off" rows="10" placeholder="Paste the report here…"></textarea>
+<p class="hint">For multiple reports, separate each with a line containing three dashes: ---</p><button id="example" class="quiet small">Try a synthetic example</button>
+</div>
+<button id="run" class="primary" disabled>Run predictions <span aria-hidden="true">→</span></button><button id="stop" class="quiet" hidden>Stop processing</button>
+<div id="message" role="status" aria-live="polite"></div>
+<div class="privacy"><strong>Only for this session</strong><p>Reports and results are held in memory. This app does not save them or keep a history. Download results before clearing or leaving.</p><p>Text is sent to OpenAI for inference with response storage disabled. Provider retention policies still apply.</p></div>
+</aside>
+<section class="results" aria-label="Prediction dashboard">
+<div class="section-title"><div><p class="eyebrow">2. INSPECT THE RESULTS</p><h2>Your review dashboard</h2></div><button id="download" class="secondary" disabled>Download CSV</button></div>
+<div id="empty" class="empty"><div class="empty-lines" aria-hidden="true"><i></i><i></i><i></i></div><h3>Start with a report or a spreadsheet</h3><p>See subtype counts, possible obturator cases, and evidence quotes here. Uncertain text is flagged for your review.</p><span>Up to 100 reports per run</span></div>
+<div id="dashboard" hidden>
+<div class="progress"><span id="progress-text"></span><progress id="progress" max="100" value="0"></progress></div>
+<div class="stats"><div><span>Processed</span><strong id="processed">0</strong></div><div><span>Needs review</span><strong id="review">0</strong></div><div><span>Possible obturator</span><strong id="possible">0</strong></div><div><span>AI errors</span><strong id="errors">0</strong></div></div>
+<div class="distribution"><div class="subhead"><h3>Predicted subtypes</h3><span class="muted">Report counts</span></div><div id="bars"></div></div>
+<div id="performance" class="performance" hidden></div>
+<div class="table-toolbar"><h3>Report-by-report review</h3><label for="filter" class="sr-only">Filter results</label><select id="filter"><option value="all">All reports</option><option value="review">Needs review</option><option value="possible">Possible obturator</option><option value="error">AI errors</option></select></div>
+<p class="hint">Open a row to compare the quote with the original report. Repeated case IDs remain separate reports.</p>
+<div id="rows"></div>
+</div>
+</section>
+</div>
+<footer>Research annotations require human review. This tool does not diagnose a patient or interpret images. “Possible obturator” is a screening flag, not a confirmed subtype.</footer>
+</main>
+</body></html>
