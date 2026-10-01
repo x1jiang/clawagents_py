@@ -37,7 +37,7 @@ gcloud auth login xjiang2@uth.edu
 
 Target: `sbmi-jiang-ai-testing01`, `us-central1`, service `hip-report-review`.
 
-The deployer copies only the explicitly allowlisted source/static files into a build context. Original reports, results, tests, `.env`, and unrelated repository edits are excluded. It creates a dedicated runtime identity with read access to `hip-report-openai-key`, pins the secret version, and deploys with IAP plus Google sign-in access for `xjiang2@uth.edu`. No public invoker access is granted. Billing controls: zero minimum instances, two maximum instances, one request/instance, 512 MiB and one vCPU.
+The deployer copies only the explicitly allowlisted source/static files into a build context. Original reports, results, tests, `.env`, and unrelated repository edits are excluded. It creates a dedicated runtime identity with read access to `hip-report-openai-key`, replicates the secret only in `us-central1` to respect the project's resource-location policy, pins the secret version, and deploys with IAP plus Google sign-in access for `xjiang2@uth.edu`. No public invoker access is granted. Billing controls: zero minimum instances, two maximum instances, one request/instance, 512 MiB and one vCPU.
 
 The installed Google Cloud CLI exposes IAP through `gcloud beta`. A project without a Google organization may need initial OAuth configuration through the Cloud Console; deployment must remain authenticated if that setup is needed.
 

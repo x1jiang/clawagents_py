@@ -94,7 +94,8 @@ def main():
                 "secrets",
                 "create",
                 SECRET,
-                "--replication-policy=automatic",
+                "--replication-policy=user-managed",
+                f"--locations={REGION}",
                 "--labels=app=hip-report-review",
             ]
         )
