@@ -120,6 +120,7 @@ def test_agent_applies_meta_initial_tools_and_preserves_luna(tmp_path, monkeypat
 
 
 def test_profile_failure_logs_warning_without_breaking_agent(tmp_path, monkeypatch, caplog):
+    caplog.set_level("WARNING", logger="clawagents.agent")
     monkeypatch.chdir(tmp_path)
 
     def broken_profile(_name):
