@@ -929,7 +929,7 @@ def openai_model_rejects_temperature(model: str) -> bool:
     m = _bare_openai_model_id(model)
     if m.startswith(("o1", "o3", "o4")):
         return True
-    if m.startswith(("gpt-5.3", "gpt-5.4", "gpt-5.5", "gpt-5.6", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna")):
+    if m.startswith(("gpt-5.3", "gpt-5.4", "gpt-5.5", "gpt-5.6", "gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna")):
         return True
     if m.startswith("gpt-5") and "codex" in m:
         return True
@@ -1024,7 +1024,7 @@ def clamp_reasoning_effort_for_model(model: str, effort: str | None) -> str | No
         return effort
     from clawagents.providers.model_classify import is_grok_model
 
-    if _bare_openai_model_id(model).startswith("gpt-6-astra"):
+    if _bare_openai_model_id(model).startswith(("gpt-6-astra", "gpt-6.1-sol")):
         return "low" if effort in ("none", "minimal") else effort
     if _bare_openai_model_id(model).startswith(("gpt-6-sol", "gpt-6-luna")):
         return "low" if effort == "minimal" else effort
@@ -1045,7 +1045,7 @@ def model_supports_reasoning_effort(model: str) -> bool:
         return True
     if m.startswith(("o1", "o3", "o4")):
         return True
-    if m.startswith(("gpt-5.5", "gpt-5.6", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna")):
+    if m.startswith(("gpt-5.5", "gpt-5.6", "gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna")):
         return True
     # Bare gpt-5 / gpt-5-codex family (not gpt-5-nano/micro as primary chat)
     if m == "gpt-5" or m.startswith("gpt-5-"):
@@ -1098,7 +1098,7 @@ def prefers_responses_api(
         return False
     if "codex" in m:
         return True
-    if m.startswith(("gpt-5.5", "gpt-5.6", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna")):
+    if m.startswith(("gpt-5.5", "gpt-5.6", "gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna")):
         return True
     # Other GPT-5 / o-series: Responses when tools + non-none effort so the
     # API accepts both (Chat Completions often forces effort=none).
@@ -1136,6 +1136,11 @@ def _apply_tool_reasoning_compat(
     preferred: str | None = None,
 ) -> None:
     """Chat Completions reasoning_effort (forces none for GPT-5.5/5.6 and GPT-6 Sol/Luna + tools)."""
+    if has_tools and _bare_openai_model_id(model).startswith("gpt-6.1-sol"):
+        raise ValueError(
+            "GPT-6.1 Sol requires the Responses API for tool calling. "
+            "Set openai_wire_api to 'responses' or 'auto'."
+        )
     effort = clamp_reasoning_effort_for_model(
         model, normalize_reasoning_effort(preferred)
     )
@@ -1676,6 +1681,8 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
                 if (
                     _is_responses_unsupported(exc)
                     and self._wire_api != "responses"
+                    # GPT-6.1 Sol has no Chat Completions tool fallback.
+                    and not (oai_tools and _bare_openai_model_id(self.model).startswith("gpt-6.1-sol"))
                 ):
                     logger.warning(
                         "  [openai] Responses API unavailable (%s) — "
