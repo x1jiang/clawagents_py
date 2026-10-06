@@ -102,6 +102,40 @@ def cases() -> list[Case]:
     q = "intraday ED arrival time distribution for the trauma cohort"
     return [
         Case(
+            "sql_only_with_numeric_comment",
+            "done",
+            [_user("只生成 SQL，不要执行。筛选至少 10 patients 的日期。")],
+            "```sql\n-- Find days with at least 10 patients\n"
+            "SELECT arrival_day, COUNT(*) AS patients FROM encounters\n"
+            "GROUP BY arrival_day HAVING COUNT(*) >= 10;\n```",
+            "SQL comments and thresholds are not observed counts",
+        ),
+        Case(
+            "unlabelled_sql_with_numeric_comment",
+            "done",
+            [_user("Generate SQL only; do not execute.")],
+            "```\n-- Find days with at least 10 patients\n"
+            "SELECT arrival_day, COUNT(*) FROM encounters\n"
+            "GROUP BY arrival_day HAVING COUNT(*) >= 10;\n```",
+            "SQL fences without a language are still code",
+        ),
+        Case(
+            "sql_plus_fabricated_result",
+            "continue",
+            [_user("Generate SQL only; do not execute.")],
+            "```sql\nSELECT COUNT(*) FROM encounters;\n```\n"
+            "The query returned 305 qualifying encounters.",
+            "ignoring SQL must not hide fabricated prose outside it",
+        ),
+        Case(
+            "grounded_prose_with_sql_threshold",
+            "done",
+            [_user(q), *_exec("12 patients matched")],
+            "12 patients match.\n```sql\n"
+            "SELECT * FROM encounters WHERE pain BETWEEN 40 AND 70;\n```",
+            "SQL literals must not contaminate prose evidence checking",
+        ),
+        Case(
             "no_tools_invented_table",
             "continue",
             [_user(q)],
@@ -310,3 +344,13 @@ def test_gemini_grounding_simulation_report(capsys):
         f"over-blocked: {unexpected_block or 'none'}."
     )
     assert not leaks, [c.name for c in leaks]
+
+
+def test_grounding_nudge_allows_sql_only_correction():
+    messages = [_user("Generate SQL only; do not execute.")]
+    action, _ = _run(messages, "The query returned 305 qualifying encounters.")
+    assert action == "continue"
+    nudge = messages[-1].content
+    assert "SQL-only" in nudge
+    assert "Do not execute" in nudge
+    assert "Call `execute` now" not in nudge
