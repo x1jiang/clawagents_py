@@ -682,6 +682,7 @@ def create_claw_agent(
     workspace: Optional[Union[str, os.PathLike]] = None,
     subagents: Optional[List] = None,
     completion_check: Any = None,
+    fast_mode: bool = False,
 ) -> ClawAgent:
     """
     Create a ClawAgent with full-stack capabilities.
@@ -727,6 +728,7 @@ def create_claw_agent(
         wire_api:       OpenAI transport: ``auto`` | ``responses`` | ``chat_completions``.
                         Use ``responses`` for Responses-only OpenAI-compatible
                         proxies (e.g. Codex gateways that 404 ``/chat/completions``).
+        fast_mode:      Request OpenAI Fast processing for supported direct API models.
         ssl_verify:     TLS verify for custom ``base_url`` hosts. Set ``False`` for
                         corporate proxies with private CAs.
         trajectory:     Enable trajectory logging to .clawagents/trajectories/.
@@ -954,6 +956,7 @@ def create_claw_agent(
         model, streaming, api_key, context_window, max_tokens, temperature,
         base_url, api_version, reasoning_effort, wire_api, ssl_verify,
         provider=provider_hint,
+        fast_mode=fast_mode,
     )
 
     # ── Resolve fallback providers ──────────────────────────────────────
@@ -1555,6 +1558,7 @@ def _resolve_model(
     wire_api: Optional[str] = None,
     ssl_verify: Optional[bool] = None,
     provider: Optional[str] = None,
+    fast_mode: bool = False,
 ) -> LLMProvider:
     """Accept a model name string, an LLMProvider, or None (auto-detect)."""
     if isinstance(model, LLMProvider):
@@ -1584,6 +1588,7 @@ def _resolve_model(
         config.reasoning_effort = normalize_reasoning_effort(reasoning_effort) or ""
     if wire_api is not None:
         config.openai_wire_api = _normalize_wire_api(wire_api)
+    config.openai_fast_mode = bool(fast_mode)
     if ssl_verify is not None:
         config.openai_ssl_verify = bool(ssl_verify)
 
