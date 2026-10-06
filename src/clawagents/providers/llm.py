@@ -1063,6 +1063,15 @@ def _normalize_wire_api(value: str | None) -> str:
     return "auto"
 
 
+def supports_openai_fast_mode(model: str) -> bool:
+    """Models with documented Fast processing on the direct OpenAI API."""
+    m = model.strip().lower()
+    return bool(_re.fullmatch(
+        r"(?:gpt-6-(?:astra|sol|luna)|gpt-6\.1-sol|gpt-5\.6(?:-(?:sol|terra|luna))?)"
+        r"(?:-\d{4}-\d{2}-\d{2})?", m,
+    ))
+
+
 def _responses_endpoint_likely(base_url: str | None, api_type: str = "") -> bool:
     """True when Responses is a reasonable default for this host.
 
@@ -1585,6 +1594,14 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
         self._base_url = base_url
         self._api_type = "azure" if is_azure else api_type
         self._wire_api = _normalize_wire_api(getattr(config, "openai_wire_api", None))
+        self._fast_mode = bool(getattr(config, "openai_fast_mode", False))
+        self._fast_eligible = (
+            not self._api_type
+            and (not base_url or base_url.rstrip("/").lower() == "https://api.openai.com/v1")
+            and supports_openai_fast_mode(self.model)
+        )
+        if self._fast_mode and not self._fast_eligible:
+            raise ValueError("Fast mode requires a supported model on the direct OpenAI API")
         # Sticky fallback when Responses is missing — never when wire_api forces it.
         self._force_chat_completions = False
 
@@ -1720,6 +1737,8 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
             "messages": messages,
             "max_completion_tokens": self._max_tokens,
         }
+        if getattr(self, "_fast_eligible", False):
+            kwargs["service_tier"] = "fast" if self._fast_mode else "default"
         _with_temperature(kwargs, self.model, self._temperature)
         if oai_tools:
             kwargs["tools"] = oai_tools
@@ -1796,6 +1815,8 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
             "max_output_tokens": self._max_tokens,
             "store": False,
         }
+        if getattr(self, "_fast_eligible", False):
+            kwargs["service_tier"] = "fast" if self._fast_mode else "default"
         _with_temperature(kwargs, self.model, self._temperature)
         if instructions:
             kwargs["instructions"] = instructions
@@ -2203,6 +2224,8 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
                     "stream": True,
                     "stream_options": {"include_usage": True},
                 }
+                if getattr(self, "_fast_eligible", False):
+                    kwargs["service_tier"] = "fast" if self._fast_mode else "default"
                 _with_temperature(kwargs, self.model, self._temperature)
                 if oai_tools:
                     kwargs["tools"] = oai_tools
@@ -2727,7 +2750,7 @@ GEMINI_ANSWER_NUDGE = (
     "rewrite files unless asked."
 )
 
-GEMINI_SUMMARIZE_MARKER = "[Gemini] Please answer from the tool results"
+GEMINI_SUMMARIZE_MARKER = "[Harness] Please answer from the tool results"
 GEMINI_EVIDENCE_MARKER = "[Gemini] No tool ran this turn — do not invent results"
 
 _GEMINI_DUMP_LINE_RE = _re.compile(r"^\[(?:called|used|result)\s+", _re.IGNORECASE)

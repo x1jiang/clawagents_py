@@ -546,7 +546,7 @@ class CompletionHandler:
                 "warn",
                 {
                     "message": (
-                        "Gemini returned no answer after tools — asking it to summarize"
+                        "Model returned no answer after tools — asking it to summarize"
                     )
                 },
             )
