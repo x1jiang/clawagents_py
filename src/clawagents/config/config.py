@@ -149,6 +149,8 @@ class EngineConfig(BaseSettings):
     # OpenAI transport: auto | responses | chat_completions. Forces /v1/responses
     # for Responses-only OpenAI-compatible proxies (Codex gateways, etc.).
     openai_wire_api: str = "auto"
+    # Explicit OpenAI Fast processing for supported direct API models.
+    openai_fast_mode: bool = False
     # TLS verification for custom OpenAI-compatible base URLs. Corporate
     # MITM / private-CA endpoints often need False.
     openai_ssl_verify: bool = True
