@@ -56,6 +56,19 @@ _FLATTEN_EXECUTE_RESULT_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _FENCE_RE = re.compile(r"```[\w-]*\n?")
+_FENCED_BLOCK_RE = re.compile(
+    r"(?m)^ {0,3}(?P<fence>`{3,}|~{3,})[ \t]*(?P<language>[\w+-]*)[^\n]*\n"
+    r"(?P<body>[\s\S]*?)^ {0,3}(?P=fence)[ \t]*$"
+)
+_SQL_LANGUAGES = frozenset({
+    "sql", "postgresql", "postgres", "pgsql", "mysql", "sqlite", "tsql",
+    "plsql", "mssql", "bigquery", "snowflake",
+})
+_SQL_START_RE = re.compile(
+    r"\A\s*(?:(?:--[^\n]*(?:\n|$)|/\*[\s\S]*?\*/)\s*)*"
+    r"(?:SELECT|WITH|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|EXPLAIN)\b",
+    re.IGNORECASE,
+)
 _COHORT_COUNT_RE = re.compile(
     r"(?i)\b(\d{2,6})\s+(patients?|encounters?|cases?|rows?|records?)\b"
 )
@@ -68,7 +81,16 @@ _QUERY_EVIDENCE_TOOLS = frozenset({"execute"})
 _UNGROUNDED_REFUSAL = (
     "Harness blocked an ungrounded count result. "
     "This-turn `execute` output does not support the numbers in the draft, "
-    "so the table was not published. Re-run the query or use a stronger model."
+    "so the unverified result was not published. "
+    "A SQL-only answer can be provided without executing the query."
+)
+_QUERY_EVIDENCE_CORRECTION = (
+    "Remove unsupported result claims. For a SQL-only request, provide the query "
+    "without claiming observed counts. Do not execute merely to satisfy this "
+    "check; respect the user's requested scope and execution permissions. "
+    "If the task calls for verified results and execution is allowed, use "
+    "`execute` and report only supported results "
+    "(`use_skill` is instructions, not query evidence)."
 )
 
 
@@ -136,7 +158,17 @@ def _this_turn_execute_output(messages: list[LLMMessage]) -> str:
 
 
 def _plain_answer(text: str) -> str:
-    return _FENCE_RE.sub("\n", text or "")
+    """Project result claims, excluding SQL source but retaining result tables."""
+
+    def strip_sql(match: re.Match[str]) -> str:
+        language = match.group("language").casefold()
+        if language in _SQL_LANGUAGES or (
+            not language and _SQL_START_RE.match(match.group("body"))
+        ):
+            return "\n"
+        return match.group(0)
+
+    return _FENCE_RE.sub("\n", _FENCED_BLOCK_RE.sub(strip_sql, text or ""))
 
 
 def _looks_like_ungrounded_query_result(text: str) -> bool:
@@ -194,7 +226,8 @@ def _ungrounded_count_tokens(answer: str, evidence: str) -> list[int]:
     """Counts in the reply that are not in execute output and not a row sum."""
     ev = _evidence_numbers(evidence)
     bad: list[int] = []
-    rows = _table_data_number_rows(_plain_answer(answer))
+    answer = _plain_answer(answer)
+    rows = _table_data_number_rows(answer)
     if rows:
         for row in rows:
             for number in row:
@@ -228,9 +261,8 @@ def _ungrounded_query_reason(
     evidence = _this_turn_execute_output(messages)
     if not evidence.strip():
         return (
-            "Call `execute` now (`use_skill` is instructions, not a query). "
-            "Quote only that tool output. "
-            "Do not invent a table, matrix, or SQL result."
+            "No this-turn `execute` output supports the draft's result counts. "
+            + _QUERY_EVIDENCE_CORRECTION
         )
     bad = _ungrounded_count_tokens(content, evidence)
     if not _should_reject_ungrounded_counts(bad):
@@ -238,8 +270,8 @@ def _ungrounded_query_reason(
     shown = ", ".join(str(number) for number in bad[:8])
     return (
         f"This-turn `execute` output is missing counts you reported ({shown}). "
-        "Re-run `execute` or quote only numbers from that output. "
-        "Do not invent hour/day cells from a daily total."
+        "Do not invent hour/day cells from a daily total. "
+        + _QUERY_EVIDENCE_CORRECTION
     )
 
 
@@ -520,7 +552,7 @@ class CompletionHandler:
                 {
                     "message": (
                         "Model reported query counts that are not in this-turn "
-                        "execute output — asking it to execute"
+                        "execute output — asking it to correct unsupported claims"
                     )
                 },
             )
