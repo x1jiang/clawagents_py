@@ -986,6 +986,10 @@ def _requires_responses_for_tools(model: str) -> bool:
     return _bare_openai_model_id(model).startswith(("gpt-6.1-sol", "gpt-6-astra"))
 
 
+def _responses_only_model_label(model: str) -> str:
+    return "GPT-6 Astra" if _bare_openai_model_id(model).startswith("gpt-6-astra") else "GPT-6.1 Sol"
+
+
 def _chat_completions_needs_reasoning_none(model: str) -> bool:
     """True when Chat Completions rejects tools + default reasoning_effort.
 
@@ -1156,9 +1160,8 @@ def _apply_tool_reasoning_compat(
 ) -> None:
     """Chat Completions reasoning_effort (forces none for GPT-5.5/5.6 and GPT-6 Sol/Luna + tools)."""
     if has_tools and _requires_responses_for_tools(model):
-        name = "GPT-6 Astra" if "gpt-6-astra" in _bare_openai_model_id(model) else "GPT-6.1 Sol"
         raise ValueError(
-            f"{name} requires the Responses API for tool calling. "
+            f"{_responses_only_model_label(model)} requires the Responses API for tool calling. "
             "Set openai_wire_api to 'responses' or 'auto'."
         )
     effort = clamp_reasoning_effort_for_model(
@@ -1615,8 +1618,21 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
             raise ValueError("Fast mode requires a supported model on the direct OpenAI API")
         # Sticky fallback when Responses is missing — never when wire_api forces it.
         self._force_chat_completions = False
+        self._warned_responses_bridge = False
 
     def _should_use_responses(self, has_tools: bool) -> bool:
+        # Bridge: these models reject Chat Completions tools at every effort,
+        # so tool turns use Responses even when wire_api asks for chat. Azure
+        # deployments keep their explicit wire and get the clear error.
+        if has_tools and _requires_responses_for_tools(self.model) and self._api_type != "azure":
+            if self._wire_api == "chat_completions" and not self._warned_responses_bridge:
+                logger.warning(
+                    "  [openai] %s tool calls require Responses; routing to /v1/responses "
+                    "although wire_api=chat_completions",
+                    self.model,
+                )
+                self._warned_responses_bridge = True
+            return True
         if self._force_chat_completions and self._wire_api != "responses":
             return False
         return prefers_responses_api(
@@ -1718,6 +1734,16 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
                         type(exc).__name__,
                     )
                     self._force_chat_completions = True
+                elif (
+                    _is_responses_unsupported(exc)
+                    and oai_tools
+                    and _requires_responses_for_tools(self.model)
+                ):
+                    raise ValueError(
+                        f"{_responses_only_model_label(self.model)} tool calls require the "
+                        "Responses API, which this endpoint does not support. Use an "
+                        "endpoint that serves /v1/responses."
+                    ) from exc
                 else:
                     raise
 

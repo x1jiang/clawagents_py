@@ -44,12 +44,9 @@ async def test_gpt61_sol_tool_calling_contract(wire_api, monkeypatch):
     provider.client.chat.completions.create = chat
     messages = [LLMMessage("user", "Read a file")]
     tools = [NativeToolSchema("read_file", "Read", {"path": {"type": "string"}})]
-    if wire_api == "auto":
-        await provider.chat(messages, tools=tools)
-        responses.assert_awaited_once()
-    else:
-        with pytest.raises(ValueError, match="requires the Responses API for tool calling"):
-            await provider.chat(messages, tools=tools)
+    # chat_completions is bridged: Chat Completions rejects these tools at every effort.
+    await provider.chat(messages, tools=tools)
+    responses.assert_awaited_once()
     chat.assert_not_awaited()
 
 
@@ -59,7 +56,7 @@ async def test_gpt61_sol_tool_endpoint_failure_never_falls_back(monkeypatch):
     monkeypatch.setattr(provider, "_stream_with_retry_responses", AsyncMock(side_effect=unavailable))
     chat = AsyncMock()
     provider.client.chat.completions.create = chat
-    with pytest.raises(RuntimeError, match="does not support Responses"):
+    with pytest.raises(ValueError, match="GPT-6.1 Sol tool calls require the Responses API"):
         await provider.chat([LLMMessage("user", "Read")],
             tools=[NativeToolSchema("read_file", "Read", {})])
     chat.assert_not_awaited()
