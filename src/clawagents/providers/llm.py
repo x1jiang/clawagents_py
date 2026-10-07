@@ -976,6 +976,16 @@ def anthropic_model_rejects_sampling_params(model: str) -> bool:
     return False
 
 
+def _requires_responses_for_tools(model: str) -> bool:
+    """True when Chat Completions rejects function tools at every effort.
+
+    GPT-6.1 Sol and GPT-6 Astra accept only ``low`` and above, and Chat
+    Completions rejects tools with any ``reasoning_effort`` (verified live
+    2026-10-07), so tool calls must use Responses.
+    """
+    return _bare_openai_model_id(model).startswith(("gpt-6.1-sol", "gpt-6-astra"))
+
+
 def _chat_completions_needs_reasoning_none(model: str) -> bool:
     """True when Chat Completions rejects tools + default reasoning_effort.
 
@@ -1145,9 +1155,10 @@ def _apply_tool_reasoning_compat(
     preferred: str | None = None,
 ) -> None:
     """Chat Completions reasoning_effort (forces none for GPT-5.5/5.6 and GPT-6 Sol/Luna + tools)."""
-    if has_tools and _bare_openai_model_id(model).startswith("gpt-6.1-sol"):
+    if has_tools and _requires_responses_for_tools(model):
+        name = "GPT-6 Astra" if "gpt-6-astra" in _bare_openai_model_id(model) else "GPT-6.1 Sol"
         raise ValueError(
-            "GPT-6.1 Sol requires the Responses API for tool calling. "
+            f"{name} requires the Responses API for tool calling. "
             "Set openai_wire_api to 'responses' or 'auto'."
         )
     effort = clamp_reasoning_effort_for_model(
@@ -1698,8 +1709,8 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
                 if (
                     _is_responses_unsupported(exc)
                     and self._wire_api != "responses"
-                    # GPT-6.1 Sol has no Chat Completions tool fallback.
-                    and not (oai_tools and _bare_openai_model_id(self.model).startswith("gpt-6.1-sol"))
+                    # GPT-6.1 Sol / GPT-6 Astra have no Chat Completions tool fallback.
+                    and not (oai_tools and _requires_responses_for_tools(self.model))
                 ):
                     logger.warning(
                         "  [openai] Responses API unavailable (%s) — "
@@ -2092,8 +2103,8 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
                     _record_stream_breaker(breaker, success=False)
                 if _is_retryable(exc) and attempt < _MAX_RETRIES:
                     logger.warning(
-                        "  [openai-responses] Stream interrupted after %d chars — retrying",
-                        len("".join(chunks)),
+                        "  [openai-responses] Stream interrupted after %d chars — retrying (%s: %.200s)",
+                        len("".join(chunks)), type(exc).__name__, exc,
                     )
                     attempt += 1
                     continue
@@ -2354,8 +2365,8 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
                 # when retries are exhausted or the error is not retryable.
                 if _is_retryable(exc) and attempt < _MAX_RETRIES:
                     logger.warning(
-                        "  [openai] Stream interrupted after %d chars — retrying",
-                        len("".join(chunks)),
+                        "  [openai] Stream interrupted after %d chars — retrying (%s: %.200s)",
+                        len("".join(chunks)), type(exc).__name__, exc,
                     )
                     attempt += 1
                     continue

@@ -63,3 +63,40 @@ async def test_gpt6_explicit_chat_compatibility(model, has_tools):
     assert wire['reasoning_effort'] == ('none' if has_tools else 'high')
     assert wire['max_completion_tokens'] == 128_000
     assert 'temperature' not in wire
+
+
+async def test_gpt6_astra_chat_completions_tools_require_responses(monkeypatch):
+    # Live API (2026-10-07): Astra rejects Chat Completions tools at every effort.
+    provider = OpenAIProvider(EngineConfig(openai_model='gpt-6-astra', openai_api_key='test',
+        openai_wire_api='chat_completions', reasoning_effort='high'))
+    chat = AsyncMock()
+    provider.client.chat.completions.create = chat
+    with pytest.raises(ValueError, match='GPT-6 Astra requires the Responses API for tool calling'):
+        await provider.chat([LLMMessage('user', 'Read a file')],
+            tools=[NativeToolSchema('read_file', 'Read', {'path': {'type': 'string'}})])
+    chat.assert_not_awaited()
+
+
+async def test_gpt6_astra_tool_endpoint_failure_never_falls_back(monkeypatch):
+    provider = OpenAIProvider(EngineConfig(openai_model='gpt-6-astra', openai_api_key='test'))
+    unavailable = RuntimeError('endpoint does not support Responses')
+    monkeypatch.setattr(provider, '_stream_with_retry_responses', AsyncMock(side_effect=unavailable))
+    chat = AsyncMock()
+    provider.client.chat.completions.create = chat
+    with pytest.raises(RuntimeError, match='does not support Responses'):
+        await provider.chat([LLMMessage('user', 'Read')],
+            tools=[NativeToolSchema('read_file', 'Read', {})])
+    chat.assert_not_awaited()
+    assert not provider._force_chat_completions
+
+
+async def test_gpt6_astra_explicit_chat_without_tools():
+    provider = OpenAIProvider(EngineConfig(openai_model='gpt-6-astra', openai_api_key='test',
+        openai_wire_api='chat_completions', reasoning_effort='none', max_tokens=200_000))
+    response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='ok', tool_calls=None),
+        finish_reason='stop')], usage=None)
+    provider.client.chat.completions.create = AsyncMock(return_value=response)
+    await provider._request_once([{'role': 'user', 'content': 'hello'}])
+    wire = provider.client.chat.completions.create.call_args.kwargs
+    assert wire['reasoning_effort'] == 'low'
+    assert 'temperature' not in wire
