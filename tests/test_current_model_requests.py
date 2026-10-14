@@ -33,12 +33,13 @@ def gemini_provider(model="gemini-3.8-flash", effort="", max_tokens=100000):
                                          reasoning_effort=effort, temperature=0.2, max_tokens=max_tokens))
 
 
+@pytest.mark.parametrize("model", ["gemini-3.8-flash", "gemini-4-argon"])
 @pytest.mark.parametrize("effort,expected", [("", None), ("none", "low"), ("minimal", "low"),
                                              ("low", "low"), ("medium", "medium"),
                                              ("high", "high"), ("xhigh", "high"),
                                              ("max", "high"), ("EXTRA HIGH", "high")])
-async def test_gemini38_request_sampling_output_limit_and_effort(gemini_client, effort, expected):
-    provider = gemini_provider(effort=effort)
+async def test_gemini38_request_sampling_output_limit_and_effort(gemini_client, model, effort, expected):
+    provider = gemini_provider(model=model, effort=effort)
     result = await provider.chat([llm.LLMMessage("user", "hello")])
     config = gemini_client.aio.models.generate_content.call_args.kwargs["config"]
     wire = config.model_dump(exclude_none=True)
@@ -127,7 +128,13 @@ def anthropic_client(monkeypatch):
     return client
 
 
-@pytest.mark.parametrize("model", ["claude-fable-5-1", "claude-opus-5", "claude-sonnet-5"])
+@pytest.mark.parametrize("model", [
+    "claude-fable-5-1", "claude-opus-5-5", "claude-opus-5",
+    "claude-sonnet-5-5", "claude-sonnet-5", "claude-haiku-5-5",
+    "us.anthropic.claude-haiku-5-5", "au.anthropic.claude-haiku-5-5",
+    "jp.anthropic.claude-haiku-5-5", "global.anthropic.claude-haiku-5-5",
+    "anthropic.claude-haiku-5-5",
+])
 @pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])
 async def test_claude_current_models_send_effort_without_sampling(anthropic_client, model, effort):
     provider = llm.AnthropicProvider(EngineConfig(anthropic_api_key="test", anthropic_model=model,
@@ -139,7 +146,11 @@ async def test_claude_current_models_send_effort_without_sampling(anthropic_clie
     assert wire.get("thinking", {}).get("type", "adaptive") == "adaptive"
 
 
-@pytest.mark.parametrize("model", ["claude-fable-5-1", "claude-opus-5", "claude-sonnet-5", "claude-opus-4-8", "claude-sonnet-4-5"])
+@pytest.mark.parametrize("model", [
+    "claude-fable-5-1", "claude-opus-5-5", "claude-opus-5",
+    "claude-sonnet-5-5", "claude-sonnet-5", "claude-haiku-5-5",
+    "claude-opus-4-8", "claude-sonnet-4-5",
+])
 async def test_unset_claude_effort_preserves_model_default(anthropic_client, model):
     provider = llm.AnthropicProvider(EngineConfig(anthropic_api_key="test", anthropic_model=model))
     await provider.chat([llm.LLMMessage("user", "hello")])
@@ -148,7 +159,14 @@ async def test_unset_claude_effort_preserves_model_default(anthropic_client, mod
     assert ("thinking" in wire) == (model == "claude-fable-5-1")
 
 
-@pytest.mark.parametrize("model,thinking", [("claude-fable-5-1", "adaptive"), ("claude-opus-5", "disabled"), ("claude-sonnet-5", "disabled")])
+@pytest.mark.parametrize("model,thinking", [
+    ("claude-fable-5-1", "adaptive"),
+    ("claude-opus-5-5", "adaptive"),
+    ("claude-sonnet-5-5", "adaptive"),
+    ("claude-opus-5", "disabled"),
+    ("claude-sonnet-5", "disabled"),
+    ("claude-haiku-5-5", "disabled"),
+])
 async def test_none_effort_respects_claude_model_thinking_constraints(anthropic_client, model, thinking):
     provider = llm.AnthropicProvider(EngineConfig(anthropic_api_key="test", anthropic_model=model, reasoning_effort="none"))
     await provider.chat([llm.LLMMessage("user", "hello")])
@@ -166,9 +184,9 @@ async def test_claude_effort_merges_with_structured_output(anthropic_client):
 
 
 @pytest.mark.parametrize("kind", ["mantle", "bedrock"])
-async def test_claude_gateway_constructors_preserve_effort(anthropic_client, monkeypatch, kind):
+@pytest.mark.parametrize("model", ["anthropic.claude-sonnet-5", "anthropic.claude-haiku-5-5", "us.anthropic.claude-haiku-5-5"])
+async def test_claude_gateway_constructors_preserve_effort(anthropic_client, monkeypatch, kind, model):
     monkeypatch.setattr(llm, "_mantle_gateway_key", lambda config: "test")
-    model = "anthropic.claude-sonnet-5"
     config = EngineConfig(anthropic_model=model, bedrock_model=model, reasoning_effort="xhigh",
                           openai_base_url="https://bedrock-mantle.us-east-1.api.aws")
     provider = (llm.MantleAnthropicProvider if kind == "mantle" else llm.BedrockProvider)(config)
@@ -183,7 +201,11 @@ async def test_older_claude_effort_request_is_unchanged(anthropic_client):
     assert wire["temperature"] == 0.2 and "output_config" not in wire and "thinking" not in wire
 
 
-@pytest.mark.parametrize("model", ["claude-fable-5-1", "claude-opus-5", "claude-sonnet-5"])
+@pytest.mark.parametrize("model", [
+    "claude-fable-5-1", "claude-opus-5-5", "claude-opus-5",
+    "claude-sonnet-5-5", "claude-sonnet-5", "claude-haiku-5-5",
+    "us.anthropic.claude-haiku-5-5",
+])
 async def test_current_claude_caps_output_to_model_profile(anthropic_client, model):
     provider = llm.AnthropicProvider(EngineConfig(anthropic_api_key="test", anthropic_model=model, max_tokens=200000))
     await provider.chat([llm.LLMMessage("user", "hello")])

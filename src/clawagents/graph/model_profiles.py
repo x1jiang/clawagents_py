@@ -148,7 +148,9 @@ MODEL_PROFILES: dict[str, dict[str, int | float]] = {
     "mistral-large-3-675b-instruct": {"max_input_tokens": 256000, "max_output_tokens": 32000, "budget_ratio": 0.85},
     "nova-2-lite": {"max_input_tokens": 1_000_000, "max_output_tokens": 65_000, "budget_ratio": 0.85},
     "llama4-maverick": {"max_input_tokens": 1_000_000, "max_output_tokens": 8_000, "budget_ratio": 0.85},
-    # ── Google — Gemini 3.x (1M–2M context) ────────────────────────────
+    # ── Google — Gemini 4.x / 3.x (1M–2M context) ──────────────────────
+    "gemini-4-argon": {"max_input_tokens": 1_048_576, "max_output_tokens": 65_536, "budget_ratio": 0.90},
+    "gemini-4": {"max_input_tokens": 1_048_576, "max_output_tokens": 65_536, "budget_ratio": 0.90},
     "gemini-3.8-flash": {"max_input_tokens": 1_048_576, "max_output_tokens": 65_536, "budget_ratio": 0.90},
     "gemini-3.8": {"max_input_tokens": 1_048_576, "max_output_tokens": 65_536, "budget_ratio": 0.90},
     "gemini-3.7-flash": {"max_input_tokens": 1_000_000, "budget_ratio": 0.90},
@@ -169,27 +171,31 @@ MODEL_PROFILES: dict[str, dict[str, int | float]] = {
     "gemini-2.5-flash": {"max_input_tokens": 1_000_000, "budget_ratio": 0.90},
     # ── Anthropic — Claude 5 / 4.x ─────────────────────────────────────
     # Context windows per https://platform.claude.com/docs/en/build-with-claude/context-windows
-    # (Sep 2026): Fable 5/5.1, Mythos 5/5.1, Opus 5, Opus 4.8/4.7/4.6,
-    # Sonnet 5 and Sonnet 4.6 are 1M by default (no beta header). Every
-    # other Claude model — including Sonnet 4.5, Haiku 4.5 and Opus 4.5 —
-    # is 200K. Order matters: dotted-minor ids ("opus-4-8") must precede
-    # the bare "claude-opus-4" family fallback.
+    # (Oct 2026): Fable 5/5.1, Mythos 5/5.1, Opus 5.5/5, Opus 4.8/4.7/4.6,
+    # Sonnet 5.5/5, Sonnet 4.6, and Haiku 5.5/5 are 1M by default (no beta header).
+    # Haiku 5.5 has a >100K long-context price cliff. Every other Claude model —
+    # including Sonnet 4.5, Haiku 4.5 and Opus 4.5 — is 200K. Order matters:
+    # dotted-minor ids ("opus-4-8") must precede the bare "claude-opus-4" family fallback.
     "claude-fable-5-1": {"max_input_tokens": 1_000_000, "max_output_tokens": 128_000, "budget_ratio": 0.85},
     "claude-fable-5": {"max_input_tokens": 1_000_000, "budget_ratio": 0.85},
     "claude-mythos-5-1": {"max_input_tokens": 1_000_000, "budget_ratio": 0.85},
     "claude-mythos-5": {"max_input_tokens": 1_000_000, "budget_ratio": 0.85},
+    "claude-opus-5-5": {"max_input_tokens": 1_000_000, "max_output_tokens": 128_000, "budget_ratio": 0.85},
     "claude-opus-5": {"max_input_tokens": 1_000_000, "max_output_tokens": 128_000, "budget_ratio": 0.85},
     "claude-opus-4-8": {"max_input_tokens": 1_000_000, "budget_ratio": 0.85},
     "claude-opus-4-7": {"max_input_tokens": 1_000_000, "budget_ratio": 0.85},
     "claude-opus-4-6": {"max_input_tokens": 1_000_000, "budget_ratio": 0.85},
     "claude-opus-4-5": {"max_input_tokens": 200_000, "budget_ratio": 0.85},
     "claude-opus-4": {"max_input_tokens": 200_000, "budget_ratio": 0.85},
+    "claude-sonnet-5-5": {"max_input_tokens": 1_000_000, "max_output_tokens": 128_000, "budget_ratio": 0.85},
     "claude-sonnet-5": {"max_input_tokens": 1_000_000, "max_output_tokens": 128_000, "budget_ratio": 0.85},
     "claude-sonnet-4-6": {"max_input_tokens": 1_000_000, "budget_ratio": 0.85},
     "claude-4.6-sonnet": {"max_input_tokens": 1_000_000, "budget_ratio": 0.85},
     "claude-4.5-sonnet": {"max_input_tokens": 200_000, "budget_ratio": 0.85},
     "claude-sonnet-4-5": {"max_input_tokens": 200_000, "budget_ratio": 0.85},
     "claude-sonnet-4": {"max_input_tokens": 200_000, "budget_ratio": 0.85},
+    "claude-haiku-5-5": {"max_input_tokens": 1_000_000, "max_output_tokens": 128_000, "budget_ratio": 0.85, "long_context_threshold": 100_000},
+    "claude-haiku-5": {"max_input_tokens": 1_000_000, "max_output_tokens": 128_000, "budget_ratio": 0.85, "long_context_threshold": 100_000},
     "claude-haiku-4-5": {"max_input_tokens": 200_000, "budget_ratio": 0.85},
     "claude-haiku-4": {"max_input_tokens": 200_000, "budget_ratio": 0.85},
     # ── Anthropic — Claude 3.x ─────────────────────────────────────────
@@ -257,7 +263,7 @@ def register_model_profile_alias(alias: str, canonical: str) -> None:
         _MODEL_PROFILE_ALIASES[key] = target
 
 
-_GEO_PREFIXES = ("global.", "us.", "eu.", "apac.", "ap.", "af.", "me.", "ca.", "sa.")
+_GEO_PREFIXES = ("global.", "us.", "eu.", "apac.", "au.", "jp.", "ap.", "af.", "me.", "ca.", "sa.")
 _VENDOR_PREFIXES = (
     "openai.",
     "anthropic.",

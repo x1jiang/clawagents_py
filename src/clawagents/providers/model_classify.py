@@ -10,8 +10,8 @@ from dataclasses import dataclass
 from typing import Literal, Optional
 
 # AWS Bedrock cross-region / global inference profile prefixes.
-# NOTE: the APAC prefix is ``apac.`` (not ``ap.``).
-BEDROCK_GEO_PREFIXES: tuple[str, ...] = ("us.", "eu.", "apac.", "global.")
+# NOTE: the APAC prefix is ``apac.`` (not ``ap.``); newer cards also add ``au.`` / ``jp.``.
+BEDROCK_GEO_PREFIXES: tuple[str, ...] = ("us.", "eu.", "apac.", "au.", "jp.", "global.")
 
 BEDROCK_FM_PREFIXES: tuple[str, ...] = (
     "anthropic.",

@@ -17,12 +17,18 @@ from clawagents.providers.model_classify import (
 
 def test_apac_geo_prefix_not_ap():
     assert "apac." in BEDROCK_GEO_PREFIXES
+    assert "au." in BEDROCK_GEO_PREFIXES
+    assert "jp." in BEDROCK_GEO_PREFIXES
     assert "ap." not in BEDROCK_GEO_PREFIXES
     assert is_bedrock_model_id("apac.anthropic.claude-sonnet-4-5-20250929-v1:0")
+    assert is_bedrock_model_id("au.anthropic.claude-haiku-5-5")
+    assert is_bedrock_model_id("jp.anthropic.claude-haiku-5-5")
     stripped = strip_bedrock_geo_prefix(
         "apac.anthropic.claude-sonnet-4-5-20250929-v1:0"
     )
     assert stripped.startswith("anthropic.")
+    assert strip_bedrock_geo_prefix("au.anthropic.claude-haiku-5-5") == "anthropic.claude-haiku-5-5"
+    assert strip_bedrock_geo_prefix("jp.anthropic.claude-haiku-5-5") == "anthropic.claude-haiku-5-5"
 
 
 def test_parse_litellm_prefixes():

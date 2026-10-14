@@ -933,6 +933,8 @@ def openai_model_rejects_temperature(model: str) -> bool:
         return True
     if m.startswith("gpt-5") and "codex" in m:
         return True
+    if anthropic_model_rejects_sampling_params(model):
+        return True
     return False
 
 
@@ -953,25 +955,20 @@ def anthropic_model_rejects_sampling_params(model: str) -> bool:
     """True when the Anthropic API rejects ``temperature`` / ``top_p`` / ``top_k``.
 
     Claude Opus 4.7+ (including Mantle ``anthropic.claude-opus-4-8``) and
-    Mantle Claude Sonnet 5 / Fable 5 return HTTP 400
-    ``temperature is deprecated for this model`` if those fields are present.
+    Claude 5+ (Opus 5/5.5, Sonnet 5/5.5, Haiku 5/5.5, Fable 5/5.1) return HTTP
+    400 ``temperature is deprecated for this model`` if those fields are present.
     Omit them and guide behavior via prompting instead.
     """
     import re
 
     m = (model or "").strip().lower().replace("_", "-")
     # Collapse dotted minors: opus-4.8 → opus-4-8; keep geo/FM prefixes intact.
-    m = re.sub(r"(opus-4)\.(\d+)", r"\1-\2", m)
+    m = re.sub(r"((?:opus|sonnet|haiku|fable)-\d+)\.(\d+)", r"\1-\2", m)
     hit = re.search(r"opus-4-(\d+)", m)
     if hit:
         return int(hit.group(1)) >= 7
-    # Future Opus 5+ generations inherit the same restriction.
-    if re.search(r"opus-([5-9]|[1-9]\d+)(?:-|\b)", m):
-        return True
-    # Mantle Claude Sonnet 5 / Fable 5 (not Sonnet 4.x).
-    if re.search(r"claude-sonnet-5(?:-|\b)", m) or re.search(
-        r"claude-fable-5(?:-|\b)", m
-    ):
+    # Claude 5+ generations across Opus, Sonnet, Haiku, and Fable reject sampling params.
+    if re.search(r"(?:opus|sonnet|haiku|fable)-([5-9]|[1-9]\d+)(?:-|\b)", m):
         return True
     return False
 
@@ -3000,8 +2997,8 @@ def _gemini_part_from_block(part: Any) -> dict[str, Any] | None:
 
 
 def _gemini_38_model(model: str) -> bool:
-    # Keep the migration scoped to 3.8; 3.7 and older retain their sampling API.
-    return bool(_re.search(r"(?:^|/)gemini-3\.8(?:-|$)", (model or "").lower()))
+    # Keep the migration scoped to 3.8 and 4.x (Argon); 3.7 and older retain their sampling API.
+    return bool(_re.search(r"(?:^|/)gemini-(?:3\.8|4(?:-argon)?)(?:-|$)", (model or "").lower()))
 
 
 def _gemini_function_retry_config(config: Any) -> Any:
@@ -3577,12 +3574,18 @@ class _DeferredToolsMixin:
         return True
 
 
+_ALWAYS_ADAPTIVE_ANTHROPIC_MODELS = frozenset({
+    "fable-5-1", "fable-5", "opus-5-5", "sonnet-5-5",
+})
+
+
 def _current_anthropic_model(model: str) -> str | None:
     # Accept direct, Mantle and regional Bedrock IDs, including dated snapshots.
+    normalized = _re.sub(r"((?:opus|sonnet|haiku|fable)-\d+)\.(\d+)", r"\1-\2", (model or "").strip().lower())
     match = _re.search(
-        r"(?:^|[./])claude-(fable-5-1|fable-5|opus-5|sonnet-5)"
+        r"(?:^|[./])claude-(fable-5-1|fable-5|opus-5-5|opus-5|sonnet-5-5|sonnet-5|haiku-5-5|haiku-5)"
         r"(?:$|-(?:\d{8}(?:-v\d+)?|v\d+)(?::\d+)?$)",
-        (model or "").strip().lower(),
+        normalized,
     )
     return match.group(1) if match else None
 
@@ -3592,10 +3595,11 @@ def _apply_current_anthropic_effort(kwargs: dict[str, Any], model: str, effort: 
     current = _current_anthropic_model(model)
     if not current or not effort:
         return
-    if effort == "none" and not current.startswith("fable-"):
+    if effort == "none" and current not in _ALWAYS_ADAPTIVE_ANTHROPIC_MODELS:
         kwargs["thinking"] = {"type": "disabled"}
-    # Fable thinking is always adaptive; never send its rejected disabled mode.
-    # low also satisfies Opus 5's effort ceiling when thinking is disabled.
+    # Fable 5.x and Opus/Sonnet 5.5 thinking is always adaptive; never send
+    # their rejected disabled mode. low also satisfies Opus 5 / Haiku 5.5's
+    # effort ceiling when thinking is disabled.
     effective = "low" if effort in ("none", "minimal") else effort
     kwargs.setdefault("output_config", {})["effort"] = effective
 
