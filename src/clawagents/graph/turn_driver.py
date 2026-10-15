@@ -188,7 +188,11 @@ class TurnDriver:
                 self._token_ledger.record_provider_usage(
                     getattr(result, 'request_messages', None) or messages, prompt_tokens,
                 )
-        if result.response.partial and not result.response.content.strip():
+        if (
+            result.response.partial
+            and not result.response.content.strip()
+            and not result.response.tool_calls
+        ):
             self._events.emit("warn", {"message": "interrupted — no content received"})
             state.status = "done"
             state.result = state.result or "[interrupted]"

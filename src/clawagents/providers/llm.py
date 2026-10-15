@@ -1375,6 +1375,49 @@ def _parse_responses_result(
     return text, (calls or None), total, prompt, cached, cache_write
 
 
+def _parse_responses_extras(resp: Any) -> tuple[str | None, int, str | None]:
+    """Return ``(finish_reason, reasoning_tokens, thinking)`` from a Responses object."""
+    if resp is None:
+        return None, 0, None
+    status = str(getattr(resp, "status", "") or "").strip().lower()
+    inc = getattr(resp, "incomplete_details", None)
+    inc_reason = ""
+    if isinstance(inc, dict):
+        inc_reason = str(inc.get("reason") or "").strip().lower()
+    elif inc is not None:
+        inc_reason = str(getattr(inc, "reason", "") or "").strip().lower()
+    finish_reason: str | None = None
+    if inc_reason == "content_filter":
+        finish_reason = "content_filter"
+    elif inc_reason in ("max_output_tokens", "max_tokens", "length") or status == "incomplete":
+        finish_reason = "length"
+    elif status == "completed":
+        finish_reason = "stop"
+    elif status:
+        finish_reason = status
+
+    usage = getattr(resp, "usage", None)
+    reasoning_tokens = _openai_reasoning_tokens(usage)
+
+    thinking_parts: list[str] = []
+    for item in getattr(resp, "output", None) or []:
+        if getattr(item, "type", None) != "reasoning":
+            continue
+        for block in (getattr(item, "summary", None) or []) + (
+            getattr(item, "content", None) or []
+        ):
+            btext = (
+                block.get("text")
+                if isinstance(block, dict)
+                else getattr(block, "text", None)
+            )
+            if isinstance(btext, str) and btext:
+                thinking_parts.append(btext)
+    thinking = "\n".join(thinking_parts).strip() or None
+    return finish_reason, reasoning_tokens, thinking
+
+
+
 def _sanitize_openai_tool_pairs(formatted: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Drop orphan tool messages; ensure every tool_calls id has a result.
 
@@ -1941,10 +1984,14 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
                 raise
 
             chunks: list[str] = []
+            reasoning_chunks: list[str] = []
             final_tokens = 0
             final_prompt_tokens = 0
             final_cached_tokens = 0
             final_cache_write_tokens = 0
+            final_reasoning_tokens = 0
+            final_finish_reason: str | None = None
+            final_thinking: str | None = None
             first_token_fired = False
             # Key by call_id when present so a duplicated/colliding output_index
             # cannot merge two tool calls' arguments. Fall back to idx:* keys.
@@ -1991,14 +2038,21 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
                 if not tools_accumulation:
                     return None
                 calls: list[NativeToolCall] = []
-                for _key in sorted(tools_accumulation.keys()):
+                for _pos, _key in enumerate(sorted(tools_accumulation.keys())):
                     _fn = tools_accumulation[_key]
                     if not _fn.get("name"):
                         continue
+                    _raw_args = _tool_args_text(_fn.get("arguments")) or "{}"
+                    if final_finish_reason == "length" and not _args_json_clean(_raw_args):
+                        logger.warning(
+                            "  [openai-responses] tool call %s truncated by max_output_tokens — dropping it for recovery",
+                            _fn["name"],
+                        )
+                        continue
                     calls.append(NativeToolCall(
                         tool_name=_fn["name"],
-                        args=_repair_json(_fn["arguments"] or "{}"),
-                        tool_call_id=_fn.get("id", ""),
+                        args=_coerce_args_dict(_repair_json(_raw_args)),
+                        tool_call_id=_fn.get("id", "") or _synth_tool_call_id(_fn["name"], _pos),
                     ))
                 return calls or None
 
@@ -2022,6 +2076,8 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
                             prompt_tokens=final_prompt_tokens,
                             cache_read_tokens=final_cached_tokens,
                             cache_creation_tokens=final_cache_write_tokens,
+                            reasoning_tokens=final_reasoning_tokens,
+                            thinking="".join(reasoning_chunks).strip() or final_thinking,
                             partial=True,
                             tool_calls=_accumulated_calls(),
                         )
@@ -2036,6 +2092,16 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
                                     _fire_first_token(on_first_token)
                                 chunks.append(text)
                                 await _invoke_callback(on_chunk, text)
+                        elif etype in (
+                            "response.reasoning_summary_text.delta",
+                            "response.reasoning_text.delta",
+                        ):
+                            rdelta = getattr(event, "delta", None) or ""
+                            if rdelta:
+                                if not first_token_fired:
+                                    first_token_fired = True
+                                    _fire_first_token(on_first_token)
+                                reasoning_chunks.append(rdelta)
                         elif etype == "response.output_item.added":
                             item = getattr(event, "item", None)
                             idx = int(getattr(event, "output_index", 0) or 0)
@@ -2072,16 +2138,26 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
                                     arguments=getattr(item, "arguments", None),
                                     replace_args=True,
                                 )
-                        elif etype == "response.completed":
+                        elif etype in ("response.completed", "response.incomplete"):
                             resp = getattr(event, "response", None)
+                            if etype == "response.incomplete":
+                                final_finish_reason = "length"
                             if resp is not None:
                                 _t, _c, total, prompt, cached, cache_write = (
                                     _parse_responses_result(resp)
                                 )
+                                _fr, _rtok, _think = _parse_responses_extras(resp)
                                 final_tokens = total
                                 final_prompt_tokens = prompt
                                 final_cached_tokens = cached
                                 final_cache_write_tokens = cache_write
+                                final_reasoning_tokens = _rtok
+                                if _fr:
+                                    final_finish_reason = _fr
+                                elif etype == "response.incomplete":
+                                    final_finish_reason = "length"
+                                if _think:
+                                    final_thinking = _think
                                 if _t and not chunks:
                                     if not first_token_fired:
                                         first_token_fired = True
@@ -2115,6 +2191,9 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
                     prompt_tokens=final_prompt_tokens,
                     cache_read_tokens=final_cached_tokens,
                     cache_creation_tokens=final_cache_write_tokens,
+                    reasoning_tokens=final_reasoning_tokens,
+                    thinking="".join(reasoning_chunks).strip() or final_thinking,
+                    finish_reason=final_finish_reason,
                     tool_calls=_accumulated_calls(),
                 )
 
@@ -2131,8 +2210,9 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
                     )
                     attempt += 1
                     continue
-                if chunks or tools_accumulation:
-                    partial = "".join(chunks)
+                partial = "".join(chunks)
+                acc_calls = _accumulated_calls()
+                if partial.strip() or acc_calls:
                     logger.warning(
                         "  [openai-responses] Stream interrupted after %d chars — returning partial",
                         len(partial),
@@ -2145,7 +2225,7 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
                         cache_read_tokens=final_cached_tokens,
                         cache_creation_tokens=final_cache_write_tokens,
                         partial=True,
-                        tool_calls=_accumulated_calls(),
+                        tool_calls=acc_calls,
                     )
                 break
 
@@ -2393,9 +2473,10 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
                     )
                     attempt += 1
                     continue
-                if chunks or tools_accumulation:
-                    _finalize_text()
-                    partial = "".join(chunks)
+                _finalize_text()
+                partial = "".join(chunks)
+                acc_calls = _accumulated_calls()
+                if partial.strip() or acc_calls:
                     logger.warning(
                         "  [openai] Stream interrupted after %d chars — returning partial",
                         len(partial),
@@ -2408,7 +2489,7 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
                         cache_read_tokens=final_cached_tokens,
                         cache_creation_tokens=final_cache_write_tokens,
                         partial=True,
-                        tool_calls=_accumulated_calls(),
+                        tool_calls=acc_calls,
                         thinking=_thinking_text(),
                         finish_reason=finish_reason,
                         reasoning_tokens=final_reasoning_tokens,

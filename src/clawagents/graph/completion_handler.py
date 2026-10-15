@@ -314,17 +314,30 @@ def _truncation_nudge_count(messages: list[LLMMessage]) -> int:
 def response_hit_output_limit(response: Any) -> bool:
     """True when the turn was cut short with no tool call to act on.
 
-    Either the provider stopped for ``max_tokens`` (``finish_reason="length"``)
-    or the stream was interrupted after retries (``partial`` with content —
-    the empty-content case is handled as a cancellation by the turn driver).
+    Either the provider stopped for ``max_tokens`` (``finish_reason="length"``),
+    the model spent reasoning tokens and stopped before emitting any content or
+    tool call, or the stream was interrupted after retries (``partial`` with
+    content — the empty-content case is handled as a cancellation by the turn
+    driver).
     """
     if getattr(response, "tool_calls", None):
         return False
-    if str(getattr(response, "finish_reason", "") or "").lower() == "length":
+    if str(getattr(response, "finish_reason", "") or "").lower() in (
+        "length",
+        "max_tokens",
+        "max_output_tokens",
+        "incomplete",
+    ):
         return True
-    return bool(getattr(response, "partial", False)) and bool(
-        (getattr(response, "content", "") or "").strip()
-    )
+    has_content = bool((getattr(response, "content", "") or "").strip())
+    if (
+        not has_content
+        and not getattr(response, "partial", False)
+        and int(getattr(response, "reasoning_tokens", 0) or 0) > 0
+    ):
+        return True
+    return bool(getattr(response, "partial", False)) and has_content
+
 
 
 _MAX_TOKENS_BUMP_CAP = 65_536
