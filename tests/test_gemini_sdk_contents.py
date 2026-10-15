@@ -100,3 +100,107 @@ def test_scrub_alone_is_enough_for_dirty_payload():
     from google.genai import types
 
     types.FunctionResponse(**cleaned[1]["parts"][0]["function_response"])
+
+
+def test_gemini_4_argon_prompt_block_falls_back_to_38_flash_in_stream():
+    """Gemini 4 Argon BlockedReason.OTHER on bio-keyword prompts falls back to gemini-3.8-flash."""
+    import asyncio
+    from types import SimpleNamespace
+    from clawagents.config.config import EngineConfig
+    from clawagents.providers.llm import GeminiProvider, LLMMessage
+
+    cfg = EngineConfig(gemini_api_key="test-key", gemini_model="gemini-4-argon")
+    prov = GeminiProvider(cfg)
+    called_models: list[str] = []
+
+    async def fake_stream(*, model: str, contents, config):
+        called_models.append(model)
+        if model == "gemini-4-argon":
+            async def _blocked():
+                yield SimpleNamespace(
+                    candidates=None,
+                    prompt_feedback=SimpleNamespace(
+                        block_reason=SimpleNamespace(name="OTHER")
+                    ),
+                    usage_metadata=SimpleNamespace(
+                        prompt_token_count=0,
+                        candidates_token_count=0,
+                        thoughts_token_count=0,
+                        cached_content_token_count=0,
+                    ),
+                )
+            return _blocked()
+
+        async def _ok():
+            yield SimpleNamespace(
+                candidates=[
+                    SimpleNamespace(
+                        finish_reason=SimpleNamespace(name="STOP"),
+                        content=SimpleNamespace(
+                            parts=[SimpleNamespace(text="Checked repo.", thought=False, function_call=None)]
+                        ),
+                    )
+                ],
+                prompt_feedback=None,
+                usage_metadata=SimpleNamespace(
+                    prompt_token_count=120,
+                    candidates_token_count=4,
+                    thoughts_token_count=10,
+                    cached_content_token_count=0,
+                ),
+            )
+        return _ok()
+
+    prov.client = SimpleNamespace(
+        aio=SimpleNamespace(
+            models=SimpleNamespace(generate_content_stream=fake_stream)
+        )
+    )
+    chunks: list[str] = []
+    resp = asyncio.run(
+        prov.chat(
+            [LLMMessage(role="user", content="https://github.com/anthropics/uplifting-biomolecular-modeling")],
+            on_chunk=chunks.append,
+        )
+    )
+    assert called_models == ["gemini-4-argon", "gemini-3.8-flash"]
+    assert resp.content == "Checked repo."
+    assert resp.model == "gemini-3.8-flash"
+    assert resp.finish_reason == "STOP"
+    assert chunks == ["Checked repo."]
+
+
+def test_gemini_prompt_block_raises_when_not_fallback_eligible():
+    """Non-Gemini-4 prompt blocks raise a clear RuntimeError instead of returning empty done."""
+    import asyncio
+    from types import SimpleNamespace
+    from clawagents.config.config import EngineConfig
+    from clawagents.providers.llm import GeminiProvider, LLMMessage
+
+    cfg = EngineConfig(gemini_api_key="test-key", gemini_model="gemini-3.8-flash")
+    prov = GeminiProvider(cfg)
+
+    async def fake_stream(*, model: str, contents, config):
+        async def _blocked():
+            yield SimpleNamespace(
+                candidates=None,
+                prompt_feedback=SimpleNamespace(
+                    block_reason=SimpleNamespace(name="SAFETY")
+                ),
+                usage_metadata=None,
+            )
+        return _blocked()
+
+    prov.client = SimpleNamespace(
+        aio=SimpleNamespace(
+            models=SimpleNamespace(generate_content_stream=fake_stream)
+        )
+    )
+    with pytest.raises(RuntimeError, match=r"Gemini blocked the request \(reason=SAFETY\)"):
+        asyncio.run(
+            prov.chat(
+                [LLMMessage(role="user", content="blocked prompt")],
+                on_chunk=lambda _c: None,
+            )
+        )
+

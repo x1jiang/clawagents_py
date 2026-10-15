@@ -3082,6 +3082,45 @@ def _gemini_38_model(model: str) -> bool:
     return bool(_re.search(r"(?:^|/)gemini-(?:3\.8|4(?:-argon)?)(?:-|$)", (model or "").lower()))
 
 
+_GEMINI_BLOCK_FINISH_REASONS = (
+    "SAFETY",
+    "PROHIBITED_CONTENT",
+    "BLOCKLIST",
+    "SPII",
+    "RECITATION",
+    "IMAGE_SAFETY",
+)
+
+
+def _gemini_finish_reason_name(fr: Any) -> str:
+    if fr is None:
+        return ""
+    name = getattr(fr, "name", None)
+    if isinstance(name, str) and name:
+        return name
+    raw = str(fr)
+    return raw.split(".", 1)[-1] if "." in raw else raw
+
+
+def _gemini_prompt_block_reason(resp_or_chunk: Any) -> str | None:
+    pf = getattr(resp_or_chunk, "prompt_feedback", None)
+    br = getattr(pf, "block_reason", None) if pf is not None else None
+    if br is None:
+        return None
+    name = getattr(br, "name", None) or str(br)
+    cleaned = name.split(".", 1)[-1] if "." in name else name
+    if cleaned.upper() in ("", "NONE", "BLOCKED_REASON_UNSPECIFIED", "UNSPECIFIED"):
+        return None
+    return cleaned
+
+
+def _gemini_4_fallback_model(model: str) -> str | None:
+    m = (model or "").strip().lower()
+    if _re.search(r"(?:^|/)gemini-4(?:-argon)?(?:-|$)", m):
+        return "gemini-3.8-flash"
+    return None
+
+
 def _gemini_function_retry_config(config: Any) -> Any:
     """Keep generation/structured-output settings when recovering a tool call."""
     options = {}
@@ -3245,6 +3284,7 @@ class GeminiProvider(LLMProvider):
         gemini_config: types.GenerateContentConfig,
         *,
         _malformed_retry: bool = False,
+        _block_fallback: bool = False,
     ) -> LLMResponse:
         user_contents = _scrub_gemini_contents(user_contents)
         try:
@@ -3268,6 +3308,7 @@ class GeminiProvider(LLMProvider):
         fn_calls: list[NativeToolCall] | None = None
         raw_parts = None
         finish_reason = None
+        parts = None
         candidates = getattr(resp, "candidates", None)
         if candidates:
             finish_reason = getattr(candidates[0], "finish_reason", None)
@@ -3296,11 +3337,32 @@ class GeminiProvider(LLMProvider):
                 if getattr(p, "text", None) and not getattr(p, "thought", False)
             )
 
-        fr_str = str(finish_reason) if finish_reason else ""
+        fr_str = _gemini_finish_reason_name(finish_reason)
         if not _malformed_retry and "MALFORMED_FUNCTION_CALL" in fr_str and not fn_calls:
             logger.warning("  [gemini] MALFORMED_FUNCTION_CALL detected — retrying with mode=ANY")
             retry_config = _gemini_function_retry_config(gemini_config)
-            return await self._request_once(user_contents, retry_config, _malformed_retry=True)
+            return await self._request_once(
+                user_contents, retry_config, _malformed_retry=True, _block_fallback=_block_fallback
+            )
+
+        prompt_block = _gemini_prompt_block_reason(resp)
+        is_candidate_block = any(tok in fr_str.upper() for tok in _GEMINI_BLOCK_FINISH_REASONS)
+        if not extracted_text and not fn_calls and (prompt_block or is_candidate_block):
+            block_label = prompt_block or fr_str
+            fallback_model = _gemini_4_fallback_model(self.model)
+            if fallback_model and not _block_fallback:
+                logger.warning(
+                    "  [gemini] %s blocked request (%s) — falling back to %s",
+                    self.model, block_label, fallback_model,
+                )
+                self.model = fallback_model
+                return await self._request_once(
+                    user_contents, gemini_config, _malformed_retry=_malformed_retry, _block_fallback=True
+                )
+            raise RuntimeError(
+                f"Gemini blocked the request (reason={block_label}). "
+                "Try rephrasing sensitive keywords or switching to another model."
+            )
 
         _um = resp.usage_metadata
         _prompt_tokens = (getattr(_um, "prompt_token_count", 0) or 0) if _um else 0
@@ -3320,6 +3382,7 @@ class GeminiProvider(LLMProvider):
             reasoning_tokens=_thought_tokens,
             tool_calls=fn_calls,
             gemini_parts=raw_parts,
+            finish_reason=fr_str or None,
         )
 
     async def _stream_with_retry(
@@ -3330,6 +3393,7 @@ class GeminiProvider(LLMProvider):
         cancel_event: asyncio.Event | None,
         *,
         on_first_token: Any | None = None,
+        _block_fallback: bool = False,
     ) -> LLMResponse:
         user_contents = _scrub_gemini_contents(user_contents)
         last_error: BaseException | None = None
@@ -3367,6 +3431,7 @@ class GeminiProvider(LLMProvider):
             fn_calls: list[NativeToolCall] = []
             all_stream_parts: list[Any] = []
             last_finish_reason: Any = None
+            prompt_block_reason: str | None = None
             first_token_fired = False
 
             try:
@@ -3394,6 +3459,9 @@ class GeminiProvider(LLMProvider):
                         )
 
                     try:
+                        _pb = _gemini_prompt_block_reason(chunk)
+                        if _pb:
+                            prompt_block_reason = _pb
                         _chunk_text_parts: list[str] = []
                         if hasattr(chunk, "candidates") and chunk.candidates:
                             for _cand in chunk.candidates:
@@ -3438,11 +3506,38 @@ class GeminiProvider(LLMProvider):
                     except Exception:
                         pass  # malformed chunk — skip
 
-                fr_str = str(last_finish_reason) if last_finish_reason else ""
+                fr_str = _gemini_finish_reason_name(last_finish_reason)
                 if "MALFORMED_FUNCTION_CALL" in fr_str and not fn_calls:
                     logger.warning("  [gemini] MALFORMED_FUNCTION_CALL in stream — retrying with mode=ANY (non-stream)")
                     retry_config = _gemini_function_retry_config(gemini_config)
-                    return await self._request_once(user_contents, retry_config, _malformed_retry=True)
+                    return await self._request_once(
+                        user_contents, retry_config, _malformed_retry=True, _block_fallback=_block_fallback
+                    )
+
+                is_candidate_block = any(tok in fr_str.upper() for tok in _GEMINI_BLOCK_FINISH_REASONS)
+                if not chunks and not fn_calls and (prompt_block_reason or is_candidate_block):
+                    block_label = prompt_block_reason or fr_str
+                    fallback_model = _gemini_4_fallback_model(self.model)
+                    if fallback_model and not _block_fallback:
+                        logger.warning(
+                            "  [gemini] %s blocked stream (%s) — falling back to %s",
+                            self.model, block_label, fallback_model,
+                        )
+                        _record_stream_breaker(breaker, success=True)
+                        self.model = fallback_model
+                        return await self._stream_with_retry(
+                            user_contents,
+                            gemini_config,
+                            on_chunk,
+                            cancel_event,
+                            on_first_token=on_first_token,
+                            _block_fallback=True,
+                        )
+                    _record_stream_breaker(breaker, success=True)
+                    raise RuntimeError(
+                        f"Gemini blocked the request (reason={block_label}). "
+                        "Try rephrasing sensitive keywords or switching to another model."
+                    )
 
                 _record_stream_breaker(breaker, success=True)
                 return LLMResponse(
@@ -3457,6 +3552,7 @@ class GeminiProvider(LLMProvider):
                         _serialize_gemini_parts(all_stream_parts),
                         fn_calls if fn_calls else None,
                     ),
+                    finish_reason=fr_str or None,
                 )
 
             except Exception as exc:
