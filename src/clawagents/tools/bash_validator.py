@@ -237,8 +237,41 @@ _ROOT_LIKE_LITERALS: frozenset[str] = frozenset({
 _SYSTEM_ROOTS: tuple[str, ...] = (
     "/etc", "/var", "/usr", "/lib", "/lib64", "/sbin", "/bin", "/boot",
     "/opt", "/srv", "/sys", "/proc", "/dev", "/private", "/Users",
-    "/home", "/root", "/Library", "/Applications", "/System",
+    "/home", "/root", "/Library", "/Applications", "/System", "/tmp",
 )
+
+
+def _is_safe_temp_subpath(raw_path: str) -> bool:
+    """True for a specific non-wildcard child under /tmp, /private/tmp, /var/tmp, or /var/folders."""
+    p = raw_path.strip().strip("'\"")
+    if not p.startswith("/") or any(ch in p for ch in ("*", "?", "[")):
+        return False
+    norm = posixpath.normpath(re.sub(r"/{2,}", "/", p))
+    if ".." in p.split("/"):
+        return False
+    for prefix in ("/tmp/", "/private/tmp/", "/var/tmp/", "/var/folders/", "/private/var/folders/"):
+        if norm.startswith(prefix) and len(norm) > len(prefix):
+            return True
+    return False
+
+
+def _is_nonrecursive_user_or_temp_file(raw_path: str) -> bool:
+    """True when a non-recursive ``rm -f`` targets a specific file under a user home or temp dir."""
+    if _is_safe_temp_subpath(raw_path):
+        return True
+    p = raw_path.strip().strip("'\"").rstrip("/")
+    if not p or any(ch in p for ch in ("*", "?", "[")) or ".." in p.split("/"):
+        return False
+    for home_prefix in ("~/", "$HOME/", "${HOME}/"):
+        if p.startswith(home_prefix) and len(p) > len(home_prefix):
+            return True
+    if p.startswith("/"):
+        norm = posixpath.normpath(re.sub(r"/{2,}", "/", p))
+        parts = [seg for seg in norm.split("/") if seg]
+        # /home/<user>/<file...> or /Users/<user>/<file...> requires >= 3 segments
+        if len(parts) >= 3 and parts[0] in ("home", "Users"):
+            return True
+    return False
 
 
 def _is_root_like_path(raw_path: str) -> bool:
@@ -251,6 +284,8 @@ def _is_root_like_path(raw_path: str) -> bool:
         return True
     if p.startswith("~") or p.startswith("$HOME") or p.startswith("${HOME}"):
         return True
+    if _is_safe_temp_subpath(raw_path):
+        return False
     # Normalize redundant slashes and ``.``/``..`` segments so that ``//etc``,
     # ``/./etc`` and ``/etc/../etc`` all resolve to the system root they hit at
     # execution time instead of sliding past the check to a mere WARN.
@@ -273,7 +308,14 @@ def _classify_rm(tokens: List[str]) -> BashDecision | None:
     has_recursive = long_recursive or any(("r" in f) or ("R" in f) for f in short_combined)
     has_force = long_force or any("f" in f for f in short_combined)
 
-    if any(_is_root_like_path(p) for p in paths) and (has_recursive or has_force):
+    def _blocks_path(p: str) -> bool:
+        if not _is_root_like_path(p):
+            return False
+        if not has_recursive and _is_nonrecursive_user_or_temp_file(p):
+            return False
+        return True
+
+    if any(_blocks_path(p) for p in paths) and (has_recursive or has_force):
         return BashDecision(
             CommandCategory.DESTRUCTIVE,
             Decision.BLOCK,

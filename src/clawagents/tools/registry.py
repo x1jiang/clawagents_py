@@ -418,15 +418,70 @@ class ToolRegistry:
             from clawagents.tools.cache import ResultCacheManager
             self._result_cache = ResultCacheManager(max_size=cache_max_size, default_ttl_s=cache_ttl_s)
 
-    def _timeout_for(self, tool: "Tool") -> float:
+    def _timeout_for(
+        self, tool: "Tool", args: Optional[Dict[str, Any]] = None
+    ) -> float:
         """Seconds to allow this tool before giving up on it.
 
         A caller that raised the default above the human ceiling meant it, so
-        take whichever is larger rather than shortening their budget.
+        take whichever is larger rather than shortening their budget. When an
+        execution tool carries an explicit ``timeout`` / ``block_until_ms`` /
+        ``timeout_ms`` argument (or may block on an interactive askpass prompt),
+        give the tool's own timeout / auto-background logic a grace margin to
+        finish cleanly before the outer registry watchdog fires.
         """
         if _waits_for_human(tool):
             return max(self._tool_timeout_s, HUMAN_TOOL_TIMEOUT_S)
-        return self._tool_timeout_s
+        budget = self._tool_timeout_s
+        if (
+            budget >= DEFAULT_TOOL_TIMEOUT_S
+            and getattr(tool, "name", "") in ("execute", "task_wait", "pty_wait")
+        ):
+            # Give ExecTool's internal 120s timeout + auto-background-on-timeout
+            # a 15s grace margin so outer asyncio.wait_for never SIGKILLs first.
+            budget = max(budget, float(DEFAULT_TOOL_TIMEOUT_S) + 15.0)
+            if isinstance(args, dict):
+                raw_block = args.get("block_until_ms")
+                raw_timeout = args.get("timeout")
+                raw_timeout_ms = args.get("timeout_ms")
+                raw_val = (
+                    raw_block
+                    if raw_block is not None
+                    else (raw_timeout if raw_timeout is not None else raw_timeout_ms)
+                )
+                if raw_val is not None:
+                    try:
+                        val_f = max(0.0, float(raw_val))
+                        # LLMs frequently pass `timeout` in seconds (e.g. 300) rather than ms.
+                        if (
+                            raw_block is None
+                            and raw_timeout is not None
+                            and 120.0 < val_f <= 3600.0
+                        ):
+                            requested_s = val_f
+                        else:
+                            requested_s = val_f / 1000.0
+                        budget = max(
+                            budget,
+                            min(float(HUMAN_TOOL_TIMEOUT_S), requested_s + 15.0),
+                        )
+                    except (TypeError, ValueError):
+                        pass
+                if getattr(tool, "name", "") == "execute":
+                    try:
+                        from clawagents.tools.askpass import (
+                            ASKPASS_HUMAN_TIMEOUT_S,
+                            command_may_prompt_for_secret,
+                        )
+
+                        if command_may_prompt_for_secret(str(args.get("command") or "")):
+                            budget = min(
+                                float(HUMAN_TOOL_TIMEOUT_S),
+                                max(budget, budget + float(ASKPASS_HUMAN_TIMEOUT_S)),
+                            )
+                    except Exception:
+                        pass
+        return budget
 
     @property
     def result_cache(self):
@@ -945,6 +1000,9 @@ class ToolRegistry:
             decision = evaluate_tool_permission(
                 tool_name,
                 mode=mode,
+                is_read_only=(tool_name == "computer_use" and args.get("action") in {
+                    "capture", "list_windows", "list_apps", "status", "wait", "close",
+                }),
                 file_path=file_path if isinstance(file_path, str) else None,
                 command=args.get("command") if isinstance(args.get("command"), str) else None,
             )
@@ -1019,7 +1077,7 @@ class ToolRegistry:
                     )
                 return cached
 
-        effective_timeout_s = self._timeout_for(tool)
+        effective_timeout_s = self._timeout_for(tool, effective_args)
 
         try:
             # Persist uncertainty before an external side effect begins. A

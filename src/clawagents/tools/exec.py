@@ -686,6 +686,9 @@ def _resolve_block_until_ms(args: Dict[str, Any]) -> tuple[int, bool]:
         return DEFAULT_TIMEOUT_MS, False
     if timeout_ms < 0:
         return DEFAULT_TIMEOUT_MS, False
+    # If caller passed `timeout` in seconds (e.g. 180, 300, 600), convert to ms.
+    if 120 < timeout_ms <= 3600:
+        timeout_ms *= 1000
     return max(100, timeout_ms), False
 
 

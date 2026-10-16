@@ -139,6 +139,86 @@ async def session_add_items(session: Any, items: list[LLMMessage]) -> None:
         await result
 
 
+import re as _re
+
+_PRIOR_TURN_TOOL_DIRECTIVE_RE = _re.compile(
+    r"\n\n\[System\] (?:[^\n]*?(?:failed \d+ times|has now failed twice|"
+    r"shell commands have run since the last file edit|"
+    r"Progress checkpoint after \d+ inspection/planning calls)[\s\S]*)$"
+)
+_PRIOR_TURN_USER_NUDGE_PREFIXES = (
+    "[System] Your last ",
+    "[System] You are re-calling ",
+    "[System] Run deadline approaching",
+    "[System] Output limit reached",
+    "[System] Summarize the tool results",
+    "[System] Groundedness check",
+)
+_ASSISTANT_LOCK_CLAIM_RE = _re.compile(
+    r"(?:tool execution (?:is )?locked|entered\s+[\"']?answer-only[\"']?\s+mode|"
+    r"stopped allowing shell or file tool calls|"
+    r"start a new chat session[^\n]*resets the tool budget)",
+    _re.IGNORECASE,
+)
+_UNLOCKED_TURN_NOTE = (
+    "\n\n[System Note: Tool execution is NOT locked across turns in this session. "
+    "Each new user message starts a fresh turn with an unlocked tool budget "
+    "(`execute`, file tools, etc. are active). Execute the user's request directly.]"
+)
+
+
+def sanitize_preloaded_session_messages(
+    prior: list[LLMMessage],
+) -> list[LLMMessage]:
+    """Neutralize intra-turn stop/rethink directives from prior turns on session preload.
+
+    Without this, ``[System] ... STOP retrying`` or ``[System] Your last 3 tool
+    calls all failed. Stop...`` persisted from an earlier turn stays in the
+    conversation history on the next user turn, causing models to hallucinate
+    that the session harness permanently locked tool execution ("answer-only"
+    mode) for the rest of the chat thread.
+    """
+    cleaned: list[LLMMessage] = []
+    for msg in prior:
+        content = msg.content
+        if isinstance(content, str):
+            if msg.role in ("tool", "user") and "\n\n[System] " in content:
+                stripped = _PRIOR_TURN_TOOL_DIRECTIVE_RE.sub("", content)
+                if stripped != content:
+                    msg = LLMMessage(
+                        role=msg.role,
+                        content=stripped,
+                        tool_call_id=msg.tool_call_id,
+                        tool_calls_meta=msg.tool_calls_meta,
+                        thinking=msg.thinking,
+                        gemini_parts=msg.gemini_parts,
+                        anthropic_blocks=msg.anthropic_blocks,
+                        added_tool_names=msg.added_tool_names,
+                    )
+                    content = stripped
+            if msg.role == "user" and content.startswith(_PRIOR_TURN_USER_NUDGE_PREFIXES):
+                msg = LLMMessage(
+                    role="user",
+                    content=(
+                        "[System] (Prior turn checkpoint resolved — "
+                        "new user turn has a fresh, unlocked tool budget.)"
+                    ),
+                )
+            elif (
+                msg.role == "assistant"
+                and not msg.tool_calls_meta
+                and _ASSISTANT_LOCK_CLAIM_RE.search(content)
+                and "[System Note: Tool execution is NOT locked" not in content
+            ):
+                msg = LLMMessage(
+                    role="assistant",
+                    content=content + _UNLOCKED_TURN_NOTE,
+                    thinking=msg.thinking,
+                )
+        cleaned.append(msg)
+    return cleaned
+
+
 class SessionMessageJournal:
     """Tracks which message objects are durable user-visible transcript turns.
 
@@ -174,7 +254,9 @@ class SessionMessageJournal:
             return messages
         prior = await session_get_items(self._session, limit=limit)
         if prior:
-            prior = repair(drop_leading_orphans(prior))
+            prior = sanitize_preloaded_session_messages(
+                repair(drop_leading_orphans(prior))
+            )
             insert_at = next(
                 (index for index, message in enumerate(messages) if message.role == "user"),
                 len(messages),

@@ -370,3 +370,84 @@ def test_exec_tool_legit_installer_passes_obfuscation_and_validator():
     assert detect_obfuscation(cmd) is None
     decision = validate_bash(cmd)
     assert decision.decision != Decision.BLOCK
+
+
+def test_rm_f_single_user_or_temp_file_warns_not_blocks():
+    """Regression: ``rm -f /home/xjiang2/auth_72.sh`` or ``rm -f /tmp/foo.sh``
+    must WARN (destructive), not BLOCK as ``rm -rf <root>``. Recursive or
+    top-level home/root deletion must still BLOCK.
+    """
+    from clawagents.tools.bash_validator import validate_bash
+
+    for allowed_cmd in (
+        "rm -f /home/xjiang2/auth_72.sh",
+        "rm -f /Users/alice/tmp_script.sh",
+        "rm -f /tmp/claw_test.txt",
+        "rm -rf /tmp/claw_build_dir",
+        "rm -f ~/auth_72.sh",
+    ):
+        res = validate_bash(allowed_cmd)
+        assert res.decision == Decision.WARN, f"{allowed_cmd} got {res}"
+
+    for blocked_cmd in (
+        "rm -rf /home/xjiang2",
+        "rm -rf /home",
+        "rm -rf /tmp",
+        "rm -rf ~",
+        "rm -rf /",
+    ):
+        res = validate_bash(blocked_cmd)
+        assert res.decision == Decision.BLOCK, f"{blocked_cmd} got {res}"
+
+
+def test_registry_timeout_honors_explicit_args_and_askpass():
+    """Regression: ToolRegistry._timeout_for must not hard-kill execute calls at
+    120s when block_until_ms / timeout or interactive askpass is in play, and
+    must give ExecTool a grace buffer so auto-background-on-timeout runs first.
+    """
+    from clawagents.tools.exec import ExecTool
+    from clawagents.tools.registry import ToolRegistry
+
+    reg = ToolRegistry()
+    tool = ExecTool(_DummySandbox())
+    reg.register(tool)
+
+    # Default foreground execute gets +15s grace over 120s so ExecTool's
+    # internal 120s timeout + auto-background fires before registry wait_for.
+    assert reg._timeout_for(tool, {"command": "echo hi"}) >= 135.0
+    # Explicit timeout=300 or block_until_ms=300000 is honored (+15s grace).
+    assert reg._timeout_for(tool, {"command": "sleep 200", "timeout": 300}) >= 315.0
+    assert reg._timeout_for(tool, {"command": "sleep 200", "block_until_ms": 240_000}) >= 255.0
+    # Interactive SSH/sudo commands get askpass grace window.
+    assert reg._timeout_for(tool, {"command": "docker save img | ssh user@host docker load"}) >= 300.0
+
+
+def test_sanitize_preloaded_session_messages_neutralizes_prior_turn_lock():
+    """Regression: prior-turn [System] STOP directives and assistant 'Tool
+    execution locked' claims must be scrubbed when preloading a new turn so the
+    model doesn't hallucinate permanent 'answer-only' mode.
+    """
+    from clawagents.graph.run_runtime import sanitize_preloaded_session_messages
+    from clawagents.providers.llm import LLMMessage
+
+    history = [
+        LLMMessage(role="user", content="deploy image"),
+        LLMMessage(
+            role="tool",
+            content="Command timed out\n\n[System] This tool has failed 2 times in a row. STOP retrying it.",
+            tool_call_id="t1",
+        ),
+        LLMMessage(
+            role="user",
+            content="[System] Your last 3 tool calls all failed. Stop and reconsider your approach.",
+        ),
+        LLMMessage(
+            role="assistant",
+            content="Tool execution is locked in this chat session. The session harness entered answer-only mode.",
+        ),
+    ]
+    cleaned = sanitize_preloaded_session_messages(history)
+    assert len(cleaned) == 4
+    assert "STOP retrying" not in cleaned[1].content
+    assert "fresh, unlocked tool budget" in cleaned[2].content
+    assert "Tool execution is NOT locked across turns" in cleaned[3].content

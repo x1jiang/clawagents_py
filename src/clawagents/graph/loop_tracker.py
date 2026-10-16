@@ -28,7 +28,12 @@ if TYPE_CHECKING:
 # waiting past one wait budget, and replaying the earlier "still running"
 # answer would make the job look permanently stuck.
 TIME_DEPENDENT_TOOLS: frozenset[str] = frozenset(
-    {"task_wait", "task_status", "task_output", "task_list", "finish_coordination"}
+    {
+        "task_wait", "task_status", "task_output", "task_list", "finish_coordination",
+        "inspect_screen", "wait_seconds",
+        "surface_windows", "surface_focus", "surface_click", "surface_type",
+        "surface_key", "surface_ocr", "surface_save",
+    }
 )
 
 # ─── Repeated-failure escalation ─────────────────────────────────────────
@@ -89,16 +94,18 @@ def repeated_failure_directive(tool_name: str, count: int) -> str | None:
         return None
     if count == _FAILURE_DIRECTIVE_AT:
         return (
-            f"[System] {tool_name} has now failed twice with the same error. "
+            f"[System] {tool_name} has now failed twice with the same error in this turn. "
             "Do not retry the same approach with cosmetic changes. Change strategy: "
             "use a different tool (for example read_file/write_file/edit_file instead "
-            "of shell cat/echo, or an in-workspace path instead of an absolute one), "
-            "or report the blocker to the user."
+            "of shell cat/echo, is_background=true + task_wait for long commands, or "
+            "an in-workspace path instead of an absolute one), or report the blocker "
+            "to the user."
         )
     return (
-        f"[System] {tool_name} failed {count} times with the same error. STOP retrying "
-        "it — the environment will not change. Use a different tool or approach now, "
-        "or finish with a clear report of what is blocked and why."
+        f"[System] {tool_name} failed {count} times with the same error in this turn. "
+        "STOP retrying it unchanged — the environment will not change. Use a different "
+        "tool or approach now, or finish this turn with a clear report of what is "
+        "blocked and why."
     )
 
 
@@ -114,6 +121,7 @@ MUTATING_TOOLS: frozenset[str] = frozenset(
         "replace_in_file", "insert_in_file", "insert_lines", "patch_file",
         "delete_file", "git_commit", "git_undo_ai", "checkpoint_restore",
         "task", "subagent", "compose",
+        "click_at", "double_click_at", "type_into_field", "key_press", "mouse_click",
     }
 )
 

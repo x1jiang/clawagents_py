@@ -177,6 +177,22 @@ def rewrite_command_for_askpass(command: str, *, has_askpass: bool) -> str:
     return command
 
 
+ASKPASS_HUMAN_TIMEOUT_S: float = 300.0
+
+_INTERACTIVE_SECRET_CMD_RE = re.compile(
+    r"\b(?:ssh|scp|sftp|rsync|sudo|su|doas|ssh-add|git\s+(?:push|pull|fetch|clone))\b",
+    re.IGNORECASE,
+)
+
+
+def command_may_prompt_for_secret(command: str) -> bool:
+    """Return True if ``command`` invokes a tool that may trigger SSH/SUDO/GIT_ASKPASS."""
+    text = (command or "").strip()
+    if not text:
+        return False
+    return bool(_INTERACTIVE_SECRET_CMD_RE.search(text))
+
+
 class AskpassSession:
     """Local IPC server + helper scripts for `SSH_ASKPASS` / `SUDO_ASKPASS` / `GIT_ASKPASS`."""
 
