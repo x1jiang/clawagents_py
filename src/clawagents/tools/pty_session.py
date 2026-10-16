@@ -442,13 +442,33 @@ def create_pty_tools():
 
     class PtyKeysTool:
         name = "pty_keys"
-        description = "Send vim-notation keys to a PTY session (e.g. '<Esc>:wq<CR>', '<C-c>')."
+        description = (
+            "Send vim-notation keys to a PTY session (e.g. '<Esc>:wq<CR>', '<C-c>'), "
+            "or set prompt_user to pop up an inline input/password box in the user's "
+            "chat window and pipe their response + <Enter> directly into the PTY "
+            "without exposing secrets to the model."
+        )
         parameters = {
             "session_id": {"type": "string", "required": True},
-            "keys": {"type": "string", "required": True, "description": "Vim-notation key sequence"},
+            "keys": {"type": "string", "description": "Vim-notation key sequence"},
+            "prompt_user": {
+                "type": "string",
+                "description": (
+                    "Optional prompt shown to the user in the chat window (e.g. "
+                    "'Enter password for 129.106.31.72:'). Their input + <CR> is "
+                    "sent directly to the PTY."
+                ),
+            },
+            "secret": {
+                "type": "boolean",
+                "description": "Mask the prompt_user input box as a password (default true).",
+            },
         }
+        waits_for_human = True
 
-        async def execute(self, args: dict) -> ToolResult:
+        async def execute(self, args: dict, run_context: Any = None) -> ToolResult:
+            import asyncio
+
             sess = get_session(str(args.get("session_id") or ""))
             if sess is None:
                 return ToolResult(
@@ -456,6 +476,48 @@ def create_pty_tools():
                     output="",
                     error="unknown or expired session_id; use the id from pty_start",
                 )
+            prompt_user = str(args.get("prompt_user") or "").strip()
+            if prompt_user:
+                from clawagents.tools.askpass import (
+                    is_secret_prompt,
+                    resolve_ask_prompt_fn,
+                )
+
+                ask_fn = resolve_ask_prompt_fn(run_context)
+                if ask_fn is None:
+                    return ToolResult(
+                        success=False,
+                        output="",
+                        error="No interactive user prompt handler available in this context.",
+                    )
+                secret_arg = args.get("secret")
+                is_secret = (
+                    bool(secret_arg)
+                    if isinstance(secret_arg, bool)
+                    else is_secret_prompt(prompt_user)
+                )
+                loop = asyncio.get_running_loop()
+
+                def _ask() -> str | None:
+                    try:
+                        return ask_fn(prompt_user, secret=is_secret, command=f"pty:{sess.session_id}")
+                    except TypeError:
+                        return ask_fn(prompt_user)
+
+                answer = await loop.run_in_executor(None, _ask)
+                if answer is None:
+                    return ToolResult(
+                        success=False,
+                        output="",
+                        error="User cancelled or skipped the PTY prompt.",
+                    )
+                try:
+                    sess.send_bytes(str(answer).encode("utf-8") + b"\r")
+                    time.sleep(0.15)
+                except Exception as exc:  # noqa: BLE001
+                    return ToolResult(success=False, output="", error=str(exc))
+                return ToolResult(success=True, output=sess.screen_text()[-3000:])
+
             try:
                 sess.send_keys(str(args.get("keys") or ""))
             except Exception as exc:  # noqa: BLE001

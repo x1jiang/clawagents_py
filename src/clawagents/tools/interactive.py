@@ -21,10 +21,18 @@ class AskUserTool:
     description = (
         "Ask the user a question and wait for their response. "
         "Use when you need clarification, confirmation, or input to proceed. "
+        "Set secret=true when asking for sensitive input so the UI masks it. "
+        "For SSH/sudo/git passwords in shell commands, prefer running the command "
+        "directly via `execute` (which prompts the user via the built-in askpass "
+        "bridge without exposing the password to the model). "
         "Only use this when the task is genuinely ambiguous — don't over-ask."
     )
     parameters = {
         "question": {"type": "string", "description": "The question to ask the user", "required": True},
+        "secret": {
+            "type": "boolean",
+            "description": "If true, render a masked password input in the chat UI.",
+        },
     }
     # Blocks on a person typing an answer, so the default tool timeout would
     # cut them off mid-thought.
@@ -34,14 +42,37 @@ class AskUserTool:
         self._ask_fn = ask_fn
 
     async def execute(self, args: Dict[str, Any]) -> ToolResult:
+        import inspect
+        from clawagents.tools.askpass import looks_like_secret_question
+
         question = str(args.get("question", ""))
         if not question:
             return ToolResult(success=False, output="", error="No question provided")
+        secret_arg = args.get("secret")
+        is_secret = (
+            bool(secret_arg)
+            if isinstance(secret_arg, bool)
+            else looks_like_secret_question(question)
+        )
 
         loop = asyncio.get_running_loop()
         try:
             if self._ask_fn is not None:
-                answer = await loop.run_in_executor(None, self._ask_fn, question)
+                fn = self._ask_fn
+
+                def _call_host() -> Optional[str]:
+                    try:
+                        sig = inspect.signature(fn)
+                        if "secret" in sig.parameters or any(
+                            p.kind == inspect.Parameter.VAR_KEYWORD
+                            for p in sig.parameters.values()
+                        ):
+                            return fn(question, secret=is_secret)  # type: ignore[call-arg]
+                    except (TypeError, ValueError):
+                        pass
+                    return fn(question)
+
+                answer = await loop.run_in_executor(None, _call_host)
                 if answer is None:
                     return ToolResult(
                         success=False,
@@ -51,6 +82,10 @@ class AskUserTool:
                 return ToolResult(success=True, output=f"User response: {answer}")
 
             def _ask() -> str:
+                if is_secret:
+                    import getpass
+
+                    return getpass.getpass(f"\n\U0001f99e Agent asks: {question}\n> ")
                 sys.stderr.write(f"\n\U0001f99e Agent asks: {question}\n> ")
                 sys.stderr.flush()
                 return input()

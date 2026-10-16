@@ -698,6 +698,8 @@ async def _exec_foreground_with_autobg(
     on_chunk: Any | None = None,
     streaming: bool = False,
     label: Optional[str] = None,
+    extra_env: Optional[Dict[str, str]] = None,
+    askpass_session: Any | None = None,
 ) -> tuple[ExecResult, bool, Optional[str]]:
     """Run shell; on timeout adopt the process into ``mgr``.
 
@@ -706,6 +708,8 @@ async def _exec_foreground_with_autobg(
     import signal
 
     env = _child_env()
+    if extra_env:
+        env.update(extra_env)
     timeout_s = max(0.1, timeout_ms / 1000.0)
     proc = await asyncio.create_subprocess_shell(
         command,
@@ -761,7 +765,10 @@ async def _exec_foreground_with_autobg(
         )
 
     try:
-        await asyncio.wait_for(asyncio.shield(wait_t), timeout=timeout_s)
+        if askpass_session is not None and getattr(askpass_session, "enabled", False):
+            await askpass_session.wait_process(wait_t, timeout_s)
+        else:
+            await asyncio.wait_for(asyncio.shield(wait_t), timeout=timeout_s)
         stdout = await out_t
         stderr = await err_t
         return (
@@ -906,8 +913,13 @@ class ExecTool:
         "you get a job_id. When the job's result is what was asked for, call "
         "task_wait on that job_id rather than ending your turn; task_status / "
         "task_output / task_stop are also available. "
-        "Not for interactive TTY apps (vim, ssh prompts, REPLs that need "
-        "a screen) — use pty_start / pty_keys / pty_wait / pty_screen / pty_stop."
+        "Password, passphrase, and host-key prompts from `ssh`, `ssh-copy-id`, "
+        "`scp`, `sftp`, `rsync`, `git`, and `sudo` are automatically routed to "
+        "an inline masked prompt box in the user's chat window via the built-in "
+        "askpass bridge — never tell the user to open a separate terminal just "
+        "to enter a password; run the command directly here. "
+        "Not for full-screen TTY apps (vim, top, REPLs that need a screen) — "
+        "use pty_start / pty_keys / pty_wait / pty_screen / pty_stop."
     )
     parameters: Dict[str, Dict[str, Any]] = {
         "command": {"type": "string", "description": "The shell command to execute", "required": True},
@@ -947,10 +959,16 @@ class ExecTool:
 
     async def execute(self, args: Dict[str, Any], run_context: Any = None) -> ToolResult:
         from clawagents.config.features import is_enabled
+        from clawagents.tools.askpass import (
+            AskpassSession,
+            resolve_ask_prompt_fn,
+            rewrite_command_for_askpass,
+        )
         from clawagents.tools.shell_session import session_for, strip_session_trailers
 
         sb = self._sb
-        command = str(args.get("command", ""))
+        raw_command = str(args.get("command", ""))
+        command = raw_command
         timeout_ms, immediate_bg = _resolve_block_until_ms(args)
 
         if not command:
@@ -1000,6 +1018,11 @@ class ExecTool:
         except Exception:
             pass
 
+        ask_prompt_fn = resolve_ask_prompt_fn(run_context)
+        command = rewrite_command_for_askpass(
+            command, has_askpass=ask_prompt_fn is not None
+        )
+
         session = None
         run_cwd = getattr(sb, "cwd", None) or os.getcwd()
         # Session + auto-bg adopt need a real local shell. Other backends
@@ -1045,25 +1068,42 @@ class ExecTool:
                 )
             warning_prefix += _drain_profile_warnings(sb)
             mgr = _bg_manager(run_context)
+            bg_askpass = AskpassSession(ask_prompt_fn, command=raw_command).start()
+            bg_env = _child_env()
+            bg_env.update(bg_askpass.env_overlay())
             with tool_span("exec.background", command=bg_command):
                 try:
                     job = await mgr.start(
                         _shell_argv(bg_command),
                         cwd=run_cwd,
-                        env=_child_env(),
-                        label=str(args.get("command", "")),
+                        env=bg_env,
+                        label=raw_command,
                         output_filter=strip_session_trailers,
                     )
                 except Exception as e:
+                    bg_askpass.close()
                     return ToolResult(
                         success=False, output="", error=f"Background start failed: {e}"
                     )
+
+            if bg_askpass.enabled:
+                async def _close_bg_askpass() -> None:
+                    try:
+                        await mgr.await_complete(job.id)
+                    except Exception:
+                        pass
+                    finally:
+                        bg_askpass.close()
+
+                asyncio.create_task(
+                    _close_bg_askpass(), name=f"askpass-cleanup-{job.id}"
+                )
 
             payload = {
                 "backgrounded": True,
                 "job_id": job.id,
                 "pid": job.pid,
-                "command": str(args.get("command", "")),
+                "command": raw_command,
                 "cwd": run_cwd,
                 "description": desc or None,
                 "hint": (
@@ -1112,6 +1152,7 @@ class ExecTool:
                 )
             warning_prefix += _drain_profile_warnings(sb)
 
+            fg_askpass = AskpassSession(ask_prompt_fn, command=raw_command).start()
             with tool_span(
                 "exec.run", command=foreground_command, timeout_ms=timeout_ms
             ):
@@ -1123,9 +1164,12 @@ class ExecTool:
                         mgr=mgr,
                         on_chunk=on_chunk,
                         streaming=streaming,
-                        label=str(args.get("command", "")),
+                        label=raw_command,
+                        extra_env=fg_askpass.env_overlay(),
+                        askpass_session=fg_askpass,
                     )
                 except Exception as e:
+                    fg_askpass.close()
                     progress.flush()
                     return ToolResult(
                         success=False, output="", error=f"Command failed: {str(e)}"
@@ -1135,40 +1179,43 @@ class ExecTool:
                 progress.flush()
                 # Trailers were already injected via session.wrap — sync cwd/env
                 # when the adopted job finishes so later FG execute is not stale.
-                if session is not None:
-                    sess = session
-                    sticky = sticky_env
+                sess = session
+                sticky = sticky_env
 
-                    def _sync_session_from_job(job: Any) -> None:
-                        try:
-                            sess.consume_stdout(job.stdout or "", sticky_env=sticky)
-                        except Exception:
-                            pass
-
+                def _sync_session_from_job(job: Any) -> None:
+                    if sess is None:
+                        return
                     try:
-                        job_rec = mgr.status(job_id)
-                        # Re-adopt path already started watcher; attach via
-                        # a one-shot waiter so we don't require adopt() API change.
-                        async def _wait_and_sync() -> None:
-                            try:
-                                done = await mgr.await_complete(job_id)
-                                _sync_session_from_job(done)
-                            except Exception:
-                                pass
-
-                        asyncio.create_task(
-                            _wait_and_sync(), name=f"shell-session-sync-{job_id}"
-                        )
-                        _ = job_rec
+                        sess.consume_stdout(job.stdout or "", sticky_env=sticky)
                     except Exception:
                         pass
+
+                try:
+                    job_rec = mgr.status(job_id)
+                    # Re-adopt path already started watcher; attach via
+                    # a one-shot waiter so we don't require adopt() API change.
+                    async def _wait_and_sync() -> None:
+                        try:
+                            done = await mgr.await_complete(job_id)
+                            _sync_session_from_job(done)
+                        except Exception:
+                            pass
+                        finally:
+                            fg_askpass.close()
+
+                    asyncio.create_task(
+                        _wait_and_sync(), name=f"shell-session-sync-{job_id}"
+                    )
+                    _ = job_rec
+                except Exception:
+                    fg_askpass.close()
                 payload = {
                     "backgrounded": True,
                     "auto_background_on_timeout": True,
                     "job_id": job_id,
                     "timeout_ms": timeout_ms,
                     "block_until_ms": timeout_ms,
-                    "command": str(args.get("command", "")),
+                    "command": raw_command,
                     "cwd": run_cwd,
                     "description": desc or None,
                     "hint": (
@@ -1184,6 +1231,7 @@ class ExecTool:
                     output=warning_prefix + json.dumps(payload, indent=2),
                 )
 
+            fg_askpass.close()
             stdout = result.stdout
             stderr = result.stderr
             exit_code = result.exit_code
@@ -1200,13 +1248,13 @@ class ExecTool:
                 stdout=stdout,
                 stderr=stderr,
                 workspace=run_cwd,
-                command=str(args.get("command", command)),
+                command=raw_command,
             )
 
             success = exit_code == 0
             if not success:
                 if _is_empty_search_result(
-                    str(args.get("command", command)),
+                    raw_command,
                     exit_code,
                     stdout or "",
                     stderr or "",
@@ -1218,7 +1266,7 @@ class ExecTool:
                 return ToolResult(
                     success=False,
                     output=archive_header + _format_nonzero_command_output(
-                        str(args.get("command", command)),
+                        raw_command,
                         exit_code,
                         stdout or "",
                         stderr or "",
@@ -1246,9 +1294,20 @@ class ExecTool:
             warning_prefix += "[sandbox: off for this command (unsandboxed)]\n"
 
         progress = _ToolProgressEmitter(run_context)
+        legacy_askpass = AskpassSession(ask_prompt_fn, command=raw_command).start()
+        askpass_env = legacy_askpass.env_overlay() or None
 
         async def _run_once(target: Any):
             try:
+                if askpass_env:
+                    return await target.exec(
+                        command,
+                        timeout=timeout_ms,
+                        cwd=run_cwd,
+                        env=askpass_env,
+                        max_output_chars=MAX_OUTPUT_CHARS,
+                        on_output=progress.feed,
+                    )
                 return await target.exec(
                     command,
                     timeout=timeout_ms,
@@ -1258,130 +1317,146 @@ class ExecTool:
                 )
             except TypeError as e:
                 msg = str(e).lower()
-                if "unexpected keyword" not in msg and "cwd" not in msg and "max_output" not in msg:
+                if (
+                    "unexpected keyword" not in msg
+                    and "cwd" not in msg
+                    and "max_output" not in msg
+                    and "env" not in msg
+                ):
                     raise
                 try:
                     return await target.exec(
                         command,
                         timeout=timeout_ms,
                         cwd=run_cwd,
+                        max_output_chars=MAX_OUTPUT_CHARS,
+                        on_output=progress.feed,
                     )
                 except TypeError:
-                    return await target.exec(command, timeout=timeout_ms)
+                    try:
+                        return await target.exec(
+                            command,
+                            timeout=timeout_ms,
+                            cwd=run_cwd,
+                        )
+                    except TypeError:
+                        return await target.exec(command, timeout=timeout_ms)
 
-        with tool_span("exec.run", command=command, timeout_ms=timeout_ms):
-            try:
-                result = await _run_once(exec_sb)
-            except Exception as e:
-                return ToolResult(
-                    success=False, output="", error=f"Command failed: {e}"
-                )
+        try:
+            with tool_span("exec.run", command=command, timeout_ms=timeout_ms):
+                try:
+                    result = await _run_once(exec_sb)
+                except Exception as e:
+                    return ToolResult(
+                        success=False, output="", error=f"Command failed: {e}"
+                    )
 
-            # Soft sandbox fallback is otherwise invisible to the agent.
-            warning_prefix += _drain_profile_warnings(sb)
+                # Soft sandbox fallback is otherwise invisible to the agent.
+                warning_prefix += _drain_profile_warnings(sb)
 
-            if result.killed:
+                if result.killed:
+                    stdout = result.stdout or ""
+                    stderr = getattr(result, "stderr", None) or ""
+                    if session is not None:
+                        stdout_path = getattr(result, "stdout_path", None)
+                        if stdout_path:
+                            session.consume_stdout_file(stdout_path, sticky_env=sticky_env)
+                        stdout = session.consume_stdout(stdout, sticky_env=sticky_env)
+                    archive_header = _archive_exec_spills(
+                        result,
+                        stdout=stdout,
+                        stderr=stderr,
+                        workspace=run_cwd,
+                        command=raw_command,
+                    )
+                    progress.flush()
+                    return ToolResult(
+                        success=False,
+                        output=archive_header + _truncate_exec_output(stdout + stderr),
+                        error=(
+                            f"Command timed out after {timeout_ms}ms: "
+                            f"{raw_command}"
+                        ),
+                    )
+
                 stdout = result.stdout or ""
                 stderr = getattr(result, "stderr", None) or ""
+                # Escalation ladder: sandbox EPERM → one automatic unsandboxed
+                # retry when Full access authorized this turn.
+                meta = getattr(run_context, "_metadata", None) if run_context else None
+                can_escalate = (
+                    isinstance(meta, dict)
+                    and bool(meta.get("allow_unsandboxed_exec"))
+                    and exec_sb is sb
+                    and result.exit_code != 0
+                    and _sandbox_eperm_signal(stdout, stderr)
+                )
+                if can_escalate:
+                    warning_prefix += (
+                        "[sandbox: EPERM — auto-retrying once without OS sandbox]\n"
+                    )
+                    _discard_exec_spills(result)
+                    try:
+                        result = await _run_once(_unsandboxed_backend(sb))
+                        stdout = result.stdout or ""
+                        stderr = getattr(result, "stderr", None) or ""
+                    except Exception as e:
+                        return ToolResult(
+                            success=False,
+                            output=warning_prefix,
+                            error=f"Unsandboxed retry failed: {e}",
+                        )
                 if session is not None:
                     stdout_path = getattr(result, "stdout_path", None)
                     if stdout_path:
                         session.consume_stdout_file(stdout_path, sticky_env=sticky_env)
                     stdout = session.consume_stdout(stdout, sticky_env=sticky_env)
+
                 archive_header = _archive_exec_spills(
                     result,
                     stdout=stdout,
                     stderr=stderr,
                     workspace=run_cwd,
-                    command=str(args.get("command", command)),
+                    command=raw_command,
                 )
                 progress.flush()
-                return ToolResult(
-                    success=False,
-                    output=archive_header + _truncate_exec_output(stdout + stderr),
-                    error=(
-                        f"Command timed out after {timeout_ms}ms: "
-                        f"{args.get('command', command)}"
-                    ),
-                )
 
-            stdout = result.stdout or ""
-            stderr = getattr(result, "stderr", None) or ""
-            # Escalation ladder: sandbox EPERM → one automatic unsandboxed
-            # retry when Full access authorized this turn.
-            meta = getattr(run_context, "_metadata", None) if run_context else None
-            can_escalate = (
-                isinstance(meta, dict)
-                and bool(meta.get("allow_unsandboxed_exec"))
-                and exec_sb is sb
-                and result.exit_code != 0
-                and _sandbox_eperm_signal(stdout, stderr)
-            )
-            if can_escalate:
-                warning_prefix += (
-                    "[sandbox: EPERM — auto-retrying once without OS sandbox]\n"
-                )
-                _discard_exec_spills(result)
-                try:
-                    result = await _run_once(_unsandboxed_backend(sb))
-                    stdout = result.stdout or ""
-                    stderr = getattr(result, "stderr", None) or ""
-                except Exception as e:
-                    return ToolResult(
-                        success=False,
-                        output=warning_prefix,
-                        error=f"Unsandboxed retry failed: {e}",
-                    )
-
-            if session is not None:
-                stdout_path = getattr(result, "stdout_path", None)
-                if stdout_path:
-                    session.consume_stdout_file(stdout_path, sticky_env=sticky_env)
-                stdout = session.consume_stdout(stdout, sticky_env=sticky_env)
-
-            archive_header = _archive_exec_spills(
-                result,
-                stdout=stdout,
-                stderr=stderr,
-                workspace=run_cwd,
-                command=str(args.get("command", command)),
-            )
-            progress.flush()
-
-            success = result.exit_code == 0
-            if not success:
-                if _is_empty_search_result(
-                    str(args.get("command", command)),
-                    result.exit_code,
-                    stdout,
-                    stderr,
-                ):
-                    return ToolResult(
-                        success=True,
-                        output=warning_prefix + archive_header + "Search completed: no matches found.",
-                    )
-                return ToolResult(
-                    success=False,
-                    output=archive_header + _format_nonzero_command_output(
-                        str(args.get("command", command)),
+                success = result.exit_code == 0
+                if not success:
+                    if _is_empty_search_result(
+                        raw_command,
                         result.exit_code,
                         stdout,
                         stderr,
-                        warning_prefix,
-                    ),
-                    error=_short_exit_error(result.exit_code),
-                )
+                    ):
+                        return ToolResult(
+                            success=True,
+                            output=warning_prefix + archive_header + "Search completed: no matches found.",
+                        )
+                    return ToolResult(
+                        success=False,
+                        output=archive_header + _format_nonzero_command_output(
+                            raw_command,
+                            result.exit_code,
+                            stdout,
+                            stderr,
+                            warning_prefix,
+                        ),
+                        error=_short_exit_error(result.exit_code),
+                    )
 
-            output = stdout
-            if result.stderr:
-                output += ("\n" if output else "") + f"[stderr] {result.stderr}"
-            output = _truncate_exec_output(output)
-            if session is not None:
-                warning_prefix += f"[shell_session: cwd now {session.cwd}]\n"
-            return ToolResult(
-                success=True,
-                output=warning_prefix + archive_header + (output or "(no output)"),
-            )
+                output = stdout
+                if result.stderr:
+                    output += ("\n" if output else "") + f"[stderr] {result.stderr}"
+                output = _truncate_exec_output(output)
+                if session is not None:
+                    warning_prefix += f"[shell_session: cwd now {session.cwd}]\n"
+                return ToolResult(
+                    success=True,
+                    output=warning_prefix + archive_header + (output or "(no output)"),
+                )
+        finally:
+            legacy_askpass.close()
 
 
 # ─── Public API ──────────────────────────────────────────────────────────────
