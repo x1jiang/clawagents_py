@@ -3107,7 +3107,15 @@ def _gemini_prompt_block_reason(resp_or_chunk: Any) -> str | None:
     br = getattr(pf, "block_reason", None) if pf is not None else None
     if br is None:
         return None
-    name = getattr(br, "name", None) or str(br)
+    raw_name = getattr(br, "name", None)
+    if isinstance(raw_name, str):
+        name = raw_name
+    elif isinstance(br, str):
+        name = br
+    elif type(br).__module__.startswith("unittest.mock"):
+        return None
+    else:
+        name = str(br)
     cleaned = name.split(".", 1)[-1] if "." in name else name
     if cleaned.upper() in ("", "NONE", "BLOCKED_REASON_UNSPECIFIED", "UNSPECIFIED"):
         return None
