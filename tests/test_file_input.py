@@ -269,3 +269,25 @@ def test_content_key_text_file_placeholder_is_bounded():
     assert _PDF_B64 not in key
     assert "file attachment" in key  # placeholder marker, not silent omission
     assert len(key) < 200
+
+
+def test_build_file_block_markdown_and_text():
+    from clawagents.media.documents import build_user_file_block
+
+    md_b64 = base64.b64encode(b"# Heading\n\nSome **markdown** notes.\n").decode("ascii")
+    md_block = build_user_file_block(md_b64, "text/markdown", name="notes.md")
+    assert md_block["type"] == "text"
+    assert "[Attached document: notes.md]" in md_block["text"]
+    assert "# Heading" in md_block["text"]
+
+    txt_b64 = base64.b64encode(b"Plain text content line 1\nline 2").decode("ascii")
+    txt_block = build_user_file_block(txt_b64, "text/plain", name="readme.txt")
+    assert txt_block["type"] == "text"
+    assert "[Attached document: readme.txt]" in txt_block["text"]
+    assert "Plain text content line 1" in txt_block["text"]
+
+    # Binary bytes with NUL disguised as .md must be rejected cleanly
+    bad_b64 = base64.b64encode(b"\x00\x01\x02binary").decode("ascii")
+    bad_block = build_user_file_block(bad_b64, "text/markdown", name="fake.md")
+    assert bad_block["type"] == "text"
+    assert "dropped" in bad_block["text"]

@@ -89,6 +89,72 @@ def _extract_docx_text(raw: bytes, *, max_chars: int) -> Optional[str]:
     return text
 
 
+_TEXT_MEDIA_TYPES = frozenset({
+    "text/plain",
+    "text/markdown",
+    "text/x-markdown",
+    "text/csv",
+    "text/tab-separated-values",
+    "text/html",
+    "text/xml",
+    "text/yaml",
+    "text/x-yaml",
+    "text/x-python",
+    "text/x-script.python",
+    "text/x-sh",
+    "text/x-shellscript",
+    "text/x-sql",
+    "text/x-tex",
+    "text/x-rst",
+    "text/javascript",
+    "application/json",
+    "application/ld+json",
+    "application/x-ndjson",
+    "application/jsonl",
+    "application/xml",
+    "application/yaml",
+    "application/x-yaml",
+    "application/toml",
+    "application/sql",
+    "application/javascript",
+    "application/typescript",
+    "application/x-sh",
+})
+
+_TEXT_EXTENSIONS = (
+    ".md", ".markdown", ".mdx", ".txt", ".text", ".log", ".csv", ".tsv",
+    ".json", ".jsonl", ".ndjson", ".yaml", ".yml", ".toml", ".ini", ".cfg",
+    ".conf", ".xml", ".html", ".htm", ".sql", ".sh", ".bash", ".zsh", ".py",
+    ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".css", ".scss", ".r",
+    ".rmd", ".tex", ".bib", ".rst", ".env", ".dockerfile",
+)
+
+
+def _is_text_attachment(media_type: str, label: str, raw: bytes) -> bool:
+    mt = (media_type or "").split(";", 1)[0].strip().lower()
+    lower_name = (label or "").lower()
+    has_text_mime = mt.startswith("text/") or mt in _TEXT_MEDIA_TYPES
+    has_text_ext = lower_name.endswith(_TEXT_EXTENSIONS)
+    if not (has_text_mime or has_text_ext):
+        return False
+    # Reject NUL-containing binary payloads masquerading as text.
+    sample = raw[:8192]
+    if b"\x00" in sample:
+        return False
+    return True
+
+
+def _extract_plain_text(raw: bytes, *, max_chars: int) -> Optional[str]:
+    if not raw or b"\x00" in raw[:8192]:
+        return None
+    text = raw.decode("utf-8", errors="replace").strip()
+    if not text:
+        return None
+    if len(text) > max_chars:
+        text = text[:max_chars] + "\n…[truncated]"
+    return text
+
+
 def build_user_file_block(
     data: Union[str, bytes],
     media_type: str = PDF_MEDIA_TYPE,
@@ -144,6 +210,12 @@ def build_user_file_block(
         text = _extract_docx_text(raw, max_chars=max_text_chars)
         if text is None:
             return _note(f"[document {label} could not be parsed (.docx expected), dropped]")
+        return _note(f"[Attached document: {label}]\n\n{text}")
+
+    if _is_text_attachment(media_type, label, raw):
+        text = _extract_plain_text(raw, max_chars=max_text_chars)
+        if text is None:
+            return _note(f"[document {label} was empty or binary, dropped]")
         return _note(f"[Attached document: {label}]\n\n{text}")
 
     return _note(f"[file {label} ({media_type}) is not a supported attachment type, dropped]")
