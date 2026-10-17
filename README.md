@@ -616,6 +616,10 @@ mcp_servers = [
 ]
 ```
 
+For a complete recipe that searches the web and reads page excerpts without an
+LLM or a Parallel API key, see [Parallel Search MCP](examples/parallel_search/README.md).
+It uses the MCP client directly and leaves the built-in agent tools unchanged.
+
 ### 12. Browser tools
 
 Give the agent a Playwright-backed browser. Install once: `pip install 'clawagents[browser]' && playwright install chromium`.
