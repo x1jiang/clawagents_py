@@ -322,7 +322,11 @@ def classify_error(err: BaseException, provider: str = "") -> ErrorDescriptor:
         )
 
     # 5. Provider internal (5xx)
-    if status and 500 <= status <= 504:
+    if (status and 500 <= status <= 504) or (
+        "server_is_overloaded" in msg
+        or "currently overloaded" in msg
+        or "temporarily overloaded" in msg
+    ):
         recipe = RECOVERY_RECIPES[ErrorClass.PROVIDER_INTERNAL]
         return ErrorDescriptor(
             error_class=ErrorClass.PROVIDER_INTERNAL,
