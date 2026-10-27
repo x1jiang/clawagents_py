@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 6.20.96
 
 - Add GPT-6.1 Terra model profile, reasoning, Fast mode, and Responses tool routing.
 - Recognize provider overload messages without an HTTP status as retryable server errors.
