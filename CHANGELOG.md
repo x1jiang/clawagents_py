@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Add GPT-6.1 Terra model profile, reasoning, Fast mode, and Responses tool routing.
+- Recognize provider overload messages without an HTTP status as retryable server errors.
+
 ## 6.20.89
 
 - Add full model profile, effort, and request-building support for **Gemini 4 Argon** (`gemini-4-argon`, 1,048,576 input / 65,536 synchronous output tokens, `thinking_level` `low` / `medium` / `high`, rejected sampling parameters omitted) and **Claude 5.5** (`claude-opus-5-5`, `claude-sonnet-5-5`, and `claude-haiku-5-5`, 1,000,000 input / 128,000 output tokens, plus `long_context_threshold=100_000` on Haiku 5.5).
