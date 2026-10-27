@@ -273,6 +273,13 @@ def _is_retryable(err: BaseException) -> bool:
         if isinstance(status, int) and not isinstance(status, bool):
             return status in _RETRYABLE_STATUS_CODES
         msg = str(err).lower()
+        # Responses streaming can send overload errors as an event without an
+        # HTTP status. Treat the provider's explicit overload markers like 503.
+        if "server_is_overloaded" in msg or any(
+            phrase in msg
+            for phrase in ("currently overloaded", "temporarily overloaded")
+        ):
+            return True
         if any(
             tok in msg
             for tok in (
@@ -929,7 +936,7 @@ def openai_model_rejects_temperature(model: str) -> bool:
     m = _bare_openai_model_id(model)
     if m.startswith(("o1", "o3", "o4")):
         return True
-    if m.startswith(("gpt-5.3", "gpt-5.4", "gpt-5.5", "gpt-5.6", "gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna")):
+    if m.startswith(("gpt-5.3", "gpt-5.4", "gpt-5.5", "gpt-5.6", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna")):
         return True
     if m.startswith("gpt-5") and "codex" in m:
         return True
@@ -980,11 +987,13 @@ def _requires_responses_for_tools(model: str) -> bool:
     Completions rejects tools with any ``reasoning_effort`` (verified live
     2026-10-07), so tool calls must use Responses.
     """
-    return _bare_openai_model_id(model).startswith(("gpt-6.1-sol", "gpt-6-astra"))
+    return _bare_openai_model_id(model).startswith(("gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra"))
 
 
 def _responses_only_model_label(model: str) -> str:
-    return "GPT-6 Astra" if _bare_openai_model_id(model).startswith("gpt-6-astra") else "GPT-6.1 Sol"
+    return ("GPT-6 Astra" if _bare_openai_model_id(model).startswith("gpt-6-astra")
+            else "GPT-6.1 Terra" if _bare_openai_model_id(model).startswith("gpt-6.1-terra")
+            else "GPT-6.1 Sol")
 
 
 def _chat_completions_needs_reasoning_none(model: str) -> bool:
@@ -1037,7 +1046,7 @@ def clamp_reasoning_effort_for_model(model: str, effort: str | None) -> str | No
 
     if _bare_openai_model_id(model).startswith(("gpt-6-astra", "gpt-6.1-sol")):
         return "low" if effort in ("none", "minimal") else effort
-    if _bare_openai_model_id(model).startswith(("gpt-6-sol", "gpt-6-luna")):
+    if _bare_openai_model_id(model).startswith(("gpt-6-sol", "gpt-6-luna", "gpt-6.1-terra")):
         return "low" if effort == "minimal" else effort
     if not is_grok_model(_bare_openai_model_id(model)):
         return effort
@@ -1056,7 +1065,7 @@ def model_supports_reasoning_effort(model: str) -> bool:
         return True
     if m.startswith(("o1", "o3", "o4")):
         return True
-    if m.startswith(("gpt-5.5", "gpt-5.6", "gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna")):
+    if m.startswith(("gpt-5.5", "gpt-5.6", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna")):
         return True
     # Bare gpt-5 / gpt-5-codex family (not gpt-5-nano/micro as primary chat)
     if m == "gpt-5" or m.startswith("gpt-5-"):
@@ -1078,7 +1087,7 @@ def supports_openai_fast_mode(model: str) -> bool:
     """Models with documented Fast processing on the direct OpenAI API."""
     m = model.strip().lower()
     return bool(_re.fullmatch(
-        r"(?:gpt-6-(?:astra|sol|luna)|gpt-6\.1-sol|gpt-5\.6(?:-(?:sol|terra|luna))?)"
+        r"(?:gpt-6-(?:astra|sol|luna)|gpt-6\.1-(?:sol|terra)|gpt-5\.6(?:-(?:sol|terra|luna))?)"
         r"(?:-\d{4}-\d{2}-\d{2})?", m,
     ))
 
@@ -1118,7 +1127,7 @@ def prefers_responses_api(
         return False
     if "codex" in m:
         return True
-    if m.startswith(("gpt-5.5", "gpt-5.6", "gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna")):
+    if m.startswith(("gpt-5.5", "gpt-5.6", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna")):
         return True
     # Other GPT-5 / o-series: Responses when tools + non-none effort so the
     # API accepts both (Chat Completions often forces effort=none).
