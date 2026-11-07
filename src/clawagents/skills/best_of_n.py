@@ -38,11 +38,14 @@ and apply the best one.
 
 3. Wait for all candidates (`get_task_output` / wait semantics if available).
 
-4. Evaluate each on: correctness → completeness → simplicity → risk.
+4. Evaluate each candidate deliverable blindly on Harness²'s 3-tier priority order:
+   - **COVERAGE**: Every requested file, section, field, value, or analysis is present.
+   - **CORRECTNESS**: Values are internally consistent and grounded in workspace evidence (explicit uncertainty beats invented specifics).
+   - **FIDELITY**: Exact requested formats/headers/schemas, with no `TODO`, placeholder, or uncomputed formula.
 
-5. Apply the winner's changes into the main workspace (review diffs; merge carefully).
+5. Apply the winner's changes (or compose complementary `INV` machinery + `DOM` domain checks) into the main workspace.
 
-6. End with `WINNER: <number>` (1–N).
+6. End with `WINNER: <number>` (1–N) and a 2-line `<why>` naming the criterion that decided it.
 
 ## Guardrails
 

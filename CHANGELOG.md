@@ -1,5 +1,13 @@
 # Changelog
 
+## 6.20.97
+
+- Adopt Harness² (*"Recursive Agent Harnessing for an Open World"*, arXiv:2610.14224) capabilities in `clawagents.trajectory` and `clawagents.skills`:
+  - Add `harness_surface` with `SurfaceSpec`, recursive accept-or-repair harness tree validation (`validate_harness_tree`, `accept_or_repair_tree`), `.clawagents/skill-triggers.md` autotrigger enforcement (`autotrigger_skills`, `ensure_workspace_skill_trigger`), causal `<edits>` attribution (`EditAttribution`, `ExperienceEntry`) with non-confounded evidence gating, and per-domain `ExperienceLibrary` (`INDEX.md` + `harnesses/<task>/EXPERIENCE.md`).
+  - Harden `SkillWorkshopScanner` and `SkillWorkshopService` to enforce frontmatter `name:` directory alignment, `.py` compilation checks, `SKILL.md` helper script existence checks across existing skill files, grader-verdict leakage guards, and collision-free rollback snapshots.
+  - Separate `[INV]`, `[DOM]`, and `[WORKSPACE_FACT]` reflection dimensions in `trajectory.lessons` and `lesson_promotion` so workspace-specific facts remain in workspace memory rather than leaking into portable domain skills, while raising observation context to 1200 chars and enforcing normalized "cut-to-pay" deduplication.
+  - Fix `compare_samples` / `best_of_n` empty-deliverable scoring bias (`TODO`/placeholder penalty and substantive deliverable bonus) and add blind anonymized deliverable selection (`select_best_candidate_blind`, `blind_select=True`).
+
 ## 6.20.96
 
 - Add GPT-6.1 Terra model profile, reasoning, Fast mode, and Responses tool routing.

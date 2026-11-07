@@ -21,6 +21,18 @@ from clawagents.trajectory.verifier import (
 )
 from clawagents.trajectory.compare import (
     compare_samples,
+    select_best_candidate_blind,
+)
+from clawagents.trajectory.harness_surface import (
+    DEFAULT_SURFACE,
+    EditAttribution,
+    ExperienceEntry,
+    ExperienceLibrary,
+    SurfaceSpec,
+    accept_or_repair_tree,
+    assign_anon_ids,
+    autotrigger_skills,
+    validate_harness_tree,
 )
 from clawagents.trajectory.judge import (
     judge_run,

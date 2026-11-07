@@ -51,7 +51,13 @@ class SkillWorkshopService:
         support_files: list[dict[str, str]] | None = None,
     ) -> dict[str, Any]:
         pairs = [(f["path"], f["content"]) for f in (support_files or [])]
-        findings = scan_proposal_content(target_skill, description, body, pairs)
+        findings = scan_proposal_content(
+            target_skill,
+            description,
+            body,
+            pairs,
+            existing_support_paths=self.store._existing_skill_support_paths(target_skill),
+        )
         try:
             rec = self.store.create_proposal(
                 name=target_skill,

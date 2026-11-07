@@ -33,14 +33,15 @@ def _get_clawagents_dir() -> Path:
 def _get_lessons_file() -> Path:
     return _get_clawagents_dir() / "lessons.md"
 _MAX_LESSONS = 50
-_MAX_LESSONS_CHARS = 4000
+_MAX_LESSONS_CHARS = 3200  # Harness²: keep always-on lesson budget compact; promote procedures to on-demand skills
 _LESSON_MAX_AGE_RUNS = 50   # Feature 2: drop lessons older than this many runs
+_DEFAULT_OBS_TRUNC = 1200   # Harness²: avoid 80-char clipping that fabricates defects
 
-# ─── Post-Run Self-Analysis ──────────────────────────────────────────────────
+# ─── Post-Run Self-Analysis (Harness² INV / DOM / WORKSPACE_FACT Taxonomy) ───
 
 _SELF_ANALYSIS_PROMPT = """\
-You are reviewing your own agent run trajectory. Analyze the run and extract \
-concise, actionable lessons.
+You are reviewing an AI coding agent trajectory to extract causal, checkable lessons \
+without bloating always-on context.
 
 ## Run Summary
 - Task: {task}
@@ -59,26 +60,36 @@ concise, actionable lessons.
 ## Key Turns (failures and pivots)
 {key_turns}
 
-## Instructions
-Based on this trajectory:
-1. What went wrong? (specific tool failures, bad strategies, repeated mistakes)
-2. Were failures FORMAT errors (fixable by correcting syntax) or LOGIC errors (need new strategy)?
-3. What worked? (successful approaches, efficient patterns)
-4. What should the agent do differently next time?
-5. If the verified score differs from the self-assessed run score, explain why (the verified score is objective ground truth from actual tool outputs).
+## Instructions (Harness² Orthogonal Dimensions)
+Separate your diagnosis along two orthogonal dimensions plus workspace facts:
+1. **[INV] Invariant Machinery**: Tool error recovery, bounded fallbacks, deterministic helper scripts (`scripts/*.py`), verification order, and output budget protection.
+2. **[DOM] Domain / Practitioner Contract**: Deliverable structure, cross-file reconciliation checks, required fields/columns, and explicit uncertainty handling.
+3. **[WORKSPACE_FACT] Anchored Workspace Fact**: Verified join keys, schema mappings, or paths discovered in THIS workspace. Always prefix with `In this workspace, ...` so a reader can tell workspace fact from portable procedure. Never guess facts.
+4. **Causal Evidence Rule**: Every lesson must trace to a specific turn/observation in the trajectory. If the run shows no concrete, reusable contrast, respond with `NO_ENTRY`.
 
-Respond with a markdown list of 2-5 concise lessons. Each lesson should be a \
-single line starting with "- ". Focus on ACTIONABLE advice, not vague platitudes.
+Respond with 1-4 concise markdown bullets (`- [INV] ...`, `- [DOM] ...`, or `- [WORKSPACE_FACT] In this workspace, ...`), optionally followed by one `<experience>` block for the single best transferable procedure:
 
-Example format:
-- When file X doesn't exist, check parent directory first instead of retrying the same path
-- Use grep to search before attempting to read large files
-- Prefer execute_command over write_file+execute for one-off scripts
+<experience>
+cue: <the shape of situation this applies to>
+lesson: <the checkable operation to perform>
+evidence: <the turn and tool contrast supporting this lesson>
+confidence: <high|medium|low>
+dimension: <INV|DOM>
+kind: <procedure|workspace_fact>
+</experience>
 """
 
 
-def _extract_key_turns(turns: list[dict[str, Any]], max_turns: int = 10) -> str:
-    """Pick the most informative turns: failures, pivots (score changed sign), early and late."""
+def _extract_key_turns(
+    turns: list[dict[str, Any]],
+    max_turns: int = 10,
+    obs_trunc: int = _DEFAULT_OBS_TRUNC,
+) -> str:
+    """Pick the most informative turns: failures, pivots (score changed sign), early and late.
+
+    Uses a generous `obs_trunc` (default 1200 chars instead of 80) so reflection
+    reads actual error signatures and table schemas rather than fabricating defects.
+    """
     if not turns:
         return "(no turns recorded)"
 
@@ -110,10 +121,10 @@ def _extract_key_turns(turns: list[dict[str, Any]], max_turns: int = 10) -> str:
             name = tc.get("tool_name", "?")
             ft = tc.get("failure_type", "")
             ft_tag = f" [{ft}]" if ft and not tc.get("success") else ""
-            preview = tc.get("output_preview", "")[:80]
+            preview = (tc.get("output_preview", "") or "")[:obs_trunc]
             calls_info.append(f"  - [{status}{ft_tag}] {name}: {preview}")
-        resp = (t.get("response_text", "") or "")[:200]
-        obs = (t.get("observation_context", "") or "")[:150]
+        resp = (t.get("response_text", "") or "")[:600]
+        obs = (t.get("observation_context", "") or "")[:400]
         lines.append(f"### Turn {idx} (score={t.get('score', 0)}, productivity={productivity})")
         if obs:
             lines.append(f"Context: {obs}")
@@ -225,20 +236,71 @@ def save_lessons(
     outcome: str,
     model: str = "",
 ) -> None:
-    """Append new lessons to .clawagents/lessons.md with staleness metadata."""
-    try:
-        _get_clawagents_dir().mkdir(parents=True, exist_ok=True)
+    """Append new lessons to .clawagents/lessons.md with staleness metadata and deduplication.
 
-        # Feature 2: tag with timestamp and model for staleness decay
-        ts = int(time.time())
-        model_tag = f" [{model}]" if model else ""
-        header = f"\n## Lessons from run ({outcome}) — {task[:80]}{model_tag} @{ts}\n"
-        entry = header + new_lessons.strip() + "\n"
+    Harness² budget discipline:
+      - `NO_ENTRY` or grader verdict leaks are never written.
+      - Duplicate lesson bullets already present in `.clawagents/lessons.md` are skipped
+        ("cut-to-pay": never pay twice in always-on tokens for the same rule).
+      - If a structured `<experience>` block is present, it is also recorded into the
+        domain `ExperienceLibrary` (`.clawagents/experience/<domain>/INDEX.md`).
+    """
+    try:
+        from clawagents.trajectory.harness_surface import (
+            ExperienceLibrary,
+            assert_no_grader_verdicts,
+            parse_experience_reply,
+        )
+
+        cleaned_raw = (new_lessons or "").strip()
+        if not cleaned_raw or cleaned_raw == "NO_ENTRY":
+            return
+        assert_no_grader_verdicts(cleaned_raw)
+
+        claw_dir = _get_clawagents_dir()
+        claw_dir.mkdir(parents=True, exist_ok=True)
+
+        # Persist structured <experience> to per-domain library if present
+        exp_entry = parse_experience_reply(cleaned_raw)
+        if exp_entry is not None:
+            lib = ExperienceLibrary(claw_dir / "experience", domain="general")
+            lib.add(task[:64] or "run", exp_entry, label=model or "agent")
+
+        # Strip <edits>/<experience> XML blocks from the always-on bullet file
+        import re as _re
+
+        bullet_part = _re.sub(r"<(?:edits|experience)>.*?</(?:edits|experience)>", "", cleaned_raw, flags=_re.S).strip()
+        if not bullet_part and exp_entry is not None:
+            prefix = "[WORKSPACE_FACT] " if exp_entry.kind == "workspace_fact" else f"[{exp_entry.dimension}] "
+            bullet_part = f"- {prefix}When {exp_entry.cue}: {exp_entry.lesson}"
+        if not bullet_part:
+            return
 
         existing = ""
         lessons_file = _get_lessons_file()
         if lessons_file.exists():
             existing = lessons_file.read_text(encoding="utf-8")
+
+        existing_keys = {lesson_key(b) for b in parse_lesson_bullets(existing)}
+        novel_lines: list[str] = []
+        for ln in bullet_part.splitlines():
+            s = ln.strip()
+            if s.startswith("- "):
+                k = lesson_key(s)
+                if k in existing_keys:
+                    continue
+                existing_keys.add(k)
+            novel_lines.append(ln)
+
+        novel_body = "\n".join(novel_lines).strip()
+        if not novel_body:
+            return
+
+        # Feature 2: tag with timestamp and model for staleness decay
+        ts = int(time.time())
+        model_tag = f" [{model}]" if model else ""
+        header = f"\n## Lessons from run ({outcome}) — {task[:80]}{model_tag} @{ts}\n"
+        entry = header + novel_body + "\n"
 
         combined = existing + "\n" + entry
 
@@ -301,16 +363,28 @@ def load_lessons(max_chars: int = _MAX_LESSONS_CHARS, max_age_s: int = 0) -> str
 
 
 def build_lesson_preamble() -> str:
-    """Build a system prompt section with past lessons, if any exist."""
+    """Build a system prompt section with past lessons and auto-wired skill triggers."""
     lessons = load_lessons()
-    if not lessons:
+    triggers_file = _get_clawagents_dir() / "skill-triggers.md"
+    triggers = ""
+    if triggers_file.is_file():
+        try:
+            triggers = triggers_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            triggers = ""
+    if not lessons and not triggers:
         return ""
-    return (
-        "\n\n## Lessons from Past Runs\n"
-        "These lessons were extracted from previous agent runs. "
-        "Apply them to avoid repeating past mistakes:\n\n"
-        f"{lessons}\n"
-    )
+    parts: list[str] = []
+    if lessons:
+        parts.append(
+            "\n\n## Lessons from Past Runs\n"
+            "These lessons were extracted from previous agent runs. "
+            "Apply them to avoid repeating past mistakes:\n\n"
+            f"{lessons}\n"
+        )
+    if triggers:
+        parts.append(f"\n\n{triggers}\n")
+    return "".join(parts)
 
 
 def build_rethink_with_lessons(
@@ -325,7 +399,6 @@ def build_rethink_with_lessons(
     """
     parts = [generic_rethink]
 
-    # Feature 3: format-specific guidance
     if format_failure_count > 0 and format_failure_count >= logic_failure_count:
         parts.append(
             "\n\n## Format Error Guidance\n"
@@ -355,10 +428,28 @@ def build_rethink_with_lessons(
     return "\n".join(parts)
 
 
-# ─── Lesson bullet utilities (shared with promotion index) ───────────────────
+def classify_lesson_dimension(bullet: str) -> tuple[str, str]:
+    """Return `(dimension, kind)` for a lesson bullet (`INV|DOM`, `procedure|workspace_fact`)."""
+    raw = (bullet or "").strip().lstrip("- ").strip()
+    upper = raw.upper()
+    if upper.startswith("[WORKSPACE_FACT]") or "in this workspace" in raw.lower():
+        return "DOM", "workspace_fact"
+    if upper.startswith("[DOM]"):
+        return "DOM", "procedure"
+    if upper.startswith("[INV]"):
+        return "INV", "procedure"
+    return "INV", "procedure"
+
+
+def strip_lesson_tag(text: str) -> str:
+    """Strip leading `[INV]`, `[DOM]`, or `[WORKSPACE_FACT]` tag from a lesson bullet."""
+    import re as _re
+
+    return _re.sub(r"^\s*-\s*\[(?:INV|DOM|WORKSPACE_FACT)\]\s*", "", text.strip(), flags=_re.I).lstrip("- ").strip()
+
 
 def normalize_lesson(text: str) -> str:
-    return " ".join(text.strip().lstrip("- ").lower().split())
+    return " ".join(strip_lesson_tag(text).lower().split())
 
 
 def lesson_key(text: str) -> str:

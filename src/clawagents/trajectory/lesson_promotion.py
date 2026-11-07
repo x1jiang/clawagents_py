@@ -8,10 +8,13 @@ import time
 from pathlib import Path
 from typing import Any
 
+from clawagents.trajectory.harness_surface import ExperienceEntry, parse_experience_reply
 from clawagents.trajectory.lessons import (
+    classify_lesson_dimension,
     lesson_key,
     parse_lesson_bullets,
     slugify_lesson_name,
+    strip_lesson_tag,
 )
 
 logger = logging.getLogger(__name__)
@@ -55,11 +58,19 @@ def record_lessons_in_index(new_lessons_md: str, workspace: Path) -> dict[str, d
     updated: dict[str, dict[str, Any]] = {}
 
     for bullet in parse_lesson_bullets(new_lessons_md):
-        key = lesson_key(bullet)
+        dim, kind = classify_lesson_dimension(bullet)
+        if kind == "workspace_fact":
+            # Harness² rule: workspace-specific facts stay anchored in workspace memory,
+            # never promoted into portable domain skills.
+            continue
+        clean_text = strip_lesson_tag(bullet)
+        key = lesson_key(clean_text)
         entry = lessons.get(key)
         if entry is None:
             entry = {
-                "text": bullet,
+                "text": clean_text,
+                "dimension": dim,
+                "kind": kind,
                 "count": 0,
                 "first_seen": now,
                 "last_seen": now,
@@ -68,7 +79,35 @@ def record_lessons_in_index(new_lessons_md: str, workspace: Path) -> dict[str, d
             lessons[key] = entry
         entry["count"] = int(entry.get("count", 0)) + 1
         entry["last_seen"] = now
-        entry["text"] = bullet
+        entry["text"] = clean_text
+        entry["dimension"] = dim
+        updated[key] = entry
+
+    exp: ExperienceEntry | None = parse_experience_reply(new_lessons_md)
+    if exp is not None and exp.kind == "procedure":
+        exp_text = f"When {exp.cue}: {exp.lesson}"
+        key = lesson_key(exp_text)
+        entry = lessons.get(key)
+        if entry is None:
+            entry = {
+                "text": exp_text,
+                "cue": exp.cue,
+                "lesson": exp.lesson,
+                "evidence": exp.evidence,
+                "confidence": exp.confidence,
+                "dimension": exp.dimension,
+                "kind": exp.kind,
+                "count": 0,
+                "first_seen": now,
+                "last_seen": now,
+                "promoted_proposal_id": None,
+            }
+            lessons[key] = entry
+        # High-confidence causal <experience> entries with non-confounded evidence
+        # earn immediate promotion without waiting for 3 blind repetitions.
+        bump = _DEFAULT_MIN_OCCURRENCES if exp.confidence.lower().startswith("high") else 1
+        entry["count"] = int(entry.get("count", 0)) + bump
+        entry["last_seen"] = now
         updated[key] = entry
 
     _save_index(workspace, index)
@@ -108,25 +147,36 @@ def maybe_promote_recurring_lessons(
             continue
 
         text = str(entry.get("text", ""))
-        name = slugify_lesson_name(text)
+        cue = str(entry.get("cue", "")).strip()
+        dim = str(entry.get("dimension", "INV")).strip() or "INV"
+        ev = str(entry.get("evidence", "")).strip()
+        name = slugify_lesson_name(cue or text)
         if name in existing_names:
             index["lessons"][key]["promoted_proposal_id"] = "existing"
             entry["promoted_proposal_id"] = "existing"
             continue
 
+        desc = (cue or text)[:150].replace("\n", " ").strip()
         body = (
+            f"---\n"
+            f"name: {name}\n"
+            f"description: {desc}\n"
+            f"dimension: {dim}\n"
+            f"---\n\n"
             f"# {name.replace('-', ' ').title()}\n\n"
-            f"Recurring lesson promoted from PTRL (seen {count} times).\n\n"
-            f"## Guidance\n- {text}\n\n"
-            f"## Evidence\nExtracted from lessons.md after run: {task[:120]}\n"
+            f"Promoted from PTRL / Harness² `{dim}` dimension (seen {count} times).\n\n"
+            + (f"## Situation Trigger (Cue)\n{cue}\n\n" if cue else "")
+            + f"## Guidance\n- {text}\n\n"
+            f"## Evidence\n"
+            + (f"{ev}\n" if ev else f"Extracted from lessons.md after run: {task[:120]}\n")
         )
         try:
             proposal = service.create(
                 name=name,
-                description=text[:200],
+                description=desc,
                 body=body,
-                goal="Automated promotion from recurring PTRL lesson",
-                evidence=f"lesson_key={key}; occurrences={count}",
+                goal=f"Automated Harness² [{dim}] promotion from PTRL lesson",
+                evidence=ev or f"lesson_key={key}; occurrences={count}",
             )
             proposal_id = proposal.get("id")
             if proposal_id:

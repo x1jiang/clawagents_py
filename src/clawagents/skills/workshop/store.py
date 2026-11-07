@@ -17,6 +17,7 @@ from clawagents.skills.workshop.impact import (
 )
 from clawagents.skills.workshop.scanner import scan_proposal_content, support_path_findings
 from clawagents.skills.workshop.types import SkillProposalRecord, SupportFile
+from clawagents.trajectory.harness_surface import ensure_workspace_skill_trigger
 
 
 def _sha256_text(text: str) -> str:
@@ -194,7 +195,7 @@ class SkillWorkshopStore:
         return _sha256_text(_read_text(path))
 
     def save_rollback(self, skill_name: str, snapshot: dict[str, Any]) -> str:
-        rollback_id = f"{skill_name}-{int(time.time())}"
+        rollback_id = f"{skill_name}-{int(time.time())}-{uuid.uuid4().hex[:6]}"
         path = self.rollback_dir / f"{rollback_id}.json"
         path.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
         return rollback_id
@@ -232,6 +233,31 @@ class SkillWorkshopStore:
             dest = skill_root / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(content, encoding="utf-8")
+        if not snapshot.get("files"):
+            self._remove_skill_trigger(name)
+
+    def _existing_skill_support_paths(self, skill_name: str | None) -> set[str]:
+        if not skill_name:
+            return set()
+        skill_root = self.skills_dir / skill_name
+        if not skill_root.is_dir():
+            return set()
+        return {
+            p.relative_to(skill_root).as_posix()
+            for p in skill_root.rglob("*")
+            if p.is_file() and p.name != "SKILL.md"
+        }
+
+    def _remove_skill_trigger(self, skill_name: str) -> None:
+        trigger_path = self.workspace / ".clawagents" / "skill-triggers.md"
+        if not trigger_path.is_file():
+            return
+        lines = [
+            ln
+            for ln in trigger_path.read_text(encoding="utf-8").splitlines()
+            if f"`{skill_name}`" not in ln
+        ]
+        trigger_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
     def apply_proposal(self, proposal_id: str) -> tuple[bool, str, Optional[str]]:
         rec = self.get(proposal_id)
@@ -247,12 +273,18 @@ class SkillWorkshopStore:
         body = self.proposal_body(proposal_id)
         pairs, path_findings = self._support_snapshot(proposal_id)
         findings = list(path_findings)
+        skill_name = rec.target_skill if rec.action == "update" and rec.target_skill else rec.name
         findings.extend(
-            scan_proposal_content(rec.name, rec.description, body, pairs)
+            scan_proposal_content(
+                skill_name,
+                rec.description,
+                body,
+                pairs,
+                existing_support_paths=self._existing_skill_support_paths(skill_name),
+            )
         )
         if findings:
             return False, f"scan blocked apply: {'; '.join(dict.fromkeys(findings))}", None
-        skill_name = rec.target_skill if rec.action == "update" else rec.name
         rollback_id = self.save_rollback(skill_name, self.snapshot_skill(skill_name))
         skill_root = self.skills_dir / skill_name
         skill_root.mkdir(parents=True, exist_ok=True)
@@ -262,6 +294,7 @@ class SkillWorkshopStore:
             dest = skill_root.joinpath(*parts)
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(content, encoding="utf-8")
+        ensure_workspace_skill_trigger(self.workspace, skill_name, rec.description)
         self.update_status(proposal_id, "applied")
         return True, f"applied skill {skill_name}", rollback_id
 

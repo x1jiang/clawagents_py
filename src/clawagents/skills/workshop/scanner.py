@@ -6,6 +6,12 @@ import re
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from clawagents.skills.workshop.types import SUPPORT_FOLDERS
+from clawagents.trajectory.harness_surface import (
+    GRADER_VERDICT_MARKERS,
+    check_python_compiles,
+    check_script_references,
+    parse_frontmatter_fields,
+)
 
 MAX_SKILL_BYTES = 40_000
 MAX_DESCRIPTION_BYTES = 160
@@ -52,7 +58,14 @@ def support_path_findings(path: str, support_root: Path | None = None) -> list[s
     return findings
 
 
-def scan_proposal_content(name: str, description: str, body: str, support_files: list[tuple[str, str]]) -> list[str]:
+def scan_proposal_content(
+    name: str,
+    description: str,
+    body: str,
+    support_files: list[tuple[str, str]],
+    *,
+    existing_support_paths: set[str] | frozenset[str] = frozenset(),
+) -> list[str]:
     findings: list[str] = []
     if not name or not re.match(r"^[a-z0-9][a-z0-9_-]{0,63}$", name):
         findings.append("skill name must be lowercase alphanumeric with hyphens/underscores")
@@ -62,12 +75,48 @@ def scan_proposal_content(name: str, description: str, body: str, support_files:
         findings.append(f"proposal body exceeds {MAX_SKILL_BYTES} bytes")
     if len(support_files) > MAX_SUPPORT_FILES:
         findings.append(f"too many support files (max {MAX_SUPPORT_FILES})")
+
+    # Harness² frontmatter rule: if YAML frontmatter defines `name:`, it must match
+    # the skill directory name, otherwise it overrides the directory name at load
+    # and breaks trigger lines.
+    fm = parse_frontmatter_fields(body)
+    fm_name = fm.get("name")
+    if fm_name and name and fm_name != name:
+        findings.append(
+            f"frontmatter name '{fm_name}' does not match skill name '{name}' "
+            "(overrides directory name at load)"
+        )
+
+    available_scripts: set[str] = set(existing_support_paths)
     for path, content in support_files:
         if _SUSPICIOUS.search(content):
             findings.append(f"suspicious pattern in support file {path}")
         if len(content.encode("utf-8")) > MAX_SUPPORT_FILE_BYTES:
             findings.append(f"support file too large: {path}")
-        findings.extend(support_path_findings(path))
+        path_errs = support_path_findings(path)
+        findings.extend(path_errs)
+        normalized_rel = path.replace("\\", "/").strip("/")
+        available_scripts.add(normalized_rel)
+        if not path_errs and normalized_rel.endswith(".py"):
+            findings.extend(check_python_compiles(normalized_rel, content))
+        for marker in GRADER_VERDICT_MARKERS:
+            if marker in content:
+                findings.append(f"grader verdict marker {marker!r} in support file {path}")
+
+    # Harness² script-reference rule: every `python scripts/<file>.py` invoked by
+    # SKILL.md must ship with the skill (or already exist in the target skill).
+    findings.extend(
+        check_script_references(
+            f"skills/{name}/SKILL.md",
+            body,
+            available_scripts,
+            skill_name=name,
+        )
+    )
+
     if _SUSPICIOUS.search(body):
         findings.append("suspicious pattern in proposal body")
+    for marker in GRADER_VERDICT_MARKERS:
+        if marker in body:
+            findings.append(f"grader verdict marker {marker!r} in proposal body")
     return findings
