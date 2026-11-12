@@ -154,18 +154,15 @@ def _resolve_secret_overlay_paths(
             for hit in ws.glob(pat):
                 if hit.is_file():
                     found.add(str(hit.resolve()))
-            # Fail-closed: bind missing .env even when absent
-            if pat in {".env", ".env.*"} or pat.startswith(".env"):
-                env_candidate = ws / ".env"
-                found.add(str(env_candidate.resolve()))
             continue
         target = (ws / pat).resolve()
         if target.is_file():
             found.add(str(target))
-        elif target.parent.exists():
-            found.add(str(target))
-    # Always overlay workspace .env when secret deny is enabled
-    found.add(str((ws / ".env").resolve()))
+    # Only files that exist are returned. bwrap can only mask an existing
+    # path, and creating a placeholder to mask left an empty ``.env`` (or
+    # ``id_rsa``, …) behind in the user's project after every command — which
+    # dotenv loaders and ``git status`` then picked up. A file that does not
+    # exist holds no secret to hide.
     return sorted(found)
 
 
@@ -573,23 +570,21 @@ class ProfileBackend:
                 f"profile={self._profile.name}\n"
                 + profile_text
             )
-            profile_path = Path(self.cwd) / ".clawagents" / "seatbelt.sb"
-            try:
-                profile_path.parent.mkdir(parents=True, exist_ok=True)
-                profile_path.write_text(profile_text, encoding="utf-8")
-            except OSError as exc:
-                self.profile_warnings.append(f"seatbelt profile write failed: {exc}")
-                if self._profile.require_binary:
-                    raise
-                return command
+            # Pass the profile inline (``-p``) rather than via a file. It used
+            # to be written to ``{cwd}/.clawagents/seatbelt.sb`` — inside the
+            # very directory the profile makes writable — so a sandboxed
+            # background job could rewrite it to ``(allow default)`` and the
+            # next command would run unsandboxed. Inline also means concurrent
+            # agents with different profiles no longer share one file.
+            #
             # Use module-level ``shlex`` only — never ``import shlex`` in this
             # method (local import makes shlex unbound on other branches).
             return " ".join(
                 shlex.quote(p)
                 for p in [
                     binary,
-                    "-f",
-                    str(profile_path),
+                    "-p",
+                    profile_text,
                     "/bin/sh",
                     "-c",
                     command,
@@ -616,9 +611,8 @@ class ProfileBackend:
                 ):
                     try:
                         sp = Path(secret_path)
-                        if not sp.exists():
-                            sp.parent.mkdir(parents=True, exist_ok=True)
-                            sp.touch(exist_ok=True)
+                        if not sp.is_file():
+                            continue  # never create files in the workspace
                         secret_overlays.extend(["--ro-bind", "/dev/null", str(sp)])
                     except OSError as exc:
                         self.profile_warnings.append(

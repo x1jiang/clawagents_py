@@ -100,8 +100,9 @@ async def test_profile_soft_fallback_warning_surfaces(tmp_path, monkeypatch):
     assert "soft-fallback-ok" in r.output
 
 
-def test_bwrap_overlay_touches_missing_env(tmp_path, monkeypatch):
-    """Missing .env must not crash bwrap wrap — placeholder is created."""
+def test_bwrap_overlay_skips_missing_env(tmp_path, monkeypatch):
+    """Missing .env must not crash bwrap wrap, and no placeholder is created
+    (a created one used to be left behind in the user's project)."""
     from unittest.mock import patch
 
     from clawagents.sandbox.local import LocalBackend
@@ -127,4 +128,5 @@ def test_bwrap_overlay_touches_missing_env(tmp_path, monkeypatch):
     ):
         wrapped = sb.wrap_command("echo ok", cwd=str(tmp_path))
     assert "bwrap" in wrapped or str(fake_bwrap) in wrapped
-    assert (tmp_path / ".env").is_file()
+    assert not (tmp_path / ".env").exists()
+    assert "/dev/null" not in wrapped, "nothing to mask, so no overlay bind"

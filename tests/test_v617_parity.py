@@ -286,10 +286,11 @@ def test_bwrap_secret_overlay_paths(tmp_path: Path):
     )
     assert any(p.endswith(".env") for p in paths)
     assert any(p.endswith("token.pem") for p in paths)
-    # Missing .env path still included for fail-closed bind
+    # A missing .env is not returned: masking it would require creating it,
+    # which left an empty .env behind in the user's project.
     (tmp_path / ".env").unlink()
     paths2 = _resolve_secret_overlay_paths(str(tmp_path), (".env",))
-    assert any(p.endswith(".env") for p in paths2)
+    assert not any(p.endswith(".env") for p in paths2)
 
 
 def test_sandbox_project_add_only(tmp_path: Path):

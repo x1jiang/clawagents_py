@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import ast
 import re
+import sys
+import time
 import traceback
 from typing import Any, Callable
 
@@ -49,6 +51,13 @@ def extract_code_action(text: str) -> str | None:
 class _ToolsProxy:
     """Sync facade over ToolRegistry for CodeAct sandboxes."""
 
+    # The permission gate lives in a closure, not in instance attributes: a
+    # snippet that reaches the proxy must not be able to read the registry or
+    # swap out ``before_tool`` (``tools._before_tool = None`` used to disable
+    # Plan / read-only / approval gating). ``__slots__`` + ``__setattr__``
+    # make the instance immutable from snippet code.
+    __slots__ = ("calls", "_tool_seconds", "_invoke")
+
     def __init__(
         self,
         registry: ToolRegistry,
@@ -57,21 +66,21 @@ class _ToolsProxy:
         run_context: Any = None,
         run_async: Callable[[Any], Any],
     ) -> None:
-        self._registry = registry
-        self._before_tool = before_tool
-        self._run_context = run_context
-        self._run_async = run_async
-        self.calls: list[dict[str, Any]] = []
+        calls: list[dict[str, Any]] = []
+        tool_seconds = [0.0]
 
-    def __getattr__(self, name: str) -> Callable[..., str]:
-        if name.startswith("_"):
-            raise AttributeError(name)
+        def _invoke(name: str, kwargs: dict[str, Any]) -> str:
+            started = time.monotonic()
+            try:
+                return _run(name, kwargs)
+            finally:
+                tool_seconds[0] += time.monotonic() - started
 
-        def _call(**kwargs: Any) -> str:
+        def _run(name: str, kwargs: dict[str, Any]) -> str:
             args = dict(kwargs)
-            if self._before_tool is not None:
+            if before_tool is not None:
                 try:
-                    result = self._before_tool(name, args)
+                    result = before_tool(name, args)
                     if isinstance(result, bool) and not result:
                         return "[blocked] denied"
                     if result is not None and hasattr(result, "allowed"):
@@ -81,14 +90,33 @@ class _ToolsProxy:
                             args = result.updated_args
                 except Exception as exc:
                     return f"[before_tool error] {exc}"
-            tool_result: ToolResult = self._run_async(
-                self._registry.execute_tool(name, args, run_context=self._run_context)
+            tool_result: ToolResult = run_async(
+                registry.execute_tool(name, args, run_context=run_context)
             )
-            self.calls.append({"tool": name, "args": args, "success": tool_result.success})
+            calls.append({"tool": name, "args": args, "success": tool_result.success})
             if not tool_result.success:
                 return f"[error] {tool_result.error or tool_result.output}"
             out = tool_result.output
             return out if isinstance(out, str) else str(out)
+
+        object.__setattr__(self, "calls", calls)
+        # Wall time spent inside tool calls; excluded from the snippet budget.
+        object.__setattr__(self, "_tool_seconds", tool_seconds)
+        object.__setattr__(self, "_invoke", _invoke)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise AttributeError("the CodeAct tools proxy is read-only")
+
+    def __delattr__(self, name: str) -> None:
+        raise AttributeError("the CodeAct tools proxy is read-only")
+
+    def __getattr__(self, name: str) -> Callable[..., str]:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        invoke = self._invoke
+
+        def _call(**kwargs: Any) -> str:
+            return invoke(name, kwargs)
 
         return _call
 
@@ -104,6 +132,7 @@ _FORBIDDEN_NAMES = frozenset({
     "open", "eval", "exec", "compile", "input", "breakpoint",
     "globals", "locals", "vars", "getattr", "setattr", "delattr",
     "memoryview", "help", "exit", "quit", "license", "credits",
+    "BaseException",
 })
 
 # The only builtins CodeAct snippets may use. exec() auto-injects the FULL
@@ -128,6 +157,56 @@ def _safe_builtins() -> dict[str, Any]:
         if val is not None or name == "None":
             allowed[name] = val
     return allowed
+
+
+class CodeActTimeout(BaseException):
+    """The snippet's own code ran longer than ``timeout_s``.
+
+    Derives from ``BaseException`` so a snippet's ``except Exception`` cannot
+    swallow it and keep spinning; the AST gate rejects bare ``except:`` and
+    ``BaseException`` for the same reason.
+    """
+
+
+class _snippet_deadline:
+    """Abort a runaway snippet (``while True: pass``) after ``timeout_s``.
+
+    Uses a line-trace hook, so it works on whichever thread runs the snippet
+    and needs no signals. Time spent inside ``tools.<name>()`` calls is not
+    charged — those have their own timeouts and may legitimately run long.
+    A single long C-level call (``sum(range(10**12))``) emits no line events
+    and is not interruptible this way; this is a guard against accidental
+    spins, not a hard sandbox.
+    """
+
+    def __init__(self, timeout_s: float, tools: _ToolsProxy) -> None:
+        self._timeout_s = timeout_s
+        self._tools = tools
+        self._prev: Any = None
+        self._start = 0.0
+
+    def _trace(self, frame: Any, event: str, arg: Any) -> Any:
+        if frame.f_code.co_filename != "<codeact>":
+            return None
+        if event == "line":
+            spent = time.monotonic() - self._start - self._tools._tool_seconds[0]
+            if spent > self._timeout_s:
+                raise CodeActTimeout(
+                    f"CodeAct action exceeded {self._timeout_s:g}s of its own "
+                    "execution time (excluding tool calls)"
+                )
+        return self._trace
+
+    def __enter__(self) -> "_snippet_deadline":
+        if self._timeout_s and self._timeout_s > 0:
+            self._prev = sys.gettrace()
+            self._start = time.monotonic()
+            sys.settrace(self._trace)
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        if self._timeout_s and self._timeout_s > 0:
+            sys.settrace(self._prev)
 
 
 def run_code_action(
@@ -171,15 +250,28 @@ def run_code_action(
             if isinstance(node, (ast.Import, ast.ImportFrom)):
                 raise ValueError("imports are not allowed in CodeAct actions")
             if isinstance(node, ast.Attribute) and isinstance(node.attr, str):
-                if node.attr.startswith("__"):
-                    raise ValueError("dunder attribute access is not allowed")
+                # Any underscore-prefixed attribute, not just dunders:
+                # single-underscore names reach object internals (the tools
+                # proxy's private state, ``gi_frame``-style escapes, …).
+                if node.attr.startswith("_"):
+                    raise ValueError(
+                        "private or dunder attribute access is not allowed"
+                    )
+            if isinstance(node, ast.ExceptHandler) and node.type is None:
+                raise ValueError(
+                    "bare 'except:' is not allowed in CodeAct actions "
+                    "(catch Exception instead)"
+                )
             if isinstance(node, ast.Name) and node.id in _FORBIDDEN_NAMES:
                 raise ValueError(
                     f"name '{node.id}' is not allowed in CodeAct actions "
                     "(use tools.<name>() so permissions apply)"
                 )
-        with contextlib.redirect_stdout(stdout):
-            exec(compile(tree, "<codeact>", "exec"), glb, loc)  # noqa: S102
+        compiled = compile(tree, "<codeact>", "exec")
+        with contextlib.redirect_stdout(stdout), _snippet_deadline(timeout_s, tools):
+            exec(compiled, glb, loc)  # noqa: S102
+    except CodeActTimeout as exc:
+        err = f"CodeActTimeout: {exc}"
     except Exception:
         err = traceback.format_exc(limit=8)
 

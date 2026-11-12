@@ -83,7 +83,10 @@ class ChannelRouter:
             asyncio.ensure_future(self._dispatch(msg))
             return
 
-        key = f"{msg.channel_id}:{msg.conversation_id}"
+        # Batch per sender, not per conversation: the combined message carries
+        # only the last sender's id, so merging across senders would let an
+        # unlisted group member ride through ``on_inbound`` on someone else's id.
+        key = f"{msg.channel_id}:{msg.conversation_id}:{msg.sender_id}"
         batch = self._debounce_batches.setdefault(key, [])
         batch.append(msg)
 

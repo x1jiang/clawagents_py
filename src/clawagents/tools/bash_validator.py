@@ -142,6 +142,12 @@ def _split_first_token(command: str) -> tuple[str, List[str]]:
         tokens = shlex.split(head, comments=False, posix=True)
     except ValueError:
         tokens = head.split()
+    # Shell grammar that precedes the real command inside one clause:
+    # ``{ rm -rf ~; }``, ``! rm -rf ~``, ``if true; then rm -rf /; fi``,
+    # ``while true; do rm -rf /; done``. Classifying the keyword itself
+    # ("{ not specifically classified; default ALLOW") hid the command.
+    while tokens and tokens[0] in _SHELL_PREFIX_TOKENS:
+        tokens = tokens[1:]
     if not tokens:
         return "", []
     # Strip a leading backslash used to bypass a shell alias (``\rm`` runs the
@@ -149,7 +155,21 @@ def _split_first_token(command: str) -> tuple[str, List[str]]:
     program = tokens[0]
     if program.startswith("\\") and len(program) > 1:
         program = program[1:]
+    # ``/bin/rm`` and ``/usr/bin/find`` are the same programs as ``rm`` and
+    # ``find``; classify by basename so an absolute path is not a free pass.
+    if "/" in program and not program.startswith("$"):
+        base = posixpath.basename(program.rstrip("/"))
+        if base:
+            program = base
+    if program != tokens[0]:
+        # Sub-classifiers read ``tokens[0]`` (chmod/chown, packages).
+        tokens = [program, *tokens[1:]]
     return program, tokens
+
+
+_SHELL_PREFIX_TOKENS: frozenset[str] = frozenset({
+    "{", "!", "if", "then", "elif", "else", "while", "until", "do",
+})
 
 
 # ─── Launcher / wrapper commands ─────────────────────────────────────────
@@ -281,6 +301,13 @@ def _is_root_like_path(raw_path: str) -> bool:
     """
     p = raw_path.strip().strip("'\"").rstrip("/") or "/"
     if p in _ROOT_LIKE_LITERALS:
+        return True
+    # ``/.``, ``//``, ``/etc/..`` all normalise to the root; ``../..`` and
+    # ``./..`` climb out of the working directory just like a bare ``..``.
+    collapsed = posixpath.normpath(re.sub(r"/{2,}", "/", p))
+    if collapsed == "/" or (
+        not p.startswith("/") and all(seg == ".." for seg in collapsed.split("/"))
+    ):
         return True
     if p.startswith("~") or p.startswith("$HOME") or p.startswith("${HOME}"):
         return True
@@ -519,6 +546,18 @@ _SHELL_C_RE = re.compile(
     r"\b(?:bash|sh|zsh|dash|ksh|fish)\s+(?:-\S+\s+)*-c\s+"
     r"(?:'([^']*)'|\"([^\"]*)\"|(\S+))"
 )
+# ``sh <<< 'rm -rf /'``: the here-string is the script the shell runs.
+_SHELL_HERESTRING_RE = re.compile(
+    r"\b(?:bash|sh|zsh|dash|ksh|fish)\b[^|;&\n]*?<<<\s*"
+    r"(?:'([^']*)'|\"([^\"]*)\"|(\S+))"
+)
+# Redirect (``>`` / ``>>``) into root-owned config — same risk class as
+# ``tee /etc/passwd``. ``2>/dev/null`` and friends are unaffected.
+_REDIRECT_SENSITIVE_RE = re.compile(
+    r">+\s*['\"]?(?:/etc/(?:passwd|shadow|sudoers|hosts|ssh/|pam\.d/)"
+    r"|/root/|/var/spool/cron/)",
+    re.I,
+)
 # Redirect into an unquoted variable: we can't statically know the target.
 _REDIRECT_TO_VAR_RE = re.compile(r">+\s*\$\{?[A-Za-z_][A-Za-z0-9_]*\}?")
 
@@ -552,11 +591,12 @@ def _collect_clauses(command: str) -> List[str]:
             inner = _strip_subshell(inner)
             if inner:
                 work.append(inner)
-        for m in _SHELL_C_RE.finditer(s):
-            inner = m.group(1) or m.group(2) or m.group(3) or ""
-            inner = _strip_subshell(inner)
-            if inner:
-                work.append(inner)
+        for pattern in (_SHELL_C_RE, _SHELL_HERESTRING_RE):
+            for m in pattern.finditer(s):
+                inner = m.group(1) or m.group(2) or m.group(3) or ""
+                inner = _strip_subshell(inner)
+                if inner:
+                    work.append(inner)
         for part in _CLAUSE_SEP_RE.split(s):
             part = _strip_subshell(part)
             if not part:
@@ -590,6 +630,12 @@ def _validate_single_clause(raw: str, _depth: int = 0) -> BashDecision:
             "tee into a privileged config path can subvert system trust",
             "tee /etc/...",
         )
+    if _REDIRECT_SENSITIVE_RE.search(raw):
+        return BashDecision(
+            CommandCategory.SYSTEM_ADMIN, Decision.BLOCK,
+            "redirect into a privileged config path can subvert system trust",
+            "> /etc/...",
+        )
     if _REDIRECT_TO_VAR_RE.search(raw):
         # We can't statically resolve the variable's value — flag for
         # human review rather than blocking outright.
@@ -604,6 +650,25 @@ def _validate_single_clause(raw: str, _depth: int = 0) -> BashDecision:
         return BashDecision(
             CommandCategory.UNKNOWN, Decision.ALLOW,
             "no program name found", "",
+        )
+
+    # ``x=rm; $x -rf /``: the program name is only known at run time. If the
+    # arguments have a destructive ``rm`` shape on a root-like target, refuse;
+    # otherwise flag it for review rather than waving it through as UNKNOWN.
+    if program.startswith("$"):
+        as_rm = _classify_rm(["rm", *tokens[1:]])
+        if as_rm is not None and as_rm.decision == Decision.BLOCK:
+            return BashDecision(
+                CommandCategory.DESTRUCTIVE, Decision.BLOCK,
+                "command name comes from a variable and its arguments match "
+                "a recursive/forced delete of a root-like target",
+                "$VAR -rf <root>",
+            )
+        return BashDecision(
+            CommandCategory.UNKNOWN, Decision.WARN,
+            "command name comes from a variable expansion and cannot be "
+            "classified — verify what it runs",
+            "$VAR ...",
         )
 
     # Launcher/wrapper prefixes (``env``, ``timeout``, ``eval``, ``sudo``, …)

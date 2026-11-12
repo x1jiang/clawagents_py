@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import signal
 from pathlib import Path
 from typing import Any
 
@@ -174,31 +173,63 @@ class LocalBackend:
                     break
                 _feed(stream_name, chunk)
 
-        async def _run() -> int:
-            await asyncio.gather(
-                _pump("stdout", proc.stdout),
-                _pump("stderr", proc.stderr),
-                proc.wait(),
-            )
-            return proc.returncode or 0
+        from clawagents.utils.proc_kill import (
+            PIPE_DRAIN_GRACE_S,
+            PIPE_HELD_NOTE,
+            kill_process_tree,
+            wait_for_exit,
+        )
+
+        pumps = [
+            asyncio.create_task(_pump("stdout", proc.stdout)),
+            asyncio.create_task(_pump("stderr", proc.stderr)),
+        ]
+
+        async def _settle_pumps() -> bool:
+            """Give the pumps a short grace to reach EOF; True if any had to be cut off."""
+            _done, pending = await asyncio.wait(pumps, timeout=PIPE_DRAIN_GRACE_S)
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            return bool(pending)
 
         killed = False
+        pipe_held = False
         try:
-            exit_code = await asyncio.wait_for(_run(), timeout=timeout_s)
-        except asyncio.TimeoutError:
-            killed = True
-            exit_code = 1
             try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError, OSError):
+                # wait_for_exit, not proc.wait(): the latter also waits for
+                # the pipes to close.
+                exit_code = await asyncio.wait_for(wait_for_exit(proc), timeout=timeout_s)
+                # Exited — but a background child may still hold the pipes
+                # open (``server & echo started``). Don't wait for it.
+                pipe_held = await _settle_pumps()
+            except asyncio.TimeoutError:
+                killed = True
+                exit_code = 1
+                kill_process_tree(proc)
                 try:
-                    proc.kill()
-                except ProcessLookupError:
+                    await asyncio.wait_for(wait_for_exit(proc), timeout=5)
+                except (asyncio.TimeoutError, ProcessLookupError):
                     pass
-            try:
-                await proc.wait()
-            except ProcessLookupError:
-                pass
+                await _settle_pumps()
+        except BaseException:
+            # Cancelled (client disconnected, run aborted) or failed: the
+            # timeout branch above is not the only way out, and leaving here
+            # without killing the group left the command running detached.
+            kill_process_tree(proc)
+            for task in pumps:
+                task.cancel()
+            for acc in (stdout_acc, stderr_acc):
+                spooled = acc.close()
+                if spooled:
+                    try:
+                        os.unlink(spooled)
+                    except OSError:
+                        pass
+            raise
+        if pipe_held:
+            stderr_acc.append(("\n" if str(stderr_acc) else "") + PIPE_HELD_NOTE)
         stdout_path = stdout_acc.close()
         stderr_path = stderr_acc.close()
         return ExecResult(

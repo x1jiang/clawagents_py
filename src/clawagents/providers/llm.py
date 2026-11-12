@@ -337,6 +337,63 @@ async def _invoke_callback(
         logger.debug("onChunk callback raised — isolated", exc_info=True)
 
 
+class _StreamReplayGuard:
+    """Keep a retried stream from showing the same text twice.
+
+    A stream that fails part-way has already delivered text through
+    ``on_chunk``. The retry starts the response again from the beginning, so
+    forwarding it as-is made consumers show the first part twice.
+
+    Per attempt after the first, incoming text is held back while it merely
+    repeats what was already delivered. Once the new attempt goes past that
+    point only the new part is forwarded. If the new attempt *differs* from
+    what was shown (the usual case — generation is not deterministic), the
+    consumer is told to discard its partial text via the callback's optional
+    ``reset()`` attribute, and the new attempt is delivered from its start.
+    Callbacks without ``reset`` keep the old behaviour for that case.
+    """
+
+    def __init__(self, callback: OnChunkCallback) -> None:
+        self._callback = callback
+        self._delivered = ""  # text the consumer currently shows
+        self._attempt = ""  # text of the current retry attempt so far
+        self._replaying = False
+
+    def begin_attempt(self) -> None:
+        self._replaying = bool(self._delivered)
+        self._attempt = ""
+
+    async def feed(self, text: str) -> None:
+        if not text:
+            return
+        if not self._replaying:
+            self._delivered += text
+            await _invoke_callback(self._callback, text)
+            return
+        self._attempt += text
+        if self._delivered.startswith(self._attempt):
+            return  # still repeating text the consumer already has
+        if self._attempt.startswith(self._delivered):
+            fresh = self._attempt[len(self._delivered):]
+        else:
+            await self._reset()
+            fresh = self._attempt
+        self._delivered = self._attempt
+        self._replaying = False
+        await _invoke_callback(self._callback, fresh)
+
+    async def _reset(self) -> None:
+        reset = getattr(self._callback, "reset", None)
+        if not callable(reset):
+            return
+        try:
+            result = reset()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.debug("onChunk reset raised — isolated", exc_info=True)
+
+
 async def _with_retry(
     tag: str,
     fn: Callable[[], Coroutine[Any, Any, T]],
@@ -1968,6 +2025,11 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
             "openai-responses", base_url=self._base_url, model=self.model
         )
 
+        # De-duplicate text across retry attempts (see _StreamReplayGuard).
+        replay_guard = _StreamReplayGuard(on_chunk)
+        if on_chunk is not None:
+            on_chunk = replay_guard.feed
+
         attempt = 0
         while attempt <= _MAX_RETRIES:
             if attempt > 0:
@@ -1992,6 +2054,7 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
                     pass
                 raise
 
+            replay_guard.begin_attempt()
             chunks: list[str] = []
             reasoning_chunks: list[str] = []
             final_tokens = 0
@@ -2255,6 +2318,11 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
             "openai", base_url=self._base_url, model=self.model
         )
 
+        # De-duplicate text across retry attempts (see _StreamReplayGuard).
+        replay_guard = _StreamReplayGuard(on_chunk)
+        if on_chunk is not None:
+            on_chunk = replay_guard.feed
+
         attempt = 0
         while attempt <= _MAX_RETRIES:
             if attempt > 0:
@@ -2279,6 +2347,7 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
                     pass
                 raise
 
+            replay_guard.begin_attempt()
             chunks: list[str] = []
             thinking_chunks: list[str] = []
             finish_reason: str | None = None
@@ -3416,6 +3485,11 @@ class GeminiProvider(LLMProvider):
         last_error: BaseException | None = None
         breaker = _get_stream_breaker("gemini", model=self.model)
 
+        # De-duplicate text across retry attempts (see _StreamReplayGuard).
+        replay_guard = _StreamReplayGuard(on_chunk)
+        if on_chunk is not None:
+            on_chunk = replay_guard.feed
+
         attempt = 0
         while attempt <= _MAX_RETRIES:
             if attempt > 0:
@@ -3440,6 +3514,7 @@ class GeminiProvider(LLMProvider):
                     pass
                 raise
 
+            replay_guard.begin_attempt()
             chunks: list[str] = []
             final_tokens = 0
             final_prompt_tokens = 0
@@ -4089,6 +4164,11 @@ class AnthropicProvider(_DeferredToolsMixin, LLMProvider):
             model=getattr(self, "model", None) or kwargs.get("model"),
         )
 
+        # De-duplicate text across retry attempts (see _StreamReplayGuard).
+        replay_guard = _StreamReplayGuard(on_chunk)
+        if on_chunk is not None:
+            on_chunk = replay_guard.feed
+
         attempt = 0
         while attempt <= _MAX_RETRIES:
             if attempt > 0:
@@ -4110,6 +4190,7 @@ class AnthropicProvider(_DeferredToolsMixin, LLMProvider):
                     pass
                 raise
 
+            replay_guard.begin_attempt()
             chunks: list[str] = []
             tool_calls: list[NativeToolCall] = []
             current_tool: dict[str, Any] | None = None

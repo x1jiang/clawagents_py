@@ -40,6 +40,12 @@ def test_list_skills_and_retrieve_also_exempt(tmp_path, monkeypatch):
 
 
 def test_syntax_gate_catches_duplicate_js_syntax(tmp_path):
+    import shutil
+
+    import pytest
+
+    if shutil.which("node") is None:
+        pytest.skip("node is not installed; the JS syntax gate cannot run")
     from clawagents.tools.syntax_gate import append_syntax_gate, run_syntax_gate
 
     bad = tmp_path / "server.js"

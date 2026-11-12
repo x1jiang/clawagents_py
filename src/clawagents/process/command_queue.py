@@ -19,6 +19,9 @@ class QueueEntry:
     warn_after_ms: int
     on_wait: Optional[Callable[[float, int], None]] = None
     is_barrier: bool = False
+    # The background task running ``task`` once dispatched. Lets a caller
+    # that stops waiting cancel the work itself, not just its own wait.
+    runner: Optional["asyncio.Task[Any]"] = None
 
 
 @dataclass
@@ -120,10 +123,22 @@ def drain_lane(lane: str):
                         pump()
                     if not entry.future.done():
                         entry.future.set_exception(err)
+                except asyncio.CancelledError:
+                    # CancelledError is not an Exception. Without this branch
+                    # a cancelled command never released its slot, and a lane
+                    # with max_concurrent=1 stayed blocked for good.
+                    completed_current = complete_task(state, task_id, task_generation)
+                    if is_barrier_entry and task_generation == state.generation:
+                        state.barrier_active = False
+                    if completed_current:
+                        pump()
+                    if not entry.future.done():
+                        entry.future.cancel()
 
             # Background execution — keep a strong reference so the task
             # can't be garbage-collected mid-flight.
             _bg = asyncio.create_task(_run_task())
+            entry.runner = _bg
             _background_tasks.add(_bg)
             _bg.add_done_callback(_background_tasks.discard)
 
@@ -156,18 +171,34 @@ async def enqueue_command_in_lane(
     loop = asyncio.get_running_loop()
     future = loop.create_future()
     
-    state.queue.append(QueueEntry(
+    entry = QueueEntry(
         task=task,
         future=future,
         enqueued_at=time.time(),
         warn_after_ms=warn_after_ms,
         on_wait=on_wait
-    ))
-    
+    )
+    state.queue.append(entry)
+
     log_lane_enqueue(cleaned, len(state.queue) + len(state.active_task_ids))
     drain_lane(cleaned)
-    
-    return await future
+
+    try:
+        return await future
+    except asyncio.CancelledError:
+        # The caller gave up (client disconnected, request aborted). The
+        # command runs in its own background task, so cancelling the wait
+        # alone left it running to completion with nobody listening.
+        if entry.runner is not None:
+            if not entry.runner.done():
+                entry.runner.cancel()
+        else:
+            # Still queued: make sure it never starts.
+            try:
+                state.queue.remove(entry)
+            except ValueError:
+                pass
+        raise
 
 
 async def enqueue_command(

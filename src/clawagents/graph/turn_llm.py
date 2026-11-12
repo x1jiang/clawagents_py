@@ -121,6 +121,13 @@ class TurnLLMCaller:
             _record_first_token()
             self._events.typed("assistant_delta", {"delta": chunk})
 
+        def _reset_stream() -> None:
+            # A retried stream diverged from the text already streamed:
+            # consumers should drop the partial assistant text they show.
+            self._events.typed("assistant_reset", {"reason": "stream_retry"})
+
+        on_chunk.reset = _reset_stream  # type: ignore[attr-defined]
+
         if self._hooks.hooks:
             await self._hooks.fire("on_llm_start", resolved_model_name or "", messages)
 

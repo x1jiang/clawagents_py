@@ -1,5 +1,8 @@
+import hmac
 import json
 import os
+import sys
+from urllib.parse import urlsplit
 from typing import Any
 
 from fastapi import FastAPI, Request, Response
@@ -33,8 +36,53 @@ def _check_auth(request: Request) -> bool:
         return True
     auth = request.headers.get("authorization", "")
     if auth.startswith("Bearer "):
-        return auth[7:] == _GATEWAY_API_KEY
-    return request.headers.get("x-api-key", "") == _GATEWAY_API_KEY
+        return _keys_equal(auth[7:], _GATEWAY_API_KEY)
+    return _keys_equal(request.headers.get("x-api-key", ""), _GATEWAY_API_KEY)
+
+
+def _keys_equal(presented: str, expected: str) -> bool:
+    """Constant-time key comparison (no timing oracle on the API key)."""
+    return hmac.compare_digest(presented.encode("utf-8"), expected.encode("utf-8"))
+
+
+def origin_allowed(
+    origin: str | None,
+    host: str | None,
+    cors_origins: list[str],
+) -> bool:
+    """Decide whether a request carrying ``Origin: <origin>`` may drive the agent.
+
+    CORS only stops a page from *reading* a response; a "simple" cross-origin
+    POST (``text/plain`` body, no preflight) still reaches the handler, and
+    CORSMiddleware does not cover WebSockets at all. So any web page the
+    operator visits could start agent runs on an unauthenticated loopback
+    gateway. Browsers always attach ``Origin`` to those requests, while curl
+    / SDK clients send none — so: no ``Origin`` is allowed, and an ``Origin``
+    must be listed in GATEWAY_CORS_ORIGINS or be same-origin with the gateway
+    on a loopback name. The loopback restriction matters: under DNS rebinding
+    an attacker's hostname resolves to 127.0.0.1, making ``Origin`` and
+    ``Host`` agree, so a bare Origin==Host comparison would let it through.
+    """
+    if not origin:
+        return True
+    if cors_origins == ["*"]:
+        return True
+    normalized = origin.strip().rstrip("/").lower()
+    if normalized in {o.rstrip("/").lower() for o in cors_origins}:
+        return True
+    if host:
+        try:
+            parts = urlsplit(normalized)
+            hostname = parts.hostname or ""
+        except ValueError:
+            return False
+        if (
+            parts.netloc
+            and parts.netloc == host.strip().lower()
+            and hostname in _LOOPBACK_HOSTS
+        ):
+            return True
+    return False
 
 
 def create_app() -> tuple:
@@ -65,6 +113,23 @@ def create_app() -> tuple:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def _reject_cross_origin(request: Request, call_next):
+        # Safe methods and CORS preflight pass through; only state-changing
+        # requests (the ones that start agent runs) are origin-checked.
+        if request.method not in ("GET", "HEAD", "OPTIONS") and not origin_allowed(
+            request.headers.get("origin"), request.headers.get("host"), cors_origins
+        ):
+            return Response(
+                content=json.dumps({
+                    "error": "Cross-origin request refused. Add this origin to "
+                             "GATEWAY_CORS_ORIGINS to allow it."
+                }),
+                status_code=403,
+                media_type="application/json",
+            )
+        return await call_next(request)
 
     @app.get("/health")
     async def health():
@@ -239,13 +304,38 @@ def create_app() -> tuple:
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
         )
 
-    attach_websocket(app, llm, _GATEWAY_API_KEY)
+    attach_websocket(
+        app,
+        llm,
+        _GATEWAY_API_KEY,
+        origin_allowed=lambda origin, host: origin_allowed(origin, host, cors_origins),
+    )
 
     return app, llm, active_model
 
 
 # Hosts that are local to this machine and safe to bind without auth.
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def print_bind_warning(bind_host: str, auth_enabled: bool, *, file: Any = None) -> bool:
+    """Warn when the gateway is network-reachable with auth disabled.
+
+    Returns True when the warning was printed.
+    """
+    if bind_host in _LOOPBACK_HOSTS or auth_enabled:
+        return False
+    out = file or sys.stdout
+    print("\n⚠️  WARNING: gateway is bound to a non-loopback address with auth disabled.", file=out)
+    print("   This exposes /chat, /chat/stream, and /ws to anyone who can reach this host.", file=out)
+    print("   Set GATEWAY_API_KEY=<secret> to require Bearer auth, or unset GATEWAY_HOST", file=out)
+    print("   to bind to 127.0.0.1.\n", file=out)
+    return True
+
+
+def resolve_bind_host(host: str | None) -> str:
+    """Public alias of :func:`_resolve_bind_host` for the ``serve`` CLI."""
+    return _resolve_bind_host(host)
 
 
 def _resolve_bind_host(host: str | None) -> str:
@@ -274,12 +364,7 @@ def start_gateway(port: int = 3000, host: str | None = None) -> None:
     print(f"   Auth: {auth_status}")
     print("   Endpoints: POST /chat | POST /chat/stream | WS /ws | GET /queue | GET /health")
 
-    if not is_loopback and not _GATEWAY_API_KEY:
-        print("\n⚠️  WARNING: gateway is bound to a non-loopback address with auth disabled.")
-        print("   This exposes /chat, /chat/stream, and /ws to anyone who can reach this host.")
-        print("   Set GATEWAY_API_KEY=<secret> to require Bearer auth, or unset GATEWAY_HOST")
-        print("   to bind to 127.0.0.1.\n")
-    else:
+    if not print_bind_warning(bind_host, bool(_GATEWAY_API_KEY)):
         print()
 
     uvicorn.run(app, host=bind_host, port=port, log_level="warning")

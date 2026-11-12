@@ -12,11 +12,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hmac
 import json
 import os
 import time
 import secrets
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
 
@@ -29,6 +30,8 @@ from clawagents.gateway.protocol import is_valid_request, make_response, make_ev
 # per LLM call, so an unbounded queue behind a slow client retains hundreds of
 # MB over a long run. Shed past this and report the count once at the end.
 _WS_EVENT_QUEUE_MAX = 10_000
+# Upper bound on flushing queued events to the client when a turn ends.
+_WS_DRAIN_TIMEOUT_S = 5.0
 
 VALID_LANES = {"main", "cron", "subagent", "nested"}
 
@@ -70,16 +73,41 @@ def _push_messages(session: dict, *msgs: dict) -> None:
         del session["messages"][:overflow]
 
 
-def attach_websocket(app: FastAPI, llm: Any, gateway_api_key: str):
-    """Register the /ws WebSocket endpoint on the FastAPI app."""
+def attach_websocket(
+    app: FastAPI,
+    llm: Any,
+    gateway_api_key: str,
+    *,
+    origin_allowed: Callable[[str | None, str | None], bool] | None = None,
+):
+    """Register the /ws WebSocket endpoint on the FastAPI app.
+
+    ``origin_allowed(origin, host)`` gates browser-initiated connections:
+    CORSMiddleware does not apply to WebSockets, so without it any web page
+    could open ``ws://localhost:<port>/ws`` and both drive and read agent runs.
+    """
 
     @app.websocket("/ws")
     async def ws_endpoint(ws: WebSocket, token: str = Query(default="")):
-        if gateway_api_key and token != gateway_api_key:
+        if origin_allowed is not None and not origin_allowed(
+            ws.headers.get("origin"), ws.headers.get("host")
+        ):
+            await ws.close(code=4003, reason="Origin not allowed")
+            return
+        if gateway_api_key and not hmac.compare_digest(
+            token.encode("utf-8"), gateway_api_key.encode("utf-8")
+        ):
             await ws.close(code=4001, reason="Unauthorized")
             return
 
         await ws.accept()
+        # Several handlers can now write concurrently (a running chat.send
+        # streams events while pings and history requests are answered).
+        ws = _SerializedSocket(ws)  # type: ignore[assignment]
+        # chat.send runs as a task so this loop keeps reading: that is the
+        # only way to notice the client disconnecting mid-run and stop the
+        # agent instead of letting it finish for nobody.
+        in_flight: set[asyncio.Task[None]] = set()
 
         try:
             while True:
@@ -99,7 +127,9 @@ def attach_websocket(app: FastAPI, llm: Any, gateway_api_key: str):
                     await ws.send_json(make_response(msg["id"], True, {"pong": int(time.time() * 1000)}))
 
                 elif method == "chat.send":
-                    await _handle_chat_send(ws, msg, llm)
+                    send_task = asyncio.create_task(_handle_chat_send(ws, msg, llm))
+                    in_flight.add(send_task)
+                    send_task.add_done_callback(in_flight.discard)
 
                 elif method == "chat.history":
                     _handle_chat_history_sync(ws, msg)
@@ -114,8 +144,31 @@ def attach_websocket(app: FastAPI, llm: Any, gateway_api_key: str):
 
         except WebSocketDisconnect:
             pass
+        finally:
+            for send_task in list(in_flight):
+                send_task.cancel()
+            if in_flight:
+                await asyncio.gather(*in_flight, return_exceptions=True)
 
     print("   WebSocket: enabled on ws:// /ws")
+
+
+class _SerializedSocket:
+    """A WebSocket whose sends are serialised with a lock.
+
+    Everything else is delegated to the wrapped socket.
+    """
+
+    def __init__(self, ws: WebSocket) -> None:
+        self._ws = ws
+        self._send_lock = asyncio.Lock()
+
+    async def send_json(self, data: Any, *args: Any, **kwargs: Any) -> None:
+        async with self._send_lock:
+            await self._ws.send_json(data, *args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._ws, name)
 
 
 async def _handle_chat_send(ws: WebSocket, msg: dict, llm: Any):
@@ -181,13 +234,35 @@ async def _handle_chat_send(ws: WebSocket, msg: dict, llm: Any):
                     await send_event(event, payload)
 
             pump = asyncio.create_task(_pump())
+            runner = asyncio.current_task()
+
+            def _on_pump_done(done: "asyncio.Task[None]") -> None:
+                # The pump only stops early when a send failed, i.e. the
+                # client is gone. Stop the agent rather than run on unheard.
+                if done.cancelled() or done.exception() is None:
+                    return
+                if runner is not None and not runner.done():
+                    runner.cancel()
+
+            pump.add_done_callback(_on_pump_done)
 
             async def _drain() -> None:
-                await event_queue.put(None)
-                try:
-                    await pump
-                except Exception:
-                    pass
+                nonlocal dropped
+                if not pump.done():
+                    # Never block here. ``await put(None)`` on a full queue
+                    # whose pump had died waited forever and held the lane.
+                    while True:
+                        try:
+                            event_queue.put_nowait(None)
+                            break
+                        except asyncio.QueueFull:
+                            with contextlib.suppress(asyncio.QueueEmpty):
+                                event_queue.get_nowait()
+                                dropped += 1
+                    _done, pending = await asyncio.wait({pump}, timeout=_WS_DRAIN_TIMEOUT_S)
+                    if pending:
+                        pump.cancel()
+                        await asyncio.gather(pump, return_exceptions=True)
                 if dropped:
                     with contextlib.suppress(Exception):
                         await send_event(
@@ -270,7 +345,9 @@ async def _handle_chat_send(ws: WebSocket, msg: dict, llm: Any):
             "iterations": result.iterations,
         }))
     except Exception as e:
-        await ws.send_json(make_response(msg["id"], False, str(e)))
+        # The socket may be the thing that failed; don't raise from here.
+        with contextlib.suppress(Exception):
+            await ws.send_json(make_response(msg["id"], False, str(e)))
 
 
 def _chat_history_response(msg: dict) -> dict:

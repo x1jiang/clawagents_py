@@ -93,18 +93,29 @@ async def run_hook(
 
     Returns parsed JSON from stdout, or None on failure (fail-open).
     """
+    from clawagents.utils.proc_kill import kill_process_tree
+
     try:
         proc = await asyncio.create_subprocess_shell(
             command,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            # Own process group, so a timed-out hook can be killed together
+            # with whatever it spawned.
+            start_new_session=True,
         )
         input_bytes = json.dumps(input_data).encode()
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(input=input_bytes),
-            timeout=timeout,
-        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(input=input_bytes),
+                timeout=timeout,
+            )
+        except BaseException:
+            # Timeout or cancellation: wait_for abandons communicate() but
+            # leaves the hook process running. Kill it before moving on.
+            kill_process_tree(proc)
+            raise
         if proc.returncode != 0:
             logger.warning(
                 "Hook %r exited %d: %s", command, proc.returncode,

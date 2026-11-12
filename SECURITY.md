@@ -75,6 +75,34 @@ command (see `_is_dangerous_command` in `tools/exec.py` and
 last-resort guard against obvious foot-guns (`rm -rf /`, fork-bombs, etc.).
 Real isolation must come from the host (containers, unprivileged user, etc.).
 
+The semantic validator (`tools/bash_validator.py`) classifies by program
+basename (`/bin/rm` is `rm`), looks through shell grouping and control
+keywords (`{ …; }`, `!`, `if`/`while` bodies), here-strings fed to a shell,
+and redirects into privileged config (`> /etc/passwd`). A command whose name
+is a variable (`$x -rf /`) is blocked when its arguments match a destructive
+delete and warned otherwise. It remains a guardrail: it does not parse the
+full shell grammar and will not catch every obfuscation.
+
+### CodeAct Mode
+
+CodeAct snippets may only cause side effects through `tools.<name>()`, which
+passes through the same permission gate as ordinary tool calls. The AST gate
+rejects imports, any underscore-prefixed attribute, bare `except:`, and a
+list of dangerous builtins; the tools proxy is read-only and keeps the gate
+in a closure. A snippet's own execution time is capped (default 30 s,
+excluding time inside tool calls). A single long-running C-level call cannot
+be interrupted, so this is a best-effort barrier, not a hard sandbox — run
+untrusted models behind a container.
+
+### macOS Seatbelt Profile
+
+The seatbelt profile is passed inline (`sandbox-exec -p`) and is never
+written to disk, so a sandboxed process cannot rewrite it for later commands.
+The OS sandbox restricts **writes** to the workspace; it does not restrict
+reads outside it, and the default `workspace` profile leaves network on.
+Treat credentials readable by the host user (`~/.aws`, `~/.ssh`, …) as
+reachable by the agent unless you run it in a container or as a separate user.
+
 ### Output Redaction
 
 `clawagents.redact` (`src/clawagents/redact.py` and `src/redact.ts`) strips
@@ -195,6 +223,14 @@ The following scenarios are **not** considered security breaches:
   without a real `GATEWAY_API_KEY`. The library refuses by default; do not
   paper over the warning with `--allow-anonymous-public` unless you have
   upstream authn (VPN, Tailscale, Cloudflare Access, …).
+- **Browser origins.** State-changing gateway requests and WebSocket
+  connections with an `Origin` header are refused unless the origin is in
+  `GATEWAY_CORS_ORIGINS` or is the gateway's own loopback address. Do not set
+  `GATEWAY_CORS_ORIGINS=*` on a gateway without `GATEWAY_API_KEY`.
+- **Messaging channels.** Channels deny every sender until
+  `TELEGRAM_ALLOWED_SENDERS` / `WHATSAPP_ALLOWED_SENDERS` /
+  `SIGNAL_ALLOWED_SENDERS` is set. Avoid `*`: it gives anyone who can message
+  the account an agent with shell access on the host.
 - **Egress filtering.** `web_fetch` blocks private IPs by default. Keep this
   enabled unless you need to reach a known-trusted internal endpoint, and
   prefer scoping `CLAW_FETCH_ALLOW_PRIVATE=1` to specific runs rather than

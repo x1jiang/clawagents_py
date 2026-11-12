@@ -747,7 +747,12 @@ async def _exec_foreground_with_autobg(
 
     out_t = asyncio.create_task(_pump(proc.stdout, out_acc))
     err_t = asyncio.create_task(_pump(proc.stderr, err_acc))
-    wait_t = asyncio.create_task(proc.wait())
+    # Not ``proc.wait()``: that stays pending while any pipe is open, so a
+    # command that leaves a background child behind would look like it never
+    # exited (see ``wait_for_exit``).
+    from clawagents.utils.proc_kill import wait_for_exit
+
+    wait_t = asyncio.create_task(wait_for_exit(proc))
 
     async def _finish_comm() -> tuple[bytes, bytes]:
         out_s = await out_t
@@ -769,8 +774,21 @@ async def _exec_foreground_with_autobg(
             await askpass_session.wait_process(wait_t, timeout_s)
         else:
             await asyncio.wait_for(asyncio.shield(wait_t), timeout=timeout_s)
-        stdout = await out_t
-        stderr = await err_t
+        # The shell has exited. Its pipes normally hit EOF immediately, but a
+        # background child it left behind (``server & echo started``) keeps
+        # them open — reading to EOF would block until that child dies, long
+        # past the timeout. Give the pumps a short grace, then stop reading.
+        from clawagents.utils.proc_kill import PIPE_DRAIN_GRACE_S, PIPE_HELD_NOTE
+
+        _done, pending = await asyncio.wait({out_t, err_t}, timeout=PIPE_DRAIN_GRACE_S)
+        for t in pending:
+            t.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        stdout = str(out_acc)
+        stderr = str(err_acc)
+        if pending:
+            stderr = f"{stderr.rstrip()}\n{PIPE_HELD_NOTE}".lstrip()
         return (
             ExecResult(
                 stdout=stdout,

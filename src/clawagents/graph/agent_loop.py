@@ -122,6 +122,9 @@ EventKind = Literal[
     "turn_started",
     "assistant_message",
     "assistant_delta",
+    # The streamed assistant text so far is void (a retried stream produced
+    # different text); discard it and expect fresh ``assistant_delta`` events.
+    "assistant_reset",
     "tool_started",
     "usage",
     "guardrail_tripped",

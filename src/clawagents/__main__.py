@@ -594,7 +594,12 @@ def cmd_trajectory(n: int = 1):
 
 def cmd_serve(port: int):
     """Start the HTTP + WS gateway server, plus any auto-detected channels."""
-    from clawagents.gateway.server import create_app, start_gateway
+    from clawagents.gateway.server import (
+        create_app,
+        print_bind_warning,
+        resolve_bind_host,
+        start_gateway,
+    )
     from clawagents.channels.auto import detect_channels, describe_channels, start_channel_router
     import uvicorn
 
@@ -606,10 +611,14 @@ def cmd_serve(port: int):
         sys.stderr.write(f"{banner} | gateway on port {port} | channels: {ch_desc}\n")
 
         app, llm, active_model = create_app()
+        # Same bind policy as the no-channel path: loopback unless the
+        # operator opts in via GATEWAY_HOST. Channel adapters dial out, so
+        # they never need the gateway reachable from the network.
+        bind_host = resolve_bind_host(None)
 
         async def _run():
             router = await start_channel_router(llm)
-            config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="warning")
+            config = uvicorn.Config(app, host=bind_host, port=port, log_level="warning")
             server = uvicorn.Server(config)
             try:
                 await server.serve()
@@ -619,8 +628,10 @@ def cmd_serve(port: int):
 
         gateway_api_key = os.getenv("GATEWAY_API_KEY", "")
         auth_status = "enabled" if gateway_api_key else "disabled (set GATEWAY_API_KEY to enable)"
+        sys.stderr.write(f"   Bind: {bind_host}\n")
         sys.stderr.write(f"   Auth: {auth_status}\n")
         sys.stderr.write("   Endpoints: POST /chat | POST /chat/stream | WS /ws | GET /queue | GET /health\n\n")
+        print_bind_warning(bind_host, bool(gateway_api_key), file=sys.stderr)
         asyncio.run(_run())
     else:
         sys.stderr.write(f"{banner} | gateway on port {port}\n")

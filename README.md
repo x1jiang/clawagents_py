@@ -1599,7 +1599,42 @@ it on the LAN, pass `host="0.0.0.0"` or set `GATEWAY_HOST=0.0.0.0` (the env
 var wins over the `host=` argument), and *also* set `GATEWAY_API_KEY=<secret>`
 to require Bearer auth. Starting on a non-loopback address without an API key
 prints a loud warning at startup — anyone on the network can otherwise hit
-`/chat`, `/chat/stream`, and `/ws`.
+`/chat`, `/chat/stream`, and `/ws`. `clawagents serve` follows the same rule
+whether or not messaging channels are configured.
+
+Requests from a browser are origin-checked. A `POST` or WebSocket connection
+that carries an `Origin` header is refused (HTTP 403 / WS close 4003) unless
+the origin is listed in `GATEWAY_CORS_ORIGINS` (default
+`http://localhost:3000,http://127.0.0.1:3000`) or is the gateway's own
+loopback address. Clients that send no `Origin` — curl, SDKs, server-side
+code — are unaffected. This stops a web page you happen to visit from
+starting agent runs on an unauthenticated local gateway.
+
+### Messaging channels: sender allowlist
+
+`clawagents serve` auto-starts Telegram, WhatsApp and Signal adapters when
+their env vars are set (`TELEGRAM_BOT_TOKEN`, `WHATSAPP_AUTH_DIR` /
+`WHATSAPP_API_URL`, `SIGNAL_ACCOUNT`). A channel message runs an agent with
+shell and file tools on the host, so each channel **refuses every sender
+until its allowlist is set**:
+
+| Channel | Env var |
+|---------|---------|
+| Telegram | `TELEGRAM_ALLOWED_SENDERS` |
+| WhatsApp | `WHATSAPP_ALLOWED_SENDERS` |
+| Signal | `SIGNAL_ALLOWED_SENDERS` |
+
+Each is a comma-separated list of sender ids or conversation/group ids. A
+refused sender is logged once to stderr with its id, so you can message the
+bot, copy the id from the log, and add it. Set a list to `*` only for a bot
+you intend to be public.
+
+```bash
+TELEGRAM_BOT_TOKEN=123456:ABC... TELEGRAM_ALLOWED_SENDERS=123456789 clawagents serve
+```
+
+`ChannelRouter` used directly is unchanged: pass your own `on_inbound`
+callback (or `clawagents.channels.auto.make_sender_gate`) to gate senders.
 
 ### Endpoints
 
