@@ -918,8 +918,16 @@ clawagents/
 │   ├── config.py          # EngineConfig, .env discovery, model resolution
 │   └── features.py        # 15 feature flags (CLAW_FEATURE_* env vars)
 ├── providers/
-│   ├── llm.py             # LLMProvider ABC + OpenAI/Gemini/Anthropic implementations
-│   └── fallback.py        # FallbackProvider — 3-tier failover + quarantine (v6.0)
+│   ├── llm.py                # Compatibility facade re-exporting all provider symbols
+│   ├── base.py               # LLMProvider ABC, LLMMessage, LLMResponse, Usage
+│   ├── stream_retry.py       # Mid-stream retry + assistant_reset divergence handling
+│   ├── tool_convert.py       # Provider tool-schema and message conversion helpers
+│   ├── openai_provider.py    # OpenAI Chat Completions, Responses, and compatible APIs
+│   ├── gemini_provider.py    # Google Gemini (google-genai) implementation
+│   ├── anthropic_provider.py # Direct Anthropic Messages API implementation
+│   ├── bedrock_provider.py   # AWS Bedrock native IAM + Bedrock Mantle implementations
+│   ├── factory.py            # create_provider routing across profiles and model families
+│   └── fallback.py           # FallbackProvider — 3-tier failover + quarantine (v6.0)
 ├── tools/
 │   ├── registry.py        # ToolRegistry, LazyTool, parallel execution, LRU cache (v6.0)
 │   ├── filesystem.py      # ls, read_file, write_file, edit_file, grep, glob

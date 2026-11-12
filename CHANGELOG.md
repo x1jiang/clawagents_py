@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 6.20.98
 
 Security hardening. **Breaking for channel users:** messaging channels now refuse every sender until an allowlist is set.
 
