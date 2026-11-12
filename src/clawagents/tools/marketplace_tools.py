@@ -46,7 +46,7 @@ class MarketplaceInstallTool:
             return ToolResult(success=False, output="", error="kind must be skill or plugin")
         result = install_from_source(
             str(source),
-            kind=kind,  # type: ignore[arg-type]
+            kind=kind,
             workspace=self._workspace,
             name=str(args["name"]) if args.get("name") else None,
         )

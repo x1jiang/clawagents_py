@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, TypeVar, cast
 
 from clawagents.iteration_budget import IterationBudget
 from clawagents.permissions.mode import PermissionMode
@@ -171,7 +171,7 @@ class RunContext(Generic[TContext]):
             self.active_skill_allowed_tools = (
                 boundary
                 if self.active_skill_allowed_tools is None
-                else self.active_skill_allowed_tools & boundary
+                else self.active_skill_allowed_tools & cast("frozenset[str]", boundary)
             )
         # Keep compaction carryover in sync with fully-read skills.
         try:

@@ -737,27 +737,27 @@ def apply_edits(
         return None, overlap.to_dict()
 
     warnings: List[str] = []
-    for op in resolved:
-        span = op.end - op.start
+    for rop in resolved:
+        span = rop.end - rop.start
         if 6 <= span <= 20:
-            warnings.append(f"Medium replacement range ({span} lines) at line {op.start + 1}.")
+            warnings.append(f"Medium replacement range ({span} lines) at line {rop.start + 1}.")
         elif span > 20:
-            warnings.append(f"Large replacement range ({span} lines) at line {op.start + 1}.")
+            warnings.append(f"Large replacement range ({span} lines) at line {rop.start + 1}.")
 
     resolved.sort(key=lambda o: (-o.start, -o.original_idx))
     result_lines = list(lines)
     edit_regions: List[Tuple[int, int]] = []
     cumulative_shift = 0
-    for op in reversed(resolved):
-        shifted_start = op.start + cumulative_shift
-        inserted = len(op.new_lines)
-        replaced = op.end - op.start
+    for rop in reversed(resolved):
+        shifted_start = rop.start + cumulative_shift
+        inserted = len(rop.new_lines)
+        replaced = rop.end - rop.start
         edit_regions.append((shifted_start, shifted_start + inserted))
         cumulative_shift += inserted - replaced
     edit_regions.sort(key=lambda r: r[0])
 
-    for op in resolved:
-        result_lines[op.start : op.end] = op.new_lines
+    for rop in resolved:
+        result_lines[rop.start : rop.end] = rop.new_lines
 
     new_content = "\n".join(result_lines)
     # If original ended with newline and we still have content, Grok join doesn't

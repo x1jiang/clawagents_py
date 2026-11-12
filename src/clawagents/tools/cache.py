@@ -101,7 +101,12 @@ class SqliteResultCacheManager(ResultCacheManager):
         if persist_denylist is False:
             self._persist_denylist: set[str] = set()
         else:
-            names = persist_denylist if persist_denylist is not None else _DEFAULT_PERSIST_DENYLIST
+            # ``True`` means "use the default denylist" (iterating a bool would crash).
+            names = (
+                _DEFAULT_PERSIST_DENYLIST
+                if persist_denylist is None or persist_denylist is True
+                else persist_denylist
+            )
             self._persist_denylist = {str(name).lower() for name in names}
         self._conn = sqlite3.connect(self.db_path)
         self._conn.execute(

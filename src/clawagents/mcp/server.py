@@ -372,7 +372,8 @@ class MCPServer(abc.ABC):
         from mcp import ClientSession
 
         self._transition(MCPLifecyclePhase.CONNECTING)
-        self._exit_stack = AsyncExitStack()
+        exit_stack = AsyncExitStack()
+        self._exit_stack = exit_stack
         timeout_s = self.client_session_timeout_seconds
         read_timeout = _client_session_read_timeout(timeout_s)
         # Handshake budget: session read timeout, or 30s floor so one hung
@@ -381,13 +382,13 @@ class MCPServer(abc.ABC):
         connect_budget = max(connect_budget, 5.0)
 
         async def _handshake() -> None:
-            transport = await self._exit_stack.enter_async_context(self._create_streams())
+            transport = await exit_stack.enter_async_context(self._create_streams())
             # stdio_client / sse_client return (read, write); streamablehttp returns 3-tuple
             read, write, *_rest = transport
             session_kwargs: dict[str, Any] = {}
             if read_timeout is not None:
                 session_kwargs["read_timeout_seconds"] = read_timeout
-            session = await self._exit_stack.enter_async_context(
+            session = await exit_stack.enter_async_context(
                 ClientSession(read, write, **session_kwargs)
             )
             self._transition(MCPLifecyclePhase.INITIALIZING)

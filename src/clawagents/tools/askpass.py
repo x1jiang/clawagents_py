@@ -24,7 +24,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Coroutine, cast
 
 # Prompts that ask for a non-secret confirmation (such as SSH host key checks)
 # should be shown as normal text inputs rather than masked password inputs.
@@ -339,7 +339,7 @@ class AskpassSession:
         except TypeError:
             res = fn(prompt)
         if inspect.isawaitable(res):
-            return asyncio.run(res)
+            return asyncio.run(cast("Coroutine[Any, Any, Any]", res))
         return res
 
     def _handle_client(self, conn: socket.socket) -> None:

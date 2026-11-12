@@ -1583,7 +1583,8 @@ This provides **unlimited conversation length** with full audit trail preservati
 
 ## Gateway Server
 
-Launch an HTTP server with one line:
+The gateway is an optional extra: `pip install 'clawagents[gateway]'` (adds
+FastAPI and uvicorn). Launch an HTTP server with one line:
 
 ```python
 from clawagents.gateway import start_gateway

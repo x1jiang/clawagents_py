@@ -8,11 +8,10 @@ from pathlib import Path
 
 import pytest
 
-from clawagents.providers.llm import LLMMessage, LLMProvider, LLMResponse
+from clawagents.providers.llm import LLMProvider, LLMResponse
 from clawagents.skills.workshop.service import SkillWorkshopService
 from clawagents.trajectory.compare import (
     _score_samples,
-    compare_samples,
     select_best_candidate_blind,
 )
 from clawagents.trajectory.harness_surface import (

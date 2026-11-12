@@ -17,6 +17,8 @@ _PROVIDER_SECRET_KEYS = (
     "GROK_API_KEY",
     "BEDROCK_API_KEY",
     "META_API_KEY",
+    "META_MODEL_API_KEY",
+    "MODEL_API_KEY",
     "TAVILY_API_KEY",
     "ADVISOR_API_KEY",
     "AWS_ACCESS_KEY_ID",
@@ -67,6 +69,7 @@ def _secret_keys_to_protect() -> list[str]:
         "bedrock": ["BEDROCK_API_KEY"],
         "xai": ["XAI_API_KEY", "GROK_API_KEY"],
         "meta": ["META_API_KEY"],
+        "meta-api": ["META_MODEL_API_KEY", "MODEL_API_KEY"],
         "tavily": ["TAVILY_API_KEY"],
         "aws": ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"],
     }

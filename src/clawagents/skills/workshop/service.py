@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import builtins
 from typing import Any
 
 from clawagents.skills.workshop.impact import IMPACT_PREVIEW_ENTRIES, IMPACT_RELATIVE_PATH
@@ -219,7 +220,7 @@ class SkillWorkshopService:
             "content": self.store.read_impact(limit),
         }
 
-    def _serialize(self, rec: SkillProposalRecord, findings: list[str]) -> dict[str, Any]:
+    def _serialize(self, rec: SkillProposalRecord, findings: builtins.list[str]) -> dict[str, Any]:
         return {
             "id": rec.id,
             "name": rec.name,
@@ -249,7 +250,7 @@ class SkillWorkshopService:
         return rec.name
 
     @staticmethod
-    def _blocked(findings: list[str]) -> dict[str, Any]:
+    def _blocked(findings: builtins.list[str]) -> dict[str, Any]:
         return {
             "ok": False,
             "error": "scan blocked proposal",

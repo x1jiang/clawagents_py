@@ -14,7 +14,7 @@ _SUB_RE = re.compile(r"\$\{([A-Za-z0-9_.-]+)\.output\}")
 
 def _substitute(value: Any, results: dict[str, ToolResult]) -> Any:
     if isinstance(value, str):
-        return _SUB_RE.sub(lambda m: str(results.get(m.group(1)).output) if results.get(m.group(1)) else "", value)
+        return _SUB_RE.sub(lambda m: str(r.output) if (r := results.get(m.group(1))) else "", value)
     if isinstance(value, list):
         return [_substitute(item, results) for item in value]
     if isinstance(value, dict):

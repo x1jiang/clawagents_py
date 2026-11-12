@@ -15,7 +15,7 @@ Typed Memory (learned from Claude Code):
 """
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Optional, Sequence, Union
 import re
 
 # ─── Frontmatter Parser (learned from Claude Code: typed memory taxonomy) ──
@@ -64,7 +64,7 @@ def parse_memory_frontmatter(content: str) -> Dict[str, Any]:
 
 
 def load_memory_files(
-    paths: List[Union[str, Path]],
+    paths: Sequence[Union[str, Path]],
     filter_type: Optional[str] = None,
 ) -> Optional[str]:
     """Read memory files and return combined content wrapped in tags.

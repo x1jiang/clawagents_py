@@ -28,6 +28,7 @@ custom tool) can build on top of.
 from __future__ import annotations
 
 import asyncio
+import builtins
 import os
 import signal
 import time
@@ -312,7 +313,7 @@ class BackgroundJobManager:
         """Return all known jobs (running + completed)."""
         return list(self._jobs.values())
 
-    def completed_jobs(self, job_ids: "set[str] | None" = None) -> list[BackgroundJob]:
+    def completed_jobs(self, job_ids: "set[str] | None" = None) -> builtins.list[BackgroundJob]:
         """Finished jobs, oldest first. Non-destructive.
 
         ``job_ids`` restricts the result to jobs the caller owns. That matters

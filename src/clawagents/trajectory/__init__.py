@@ -32,7 +32,17 @@ from clawagents.trajectory.harness_surface import (
     accept_or_repair_tree,
     assign_anon_ids,
     autotrigger_skills,
+    check_hooks,
+    lint_task_prompt,
     validate_harness_tree,
+)
+from clawagents.trajectory.harness_recursion import (
+    PPCResult,
+    Proposal,
+    ProposerCache,
+    Rollout,
+    propose_probe_compose,
+    record_experience,
 )
 from clawagents.trajectory.judge import (
     judge_run,

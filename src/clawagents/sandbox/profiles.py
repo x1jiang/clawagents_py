@@ -213,7 +213,7 @@ def load_project_sandbox_toml(workspace: str | Path | None = None) -> dict[str, 
                 continue
             found[key] = OSSandboxProfile(
                 name=key,
-                backend=cfg.get("backend", "local"),  # type: ignore[arg-type]
+                backend=cfg.get("backend", "local"),
                 read_only=bool(cfg.get("read_only", False)),
                 network=bool(cfg.get("network", True)),
                 allow_paths=tuple(cfg.get("allow_paths") or (".",)),

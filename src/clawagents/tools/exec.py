@@ -672,7 +672,7 @@ def _resolve_block_until_ms(args: Dict[str, Any]) -> tuple[int, bool]:
     """
     if "block_until_ms" in args and args.get("block_until_ms") is not None:
         try:
-            raw = int(args.get("block_until_ms"))
+            raw = int(args["block_until_ms"])
         except (TypeError, ValueError):
             return DEFAULT_TIMEOUT_MS, False
         if raw == 0:
@@ -822,7 +822,8 @@ async def _exec_foreground_with_autobg(
                 proc.kill()
             except ProcessLookupError:
                 pass
-        for t in (out_t, err_t, wait_t):
+        all_tasks: tuple[asyncio.Task[Any], ...] = (out_t, err_t, wait_t)
+        for t in all_tasks:
             if not t.done():
                 t.cancel()
         for path in (out_acc.close(), err_acc.close()):

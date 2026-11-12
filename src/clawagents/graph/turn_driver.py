@@ -87,7 +87,7 @@ class TurnCallOutcome:
 
     action: Literal["response", "retry", "stop"]
     messages: list[LLMMessage]
-    response: Any | None = None
+    response: Any = None
 
 
 class TurnDriver:

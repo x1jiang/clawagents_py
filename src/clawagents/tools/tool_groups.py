@@ -230,15 +230,15 @@ class ActivateToolGroupTool:
                 True,
                 json.dumps({"groups": rows, "active_count": len(active), "active": active}),
             )
-        members = _registered_tools_in_group(self._registry, group)
-        if not members:
+        group_members = _registered_tools_in_group(self._registry, group)
+        if not group_members:
             return ToolResult(
                 False,
                 "",
                 f"Unknown group {group!r}. Use group='list'. Available: {', '.join(group_names())}",
             )
         registered = {t.name for t in self._registry.list_registered()}
-        added = sorted(members & registered)
+        added = sorted(group_members & registered)
         if not added:
             return ToolResult(
                 False, "", f"Group {group!r} has no registered tools in this session."

@@ -594,6 +594,13 @@ def cmd_trajectory(n: int = 1):
 
 def cmd_serve(port: int):
     """Start the HTTP + WS gateway server, plus any auto-detected channels."""
+    from clawagents.gateway import require_gateway_deps
+
+    try:
+        require_gateway_deps()
+    except ImportError as exc:
+        sys.stderr.write(f"{exc}\n")
+        sys.exit(1)
     from clawagents.gateway.server import (
         create_app,
         print_bind_warning,

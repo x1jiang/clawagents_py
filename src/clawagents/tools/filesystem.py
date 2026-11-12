@@ -194,7 +194,7 @@ class ReadFileTool:
         default_limit = 2000 if tier == "L2" else 100
         try:
             if "limit" in args and args.get("limit") is not None:
-                limit = max(1, int(args.get("limit")))
+                limit = max(1, int(args["limit"]))
             else:
                 limit = default_limit
         except (TypeError, ValueError):
@@ -501,7 +501,7 @@ class GrepTool:
             content = await sb.read_file(file_path)
             lines = content.splitlines()
             max_matches = 100
-            matches = []
+            matches: list[dict[str, Any]] = []
             truncated = False
             for i, line in enumerate(lines):
                 if pattern not in line:

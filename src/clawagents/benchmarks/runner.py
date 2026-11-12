@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 import tempfile
 import time
-from typing import Any, cast
+from typing import Any
 
 from .efficiency import ARMS, TOKEN_FIELDS, cost_from_usage, digest, runtime_digest, validate_manifest, verify_source
 
@@ -21,7 +21,7 @@ async def trial(manifest: dict[str, Any], task: dict[str, Any], repeat: int, arm
     from clawagents.sandbox.memory import InMemoryBackend
     from clawagents.tools.exec import create_exec_tools
     from clawagents.tools.filesystem import create_filesystem_tools
-    from clawagents.tools.registry import Tool, ToolRegistry
+    from clawagents.tools.registry import ToolRegistry
     from clawagents.tools.retrieve_tool_result import RetrieveToolResultTool
 
     live = manifest["provider"] != "fixture"
@@ -48,7 +48,7 @@ async def trial(manifest: dict[str, Any], task: dict[str, Any], repeat: int, arm
                   "notes.txt": "".join(f"Archive note {i}: preserve the public numeric function signature.\n" for i in range(900)) + task["prompt"]})
     registry = ToolRegistry()
     for tool in create_filesystem_tools(backend) + create_exec_tools(backend) + [RetrieveToolResultTool()]:
-        registry.register(cast(Tool, tool))
+        registry.register(tool)
     calls: list[Any] = []
     response_models: list[str] = []
     reported_usage = True

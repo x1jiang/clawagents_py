@@ -11,6 +11,23 @@ Security hardening. **Breaking for channel users:** messaging channels now refus
 - **Seatbelt:** the profile is passed inline via `sandbox-exec -p` instead of being written to `<cwd>/.clawagents/seatbelt.sb`, which the sandbox itself could overwrite.
 - **Bash validator:** classify by program basename (`/bin/rm`), look through `{ …; }`, `!` and `if`/`while` bodies, unwrap here-strings fed to a shell, block redirects into privileged config paths, treat `/.` and `../..` as root-like, and block or warn on a variable used as the program name.
 
+Models (details and sources in `MODEL_CATALOG_AUDIT.md`):
+
+- Add **Gemini 4 Carbon** (`gemini-4-carbon`), **GPT-6 Cyber** (`gpt-6-cyber`, gated) and the hosted **Muse** family on the Meta Model API (`muse-spark-1.1/1.2/1.3` and Contributor tiers, `muse-wonder-1.0`, `muse-ember-1.0`) through a new `meta-api` provider profile (`MODEL_API_KEY`). A bare Muse id selects that profile; it never falls back to another vendor's key.
+
+Harness² (from the reference implementation, github.com/google-research/harness2):
+
+- New `clawagents.trajectory.harness_recursion`: the **Propose–Probe–Compose** loop that the existing surface/prompt/selection/library helpers were missing. `propose_probe_compose(...)` runs `parallel` (k bases, 2k INV/DOM candidates, k compositions) or `sequential` (k rounds, each building on the last checkpoint) at 4k rollouts / 3k edit stages, with omitted-is-inherited edits, `KEEP_BASE`, one retry carrying the rejection text, fallback to the parent tree, blind seeded selection among the compositions, a content-addressed proposer cache, a post-adoption reflection prompt and `record_experience`. Rollout and proposal are caller-supplied callables.
+- `validate_harness_tree` now validates the hooks file (it was declared on `SurfaceSpec` but never checked) and can reject off-surface paths (`reject_off_surface`). `accept_or_repair_tree` accepts a `repair` callback with bounded attempts. Autotrigger descriptions are capped at 600 chars. `ExperienceLibrary` gains `retain_before` (a task sees only earlier tasks' entries), `context_dir`, and a harness inventory line in `INDEX.md`. `lint_task_prompt` flags measurement words in task text.
+
+Fixes found while clearing the type checker (mypy is now clean and runs in CI):
+
+- **`web_fetch` over HTTPS never worked:** it passed `server_hostname=` to `http.client.HTTPSConnection`, which raises `TypeError`. It now dials the pinned IP and verifies the certificate against the real hostname.
+- Bedrock streaming awaited a synchronous chunk callback (`TypeError`); `ToolResultCache(persist_denylist=True)` crashed; two `None` iterations in the Responses tool conversion.
+- `openai_ssl_verify=False` is no longer silently ignored when only `httpx2` is installed (newer OpenAI SDKs), and the Context Observatory package imports without `httpx`.
+
+Packaging — **breaking for gateway users:** `fastapi`, `uvicorn` and `plotly` are no longer installed with the core package. Install `clawagents[gateway]` for `clawagents --serve` / `clawagents.gateway`, and `clawagents[observatory]` (streamlit + plotly) for the Context Observatory dashboard; `clawagents[all]` includes both. Running `--serve` without the extra exits with the install command. `from clawagents.gateway import start_gateway` now works as documented (the package had no `__init__`).
+
 Runtime robustness:
 
 - **`execute` / `LocalBackend.exec`:** a command that leaves a background child holding its output pipe (`server & echo started`) no longer blocks until that child exits. The process's own exit is detected directly (asyncio's `Process.wait()` also waits for the pipes), output is drained for up to 1s, and a note is appended to stderr when the pipe was still held.

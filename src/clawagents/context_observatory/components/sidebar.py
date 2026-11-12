@@ -45,6 +45,7 @@ def render_sidebar(store: EventStore) -> dict[str, Any]:
             "claude-haiku-5-5",
             "claude-sonnet-4-20250514",
             "claude-opus-4-20250514",
+            "gemini-4-carbon",
             "gemini-4-argon",
             "gemini-3.8-flash",
             "gemini-2.5-pro",

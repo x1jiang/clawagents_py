@@ -74,6 +74,25 @@ class ResolvedProviderProfile:
     api_version: str | None
 
 
+META_API_BASE_URL = "https://api.meta.ai/v1"
+META_API_DEFAULT_MODEL = "muse-spark-1.3"
+META_API_KEY_ENV_VARS: tuple[str, ...] = ("META_MODEL_API_KEY", "MODEL_API_KEY")
+_HOSTED_MUSE_PREFIXES: tuple[str, ...] = ("muse-spark-", "muse-wonder-", "muse-ember-")
+
+
+def default_profile_for_model(model: str | None) -> str | None:
+    """Profile implied by a bare model id, when the caller named none.
+
+    ``muse-spark-1.3`` and friends only exist on the Meta Model API, so
+    routing them to the default OpenAI endpoint could never work — and would
+    send the OpenAI key there for nothing.
+    """
+    m = (model or "").strip().lower()
+    if m.startswith(_HOSTED_MUSE_PREFIXES):
+        return "meta-api"
+    return None
+
+
 BUILTIN_PROVIDER_PROFILES: dict[str, ProviderProfile] = {
     "gemma-agentic": ProviderProfile(
         "gemma-agentic", "openai", "gemma4-agentic-v2",
@@ -82,6 +101,12 @@ BUILTIN_PROVIDER_PROFILES: dict[str, ProviderProfile] = {
     "meta": ProviderProfile(
         "meta", "openai", "Muse-Glimmer-30B",
         "", "not-needed",
+    ),
+    # Hosted Meta Model API (Muse Spark / Wonder / Ember). OpenAI-compatible;
+    # the key comes from MODEL_API_KEY (Meta's documented name) or
+    # META_MODEL_API_KEY. https://dev.meta.ai/docs/models.md
+    "meta-api": ProviderProfile(
+        "meta-api", "openai", META_API_DEFAULT_MODEL, META_API_BASE_URL, "",
     ),
     "openai": ProviderProfile("openai", "openai", "gpt-5.6-terra"),
     "gemini": ProviderProfile("gemini", "gemini", "gemini-3.7-flash"),
@@ -130,6 +155,13 @@ def load_provider_profiles(paths: list[Path] | None = None) -> dict[str, Provide
         os.getenv("glimmer_30B_model") or os.getenv("GLIMMER_30B_MODEL") or meta.model,
         os.getenv("glimmer_30B_backend") or os.getenv("GLIMMER_30B_BACKEND") or meta.base_url,
         os.getenv("META_API_KEY") or meta.api_key,
+    )
+    meta_api = profiles["meta-api"]
+    profiles["meta-api"] = ProviderProfile(
+        "meta-api", "openai",
+        os.getenv("META_MODEL_API_MODEL") or meta_api.model,
+        os.getenv("META_MODEL_API_BASE_URL") or meta_api.base_url,
+        next((os.getenv(v) for v in META_API_KEY_ENV_VARS if os.getenv(v)), "") or meta_api.api_key,
     )
     explicit_paths = paths is not None
     for path in paths or _profile_paths():
@@ -181,6 +213,13 @@ def resolve_provider_profile(
     endpoint = base_url if base_url is not None else selected.base_url
     if profile == "meta" and not (endpoint or "").strip():
         raise ValueError("Meta requires a Base URL. Pass base_url or configure glimmer_30B_backend.")
+    if profile == "meta-api" and not (api_key or selected.api_key):
+        # Fail here rather than fall through to OPENAI_API_KEY, which would
+        # send another vendor's credential to api.meta.ai.
+        raise ValueError(
+            "The Meta Model API needs its own key. Set MODEL_API_KEY (or "
+            "META_MODEL_API_KEY), or pass api_key."
+        )
 
     return ResolvedProviderProfile(
         profile=profile,

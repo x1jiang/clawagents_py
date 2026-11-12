@@ -907,6 +907,9 @@ def create_claw_agent(
         meta_model = isinstance(model, str) and model.strip().lower() == "muse-glimmer-30b"
         if meta_default or meta_model:
             profile = "meta"
+        elif isinstance(model, str) and base_url is None:
+            from clawagents.provider_profiles import default_profile_for_model
+            profile = default_profile_for_model(model)
     provider_hint: Optional[str] = None
     if profile:
         from clawagents.provider_profiles import resolve_provider_profile
@@ -1368,7 +1371,7 @@ def create_claw_agent(
     agent.before_tool = compose_before_tool(_perm_before, mode_before)
     if permission_mode_override is not None:
         agent._default_permission_mode = permission_mode_override  # type: ignore[attr-defined]
-    elif agent._chat_mode in ("read_only", "readonly", "plan"):
+    elif getattr(agent, "_chat_mode", None) in ("read_only", "readonly", "plan"):
         # UI Plan tab → engine PLAN (Grok Build: explore + plan.md only).
         from clawagents.permissions.mode import PermissionMode as _PM
 

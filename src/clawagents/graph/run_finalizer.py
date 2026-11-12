@@ -35,7 +35,7 @@ class RunFinalizer:
         llm: Any,
         task: str,
         learn: bool,
-        output_guardrails: list[Any],
+        output_guardrails: list[Any] | None,
         output_type: Any,
         run_output_guardrails: Callable[..., Awaitable[tuple[str, str | None]]],
         coerce_output_type: Callable[[str, Any], Any],

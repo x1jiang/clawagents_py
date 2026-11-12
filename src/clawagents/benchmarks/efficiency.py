@@ -9,7 +9,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 ARMS = ("baseline", "candidate")
 TOKEN_FIELDS = ("prompt_tokens", "input_tokens", "cached_input_tokens", "cache_creation_tokens", "output_tokens", "total_tokens", "requests")
@@ -166,7 +166,7 @@ def verify_source(source: str, task: dict[str, Any]) -> bool:
                 return False
             if isinstance(node, ast.Name) and node.id not in names:
                 return False
-            if isinstance(node, ast.Constant) and (type(node.value) not in (int, float, bool) or abs(node.value) > 1_000_000):
+            if isinstance(node, ast.Constant) and (type(node.value) not in (int, float, bool) or abs(cast("int | float", node.value)) > 1_000_000):
                 return False
             if isinstance(node, ast.Call) and (not isinstance(node.func, ast.Name) or node.func.id not in {"min", "max", "abs"} or node.keywords):
                 return False

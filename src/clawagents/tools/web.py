@@ -40,7 +40,7 @@ import ipaddress
 import socket
 import ssl
 from dataclasses import dataclass
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, cast
 from urllib.parse import urlparse, urljoin
 
 from clawagents.tools.registry import Tool, ToolResult
@@ -59,7 +59,7 @@ MAX_SEARCH_RESULTS = 10
 _SEARCH_DEPTHS = frozenset({"basic", "advanced", "fast", "ultra-fast"})
 
 
-def _ip_is_private(ip: ipaddress._BaseAddress) -> bool:
+def _ip_is_private(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     if (
         ip.is_loopback
         or ip.is_link_local
@@ -154,7 +154,8 @@ def _validate_hop(url: str, allow_private: bool) -> str | PinnedTarget:
             return f"DNS lookup failed for '{host}'"
         if not infos:
             return f"DNS lookup returned no records for '{host}'"
-        resolved_ips = [info[4][0] for info in infos]
+        # AF_INET/AF_INET6 sockaddr[0] is always the host string.
+        resolved_ips = [cast(str, info[4][0]) for info in infos]
         ip = resolved_ips[0]
 
     if not allow_private and _is_private_address(host, _resolved=resolved_ips):
@@ -166,6 +167,31 @@ def _validate_hop(url: str, allow_private: bool) -> str | PinnedTarget:
     if ip is None:
         return f"DNS lookup failed for '{host}'"
     return PinnedTarget(scheme=scheme, host=host, port=port, ip=ip, path=path)
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS connection dialed to a pinned IP with SNI/cert checks for the real host.
+
+    ``HTTPSConnection`` has no ``server_hostname`` parameter (passing one
+    raises ``TypeError``), so pinning overrides ``connect()``: dial the IP,
+    then TLS-wrap with the original hostname. Mirrors ``hooks.taxonomy``.
+    """
+
+    def __init__(self, ip: str, port: int, *, sni_host: str, timeout: float, context: ssl.SSLContext):
+        super().__init__(ip, port, timeout=timeout, context=context)
+        self._sni_host = sni_host
+
+    def connect(self) -> None:
+        sock = socket.create_connection(
+            # typeshed does not declare HTTPConnection.source_address.
+            (self.host, self.port), self.timeout, self.source_address  # type: ignore[attr-defined]
+        )
+        try:
+            # typeshed does not declare the private HTTPSConnection._context.
+            self.sock = self._context.wrap_socket(sock, server_hostname=self._sni_host)  # type: ignore[attr-defined]
+        except BaseException:
+            sock.close()
+            raise
 
 
 def _fetch_pinned(
@@ -183,10 +209,11 @@ def _fetch_pinned(
         "Connection": "close",
         "Accept-Encoding": "identity",
     }
+    conn: http.client.HTTPConnection
     if target.scheme == "https":
         ctx = ssl.create_default_context()
-        conn = http.client.HTTPSConnection(
-            target.ip, target.port, timeout=timeout, context=ctx, server_hostname=target.host,
+        conn = _PinnedHTTPSConnection(
+            target.ip, target.port, sni_host=target.host, timeout=timeout, context=ctx,
         )
     else:
         conn = http.client.HTTPConnection(target.ip, target.port, timeout=timeout)

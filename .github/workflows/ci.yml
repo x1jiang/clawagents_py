@@ -59,6 +59,30 @@ jobs:
       - name: ruff check
         run: ruff check --output-format=github .
 
+  typecheck:
+    name: mypy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      # The dev extra pulls the optional SDKs, so their types are available
+      # and "missing import" noise does not hide real errors.
+      - name: Install package + mypy
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]" mypy
+
+      # Configured in [tool.mypy] in pyproject.toml (files = src/clawagents).
+      - name: mypy
+        run: mypy
+
   build:
     name: build + twine check
     runs-on: ubuntu-latest

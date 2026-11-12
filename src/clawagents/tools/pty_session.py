@@ -13,7 +13,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional  # noqa: F401 — Any used by PtyStartTool
+from typing import Any, Dict, List, Optional, cast  # noqa: F401 — Any used by PtyStartTool
 
 
 def _pty_available() -> bool:
@@ -327,10 +327,10 @@ def _reap_idle_sessions() -> None:
             ):
                 dead.append(sid)
         for sid in dead:
-            sess = _SESSIONS.pop(sid, None)
-            if sess is not None:
+            dead_sess = _SESSIONS.pop(sid, None)
+            if dead_sess is not None:
                 try:
-                    sess.stop()
+                    dead_sess.stop()
                 except Exception:
                     pass
 
@@ -593,7 +593,8 @@ def create_pty_tools():
                     success=True,
                     output=f"matched in {outcome.elapsed_ms}ms\n{sess.screen_text()[-2000:]}",
                 )
-            diag = outcome.diagnostics
+            # wait_for always attaches diagnostics to an unmatched outcome.
+            diag = cast(WaitDiagnostics, outcome.diagnostics)
             body = (
                 f"timeout after {outcome.elapsed_ms}ms\n"
                 f"cursor=({diag.cursor_row},{diag.cursor_col}) ended={diag.ended}\n"

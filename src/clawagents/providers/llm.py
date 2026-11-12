@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 import hashlib
+import importlib
 import inspect
 import json
 import logging
@@ -226,7 +227,6 @@ class LLMProvider(ABC):
         session_id: str | None = None,
         on_first_token: Any | None = None,
     ) -> LLMResponse:
-        _ = session_id
         pass
 
     async def complete(
@@ -335,6 +335,20 @@ async def _invoke_callback(
             cb(text)
     except Exception:
         logger.debug("onChunk callback raised — isolated", exc_info=True)
+
+
+def _import_http_client_module() -> Any:
+    """Return ``httpx`` or, failing that, ``httpx2`` (``None`` if neither).
+
+    Newer OpenAI SDKs depend on ``httpx2`` rather than ``httpx``, so a clean
+    install may have only one of them. The two share the client API used here.
+    """
+    for name in ("httpx", "httpx2"):
+        try:
+            return importlib.import_module(name)
+        except ImportError:
+            continue
+    return None
 
 
 class _StreamReplayGuard:
@@ -993,7 +1007,7 @@ def openai_model_rejects_temperature(model: str) -> bool:
     m = _bare_openai_model_id(model)
     if m.startswith(("o1", "o3", "o4")):
         return True
-    if m.startswith(("gpt-5.3", "gpt-5.4", "gpt-5.5", "gpt-5.6", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna")):
+    if m.startswith(("gpt-5.3", "gpt-5.4", "gpt-5.5", "gpt-5.6", *_GPT6_MODELS)):
         return True
     if m.startswith("gpt-5") and "codex" in m:
         return True
@@ -1037,6 +1051,34 @@ def anthropic_model_rejects_sampling_params(model: str) -> bool:
     return False
 
 
+# Every GPT-6 id this module special-cases. Keep the request-contract helpers
+# below keyed on these tuples so a new model is added in one place.
+_GPT6_MODELS: tuple[str, ...] = (
+    "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-6-cyber",
+)
+# Chat Completions rejects function tools on these at every effort.
+# GPT-6 Cyber: its model page lists tools under the Responses API only and
+# does not document Chat Completions tool calling, so it takes the same
+# conservative route (Responses is documented for it either way).
+_GPT6_RESPONSES_ONLY_TOOLS: tuple[str, ...] = (
+    "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra", "gpt-6-cyber",
+)
+
+# Hosted Muse models on the Meta Model API (https://dev.meta.ai/docs/models.md).
+# ``muse-glimmer-*`` is the self-hosted open-weight model and is not included.
+_HOSTED_MUSE_PREFIXES: tuple[str, ...] = ("muse-spark-", "muse-wonder-", "muse-ember-")
+
+
+def is_hosted_muse_model(model: str) -> bool:
+    """True for a Meta Model API Muse id (``muse-spark-1.3``, ``meta/muse-wonder-1.0``…)."""
+    m = (model or "").strip().lower()
+    if "/" in m:
+        m = m.rsplit("/", 1)[-1]
+    if m.startswith("meta."):
+        m = m[len("meta."):]
+    return m.startswith(_HOSTED_MUSE_PREFIXES)
+
+
 def _requires_responses_for_tools(model: str) -> bool:
     """True when Chat Completions rejects function tools at every effort.
 
@@ -1044,12 +1086,14 @@ def _requires_responses_for_tools(model: str) -> bool:
     Completions rejects tools with any ``reasoning_effort`` (verified live
     2026-10-07), so tool calls must use Responses.
     """
-    return _bare_openai_model_id(model).startswith(("gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra"))
+    return _bare_openai_model_id(model).startswith(_GPT6_RESPONSES_ONLY_TOOLS)
 
 
 def _responses_only_model_label(model: str) -> str:
-    return ("GPT-6 Astra" if _bare_openai_model_id(model).startswith("gpt-6-astra")
-            else "GPT-6.1 Terra" if _bare_openai_model_id(model).startswith("gpt-6.1-terra")
+    bare = _bare_openai_model_id(model)
+    return ("GPT-6 Astra" if bare.startswith("gpt-6-astra")
+            else "GPT-6.1 Terra" if bare.startswith("gpt-6.1-terra")
+            else "GPT-6 Cyber" if bare.startswith("gpt-6-cyber")
             else "GPT-6.1 Sol")
 
 
@@ -1101,8 +1145,17 @@ def clamp_reasoning_effort_for_model(model: str, effort: str | None) -> str | No
         return effort
     from clawagents.providers.model_classify import is_grok_model
 
-    if _bare_openai_model_id(model).startswith(("gpt-6-astra", "gpt-6.1-sol")):
+    bare = _bare_openai_model_id(model)
+    if bare.startswith(("gpt-6-astra", "gpt-6.1-sol", "gpt-6-cyber")):
         return "low" if effort in ("none", "minimal") else effort
+    if is_hosted_muse_model(bare):
+        # Meta Model API: "none" is a 400 on reasoning models, and the
+        # Contributor tier does not offer "max".
+        if effort == "none":
+            return "minimal"
+        if effort == "max" and bare.endswith("-contributor"):
+            return "xhigh"
+        return effort
     if _bare_openai_model_id(model).startswith(("gpt-6-sol", "gpt-6-luna", "gpt-6.1-terra")):
         return "low" if effort == "minimal" else effort
     if not is_grok_model(_bare_openai_model_id(model)):
@@ -1122,7 +1175,9 @@ def model_supports_reasoning_effort(model: str) -> bool:
         return True
     if m.startswith(("o1", "o3", "o4")):
         return True
-    if m.startswith(("gpt-5.5", "gpt-5.6", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna")):
+    if m.startswith(("gpt-5.5", "gpt-5.6", *_GPT6_MODELS)):
+        return True
+    if is_hosted_muse_model(m):
         return True
     # Bare gpt-5 / gpt-5-codex family (not gpt-5-nano/micro as primary chat)
     if m == "gpt-5" or m.startswith("gpt-5-"):
@@ -1184,7 +1239,7 @@ def prefers_responses_api(
         return False
     if "codex" in m:
         return True
-    if m.startswith(("gpt-5.5", "gpt-5.6", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna")):
+    if m.startswith(("gpt-5.5", "gpt-5.6", *_GPT6_MODELS)):
         return True
     # Other GPT-5 / o-series: Responses when tools + non-none effort so the
     # API accepts both (Chat Completions often forces effort=none).
@@ -1605,7 +1660,7 @@ class _ResponsesDeferredMixin:
         _immediate, deferred = split_deferred_tools(messages, tools)
         if not deferred:
             return
-        by_name = {t.get("name"): t for t in _chat_tools_to_responses_tools(oai_tools)}
+        by_name = {t.get("name"): t for t in (_chat_tools_to_responses_tools(oai_tools) or [])}
         introduced: set[str] = set()
         by_call: dict[str, list[dict[str, Any]]] = {}
         for m in messages:
@@ -1663,8 +1718,15 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
         # Custom hosts with private CAs often need verify=False; keep verify
         # for official OpenAI / empty base_url.
         if base_url and "api.openai.com" not in base_url.lower() and not ssl_verify:
-            try:
-                import httpx
+            httpx = _import_http_client_module()
+            if httpx is None:
+                # Don't fall back silently: the user asked for verify=False
+                # and would otherwise just see certificate errors.
+                logger.warning(
+                    "openai_ssl_verify=False ignored: neither httpx nor httpx2 "
+                    "is importable, so TLS verification stays on"
+                )
+            else:
                 # Match the SDK's default read budget: a non-streaming
                 # reasoning turn on a self-hosted 30B model can exceed 120s
                 # and each ReadTimeout re-ran the whole generation.
@@ -1672,8 +1734,6 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
                     verify=False,
                     timeout=httpx.Timeout(600.0, connect=10.0),
                 )
-            except ImportError:
-                self._http_client = None
 
         if is_azure and api_version and base_url:
             try:
@@ -1969,7 +2029,7 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
             # Unlike Anthropic (deferred stays in `tools` with defer_loading),
             # Responses carries the schema inside tool_search_output — leaving
             # it in `tools` too would rewrite the prefix we are protecting.
-            resp_tools = [t for t in resp_tools if t.get("name") not in deferred_names]
+            resp_tools = [t for t in (resp_tools or []) if t.get("name") not in deferred_names]
         if resp_tools:
             kwargs["tools"] = resp_tools
         schema = getattr(self, "_structured_json_schema", None)
@@ -3156,8 +3216,8 @@ def _gemini_part_from_block(part: Any) -> dict[str, Any] | None:
 
 
 def _gemini_38_model(model: str) -> bool:
-    # Keep the migration scoped to 3.8 and 4.x (Argon); 3.7 and older retain their sampling API.
-    return bool(_re.search(r"(?:^|/)gemini-(?:3\.8|4(?:-argon)?)(?:-|$)", (model or "").lower()))
+    # Keep the migration scoped to 3.8 and 4.x (Argon, Carbon); 3.7 and older retain their sampling API.
+    return bool(_re.search(r"(?:^|/)gemini-(?:3\.8|4(?:-(?:argon|carbon))?)(?:-|$)", (model or "").lower()))
 
 
 _GEMINI_BLOCK_FINISH_REASONS = (
@@ -3202,7 +3262,7 @@ def _gemini_prompt_block_reason(resp_or_chunk: Any) -> str | None:
 
 def _gemini_4_fallback_model(model: str) -> str | None:
     m = (model or "").strip().lower()
-    if _re.search(r"(?:^|/)gemini-4(?:-argon)?(?:-|$)", m):
+    if _re.search(r"(?:^|/)gemini-4(?:-(?:argon|carbon))?(?:-|$)", m):
         return "gemini-3.8-flash"
     return None
 
@@ -4603,7 +4663,7 @@ class BedrockConverseProvider(LLMProvider):
 
     def __init__(self, config: EngineConfig):
         try:
-            import boto3  # type: ignore
+            import boto3
         except ImportError as exc:
             raise ImportError(
                 "boto3 is required for Amazon Nova / non-Claude Bedrock models. "
@@ -4729,7 +4789,8 @@ class BedrockConverseProvider(LLMProvider):
         if content or tool_calls:
             _fire_first_token(on_first_token)
         if on_chunk and content:
-            await on_chunk(content)
+            # on_chunk may be sync or async; awaiting a sync callback's None raised TypeError.
+            await _invoke_callback(on_chunk, content)
         usage = (raw or {}).get("usage") or {}
         prompt_tokens = int(usage.get("inputTokens") or 0)
         cache_read = int(usage.get("cacheReadInputTokens") or 0)

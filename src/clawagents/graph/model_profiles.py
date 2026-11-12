@@ -34,6 +34,14 @@ MODEL_PROFILES: dict[str, dict[str, int | float]] = {
         "budget_ratio": 0.85,
         "long_context_threshold": 272_000,
     },
+    # https://developers.openai.com/api/docs/models/gpt-6-cyber — gated
+    # (Daybreak Red access); same window and >272K pricing cliff as the family.
+    "gpt-6-cyber": {
+        "max_input_tokens": 1_050_000,
+        "max_output_tokens": 128_000,
+        "budget_ratio": 0.85,
+        "long_context_threshold": 272_000,
+    },
     # https://developers.openai.com/api/docs/models/gpt-6-luna
     "gpt-6-luna": {
         "max_input_tokens": 1_050_000,
@@ -43,6 +51,23 @@ MODEL_PROFILES: dict[str, dict[str, int | float]] = {
     },
     # Deployment /v1/models reports max_model_len=196608 (2026-09-06).
     "muse-glimmer-30b": {"max_input_tokens": 196_608, "budget_ratio": 0.80},
+    # ── Meta Model API — hosted Muse (https://dev.meta.ai/docs/models.md) ─
+    # 1,048,576-token context for Spark and Wonder. Meta publishes no output
+    # cap, so none is set here. Contributor ids listed first: prefix matching
+    # must not resolve them through the Standard entry.
+    "muse-spark-1.3-contributor": {"max_input_tokens": 1_048_576, "budget_ratio": 0.85},
+    "muse-spark-1.3": {"max_input_tokens": 1_048_576, "budget_ratio": 0.85},
+    "muse-spark-1.2-contributor": {"max_input_tokens": 1_048_576, "budget_ratio": 0.85},
+    "muse-spark-1.2": {"max_input_tokens": 1_048_576, "budget_ratio": 0.85},
+    "muse-spark-1.1": {"max_input_tokens": 1_048_576, "budget_ratio": 0.85},
+    "muse-wonder-1.0": {"max_input_tokens": 1_048_576, "budget_ratio": 0.85},
+    # Ember is documented as "1M"; requests over 200K input tokens are billed
+    # at 3x for the whole request (https://dev.meta.ai/docs/pricing-rate-limits).
+    "muse-ember-1.0": {
+        "max_input_tokens": 1_000_000,
+        "budget_ratio": 0.85,
+        "long_context_threshold": 200_000,
+    },
     # ── OpenAI — GPT-5.6 (~1.05M context) ──────────────────────────────
     # long_context_threshold: official pricing cliff (>272K → 2× input / 1.5× output).
     # Economic micro-compact / soft-trim start below this so agent loops stay
@@ -156,6 +181,9 @@ MODEL_PROFILES: dict[str, dict[str, int | float]] = {
     "nova-2-lite": {"max_input_tokens": 1_000_000, "max_output_tokens": 65_000, "budget_ratio": 0.85},
     "llama4-maverick": {"max_input_tokens": 1_000_000, "max_output_tokens": 8_000, "budget_ratio": 0.85},
     # ── Google — Gemini 4.x / 3.x (1M–2M context) ──────────────────────
+    # Carbon (GA 2026-11-10): 1,048,576 unified window, 65,536 synchronous
+    # output — https://ai.google.dev/gemini-api/docs/models/gemini-4-carbon
+    "gemini-4-carbon": {"max_input_tokens": 1_048_576, "max_output_tokens": 65_536, "budget_ratio": 0.90},
     "gemini-4-argon": {"max_input_tokens": 1_048_576, "max_output_tokens": 65_536, "budget_ratio": 0.90},
     "gemini-4": {"max_input_tokens": 1_048_576, "max_output_tokens": 65_536, "budget_ratio": 0.90},
     "gemini-3.8-flash": {"max_input_tokens": 1_048_576, "max_output_tokens": 65_536, "budget_ratio": 0.90},

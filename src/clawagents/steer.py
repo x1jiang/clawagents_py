@@ -46,7 +46,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
-from typing import Any, Iterable, TypeVar
+from typing import Any, Iterable, Literal, TypeVar, cast
 
 from clawagents.lifecycle import RunHooks
 from clawagents.run_context import RunContext
@@ -230,7 +230,7 @@ class SteerHook(RunHooks[Any]):
             text = nudge.text
             if self.prefix:
                 text = f"{self.prefix} {text}"
-            messages.append(LLMMessage(role=nudge.role, content=text))
+            messages.append(LLMMessage(role=cast('Literal["system", "user", "assistant", "tool"]', nudge.role), content=text))
 
 
 __all__ = [

@@ -58,13 +58,13 @@ class ResolvedSubAgent:
 
 def _as_isolation(value: Any, default: IsolationMode = "none") -> IsolationMode:
     if value in ("none", "worktree"):
-        return value  # type: ignore[return-value]
+        return value
     return default
 
 
 def _as_capability(value: Any, default: CapabilityMode = "all") -> CapabilityMode:
     if value in ("read-only", "read-write", "execute", "all"):
-        return value  # type: ignore[return-value]
+        return value
     return default
 
 
@@ -87,7 +87,7 @@ def resolve_subagent(
     spec = next((s for s in specs if s.name == agent_name), None)
 
     # Spec defaults
-    isolation = getattr(spec, "isolation", None) if spec else None
+    isolation: Any = getattr(spec, "isolation", None) if spec else None
     capability = getattr(spec, "capability", None) if spec else None
     model = getattr(spec, "model", None) if spec else None
     persona_key = getattr(spec, "persona", None) if spec else None

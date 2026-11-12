@@ -24,17 +24,19 @@ classifiers = [
 ]
 dependencies = [
     "openai>=1.0.0",
-    "fastapi>=0.100.0",
-    "uvicorn>=0.20.0",
     "python-dotenv>=1.0.0",
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
     # Skill SKILL.md frontmatter (allowed-tools lists, block scalars, …).
     "pyyaml>=6.0",
-    "plotly>=5.0.0",
 ]
 
 [project.optional-dependencies]
+# HTTP + WebSocket gateway (``clawagents --serve``, ``clawagents.gateway``).
+# Not needed to build or run agents in-process.
+gateway = ["fastapi>=0.100.0", "uvicorn>=0.20.0"]
+# Context Observatory dashboard (``python -m clawagents.context_observatory``).
+observatory = ["streamlit>=1.30", "plotly>=5.0.0"]
 gemini = ["google-genai>=0.1.0"]
 anthropic = ["anthropic>=0.40.0"]
 # 0.91.0 added AnthropicBedrockMantle; 0.95.0 fixed it to authenticate with the
@@ -63,6 +65,10 @@ rl = ["trl>=0.7.0"]
 # Agent Communication Protocol adapter.
 acp = ["agent-client-protocol>=0.1.0"]
 all = [
+    "fastapi>=0.100.0",
+    "uvicorn>=0.20.0",
+    "streamlit>=1.30",
+    "plotly>=5.0.0",
     "google-genai>=0.1.0",
     "anthropic>=0.95.0",
     "boto3>=1.34.0",
@@ -82,6 +88,12 @@ dev = [
     # the matching CLI flag is `-n` and the version is fixed to keep the
     # worker-protocol stable across local and CI runs.
     "pytest-xdist>=3,<4",
+    # Gateway tests drive the FastAPI app through Starlette's TestClient.
+    "fastapi>=0.100.0",
+    "uvicorn>=0.20.0",
+    "httpx>=0.24",
+    "mypy>=1.10",
+    "ruff>=0.5",
     "tiktoken>=0.5.0",
     "google-genai>=0.1.0",
     "anthropic>=0.95.0",

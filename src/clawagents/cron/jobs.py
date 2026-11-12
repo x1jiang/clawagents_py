@@ -35,7 +35,7 @@ logger = logging.getLogger("clawagents.cron")
 
 _croniter: Any = None
 try:
-    from croniter import croniter as _croniter_imported  # type: ignore[import-untyped]
+    from croniter import croniter as _croniter_imported
 
     _croniter = _croniter_imported
     CRONITER_AVAILABLE = True

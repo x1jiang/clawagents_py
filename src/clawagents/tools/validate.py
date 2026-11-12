@@ -9,12 +9,15 @@ Inspired by ToolUniverse's BaseTool.validate_parameters().
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Protocol
+from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol
 
 
 class _ToolLike(Protocol):
-    name: str
-    parameters: Dict[str, Dict[str, Any]]
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def parameters(self) -> Mapping[str, Any]: ...
 
 
 @dataclass

@@ -548,10 +548,10 @@ def observe_tool_result(
         contract.setdefault("satisfied", {})[command] = generation
         contract["authorization_consumed"] = False
         _write_contract(contract, run_context)
-        remaining = len(_missing_commands(contract))
+        remaining_count = len(_missing_commands(contract))
         return (
             "[plan invariant gate: verification gate satisfied; "
-            f"{remaining} remaining]"
+            f"{remaining_count} remaining]"
         )
 
     if tool_name == "execute" and not planned and _is_generic_verification(command):

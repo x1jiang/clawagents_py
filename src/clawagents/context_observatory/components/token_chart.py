@@ -40,7 +40,7 @@ def _render_utilization_curve(store: EventStore) -> None:
     try:
         import plotly.graph_objects as go
     except ImportError:
-        st.warning("Install plotly for interactive charts: `pip install plotly`")
+        st.warning("Install plotly for interactive charts: `pip install 'clawagents[observatory]'`")
         _render_utilization_curve_fallback(store)
         return
 

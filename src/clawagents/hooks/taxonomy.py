@@ -14,7 +14,7 @@ import ssl
 import subprocess
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 
 
@@ -153,7 +153,8 @@ def resolve_hook_url(url: str) -> tuple[HookPinnedTarget | None, str]:
             return None, f"dns:{exc}"
         if not infos:
             return None, "dns:empty"
-        resolved = [info[4][0] for info in infos]
+        # AF_INET/AF_INET6 sockaddr[0] is always the host string.
+        resolved = [cast(str, info[4][0]) for info in infos]
         ip = resolved[0]
     for candidate in resolved:
         if is_blocked_ip(candidate):
@@ -181,10 +182,12 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
 
     def connect(self) -> None:
         sock = socket.create_connection(
-            (self.host, self.port), self.timeout, self.source_address
+            # typeshed does not declare HTTPConnection.source_address.
+            (self.host, self.port), self.timeout, self.source_address  # type: ignore[attr-defined]
         )
         try:
-            self.sock = self._context.wrap_socket(sock, server_hostname=self._sni_host)
+            # typeshed does not declare the private HTTPSConnection._context.
+            self.sock = self._context.wrap_socket(sock, server_hostname=self._sni_host)  # type: ignore[attr-defined]
         except BaseException:
             sock.close()
             raise

@@ -107,7 +107,7 @@ def main() -> None:
     except FileNotFoundError:
         print(
             "\nError: streamlit is not installed. Install it with:\n"
-            "  pip install streamlit plotly\n",
+            "  pip install 'clawagents[observatory]'\n",
             file=sys.stderr,
         )
         sys.exit(1)

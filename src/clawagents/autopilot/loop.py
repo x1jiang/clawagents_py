@@ -77,7 +77,7 @@ async def run_autopilot(
             task.plan = [str(x) for x in plan_result]
             task.metadata["plan_text"] = "\n".join(task.plan)
 
-        ctx = RunContext()
+        ctx: RunContext[Any] = RunContext()
         ctx._metadata["workspace"] = workspace
         ctx._metadata["pending_plan_text"] = task.metadata["plan_text"]
 

@@ -57,6 +57,7 @@ class _ToolsProxy:
     # Plan / read-only / approval gating). ``__slots__`` + ``__setattr__``
     # make the instance immutable from snippet code.
     __slots__ = ("calls", "_tool_seconds", "_invoke")
+    _tool_seconds: list[float]
 
     def __init__(
         self,

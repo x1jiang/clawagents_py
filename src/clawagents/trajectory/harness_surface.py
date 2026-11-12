@@ -21,9 +21,9 @@ import json
 import random
 import re
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 Tree = dict[str, str]
 
@@ -42,6 +42,9 @@ GRADER_VERDICT_MARKERS: tuple[str, ...] = (
     '"test_pass_rate"',
 )
 
+AUTOTRIGGER_DESC_MAX = 600
+# How much of a validation error is fed back to the proposer / kept on record.
+REJECTION_TEXT_MAX = 400
 _NAME_RE = r"[a-z0-9][a-z0-9_\-]*"
 _FRONTMATTER_RE = re.compile(r"\A---\s*\r?\n(.*?)\r?\n---\s*(?:\r?\n|\Z)", re.DOTALL)
 _CHOICE_RE = re.compile(r"```choice\s*\n?\s*([A-Za-z0-9_-]+)\s*\n?\s*```", re.DOTALL)
@@ -70,6 +73,11 @@ class SurfaceSpec:
     hook_events: frozenset[str] = frozenset({"PreToolUse", "PostToolUse", "SessionStart", "Stop"})
     compile_skill_scripts: bool = True
     reject_empty_always_on: bool = False
+    # When True, any path that is not part of the editable surface (always-on
+    # files, skills, sub_agents, scripts, the hooks file) fails validation.
+    # Harness² rejects those and reports them back to the proposer; off by
+    # default here because existing callers pass whole-workspace trees.
+    reject_off_surface: bool = False
 
 
 DEFAULT_SURFACE = SurfaceSpec()
@@ -161,6 +169,51 @@ def check_script_references(
     return errs
 
 
+def check_hooks(rel_path: str, source: str, events: frozenset[str] | set[str]) -> list[str]:
+    """Validate a hooks file's shape at proposal time.
+
+    A malformed hook does not fail loudly at run time — it is simply never
+    fired, so an edit that "adds enforcement" silently adds nothing. Expected
+    shape: ``{"hooks": {"<Event>": [{"type": "command", "command": "..."}]}}``
+    where each event is one of ``events``. An entry may also be a matcher
+    group ``{"matcher": "...", "hooks": [ ... ]}``.
+    """
+    errs: list[str] = []
+    try:
+        data = json.loads(source)
+    except (json.JSONDecodeError, TypeError) as exc:
+        return [f"{rel_path} is not valid JSON: {exc}"]
+    hooks = data.get("hooks") if isinstance(data, dict) else None
+    if not isinstance(hooks, dict):
+        return [f'{rel_path} needs a top-level "hooks" object mapping event names to hook lists']
+    for event, entries in hooks.items():
+        if event not in events:
+            errs.append(f"{rel_path}: unknown hook event {event!r} (allowed: {sorted(events)})")
+            continue
+        if not isinstance(entries, list):
+            errs.append(f"{rel_path}: hooks.{event} must be a list")
+            continue
+        for i, entry in enumerate(entries):
+            where = f"{rel_path}: hooks.{event}[{i}]"
+            if not isinstance(entry, dict):
+                errs.append(f"{where} must be an object")
+                continue
+            # Matcher group: validate the nested command hooks.
+            nested = entry.get("hooks")
+            commands = nested if isinstance(nested, list) else [entry]
+            if isinstance(nested, list) and not nested:
+                errs.append(f"{where} has an empty hooks list")
+            for j, hook in enumerate(commands):
+                sub_where = f"{where}.hooks[{j}]" if isinstance(nested, list) else where
+                if not isinstance(hook, dict):
+                    errs.append(f"{sub_where} must be an object")
+                elif hook.get("type") != "command":
+                    errs.append(f'{sub_where} needs "type": "command"')
+                elif not str(hook.get("command") or "").strip():
+                    errs.append(f"{sub_where} needs a non-empty command")
+    return errs
+
+
 def autotrigger_skills(
     surface: SurfaceSpec,
     tree: Tree,
@@ -180,7 +233,10 @@ def autotrigger_skills(
             continue
         skill_md = tree.get(f"{surface.skill_dir}/{name}/SKILL.md", "")
         fm = parse_frontmatter_fields(skill_md)
-        desc = (fm.get("when-to-use") or fm.get("description") or f"the {name} workflow applies").strip().rstrip(".")
+        desc = (fm.get("when-to-use") or fm.get("description") or f"the {name} workflow applies").strip()
+        # A trigger line is always-on text; a long description would spend
+        # the cap on one skill.
+        desc = desc[:AUTOTRIGGER_DESC_MAX].rstrip().rstrip(".")
         line = surface.trigger_line.format(name=name, desc=desc)
         cur = tree.get(surface.autotrigger_file, "")
         if len(body) + len(line) + 2 > cap:
@@ -320,6 +376,18 @@ def validate_harness_tree(
                 )
             )
 
+    if surface.hooks_file and surface.hooks_file in tree:
+        errs.extend(check_hooks(surface.hooks_file, tree[surface.hooks_file], surface.hook_events))
+
+    if surface.reject_off_surface:
+        allowed_exact = set(surface.always_on) | ({surface.hooks_file} if surface.hooks_file else set())
+        for rel in sorted(tree):
+            if rel in allowed_exact or skill_rx.fullmatch(rel) or skill_script_rx.fullmatch(rel):
+                continue
+            if script_rx.fullmatch(rel) or subagent_rx.fullmatch(rel):
+                continue
+            errs.append(f"{rel} is not part of the editable harness surface")
+
     try:
         assert_no_grader_verdicts(tree)
     except ValueError as exc:
@@ -382,25 +450,44 @@ def accept_or_repair_tree(
     *,
     allow_subagents: bool = True,
     reserved_scripts: frozenset[str] | set[str] = RESERVED_SCRIPTS,
+    repair: "Callable[[str, Tree], Tree | None] | None" = None,
+    attempts: int = 2,
 ) -> tuple[Tree, bool, bool, str, list[str]]:
     """Auto-repair missing skill triggers, validate `candidate`, and fall back on error.
+
+    Deterministic fixes come first (autotrigger), then validation. When
+    validation fails and ``repair`` is given, it is called with the rejection
+    text and the rejected tree and may return a corrected tree; that is tried
+    again, up to ``attempts`` validations in total (Harness² uses 2). Only when
+    every attempt fails does the stage fall back to ``fallback``.
 
     Returns `(accepted_tree, kept_base, fell_back, error_msg, autotriggered_skills)`.
     """
     working = dict(candidate)
-    triggered = autotrigger_skills(surface, working)
-    changed = diff_summary(surface, fallback, working)
-    kept_base = not (changed["added"] or changed["removed"] or changed["modified"])
-    try:
-        validate_harness_tree(
-            working,
-            surface,
-            allow_subagents=allow_subagents,
-            reserved_scripts=reserved_scripts,
-        )
-    except ValueError as exc:
-        return dict(fallback), False, True, str(exc), triggered
-    return working, kept_base, False, "", triggered
+    triggered: list[str] = []
+    error = ""
+    for attempt in range(max(1, attempts)):
+        triggered = autotrigger_skills(surface, working)
+        try:
+            validate_harness_tree(
+                working,
+                surface,
+                allow_subagents=allow_subagents,
+                reserved_scripts=reserved_scripts,
+            )
+        except ValueError as exc:
+            error = str(exc)[:REJECTION_TEXT_MAX]
+            if repair is None or attempt + 1 >= max(1, attempts):
+                break
+            repaired = repair(error, dict(working))
+            if not repaired:
+                break
+            working = dict(repaired)
+            continue
+        changed = diff_summary(surface, fallback, working)
+        kept_base = not (changed["added"] or changed["removed"] or changed["modified"])
+        return working, kept_base, False, "", triggered
+    return dict(fallback), False, True, error, triggered
 
 
 def build_propose_prompt(
@@ -684,6 +771,28 @@ class ExperienceLibrary:
         self.rebuild_index()
         return d
 
+    def retain_before(self, task_id: str, stream: Sequence[str]) -> list[str]:
+        """Keep only entries for tasks that precede ``task_id`` in ``stream``.
+
+        A task must learn only from earlier tasks: an entry written by a later
+        task (from a previous pass over the same stream) or by the task itself
+        would leak its own outcome into the run. Returns the removed task ids.
+        Entries for tasks not in ``stream`` are left alone.
+        """
+        order = [_slug(t) for t in stream]
+        current = _slug(task_id)
+        if current not in order:
+            return []
+        later = set(order[order.index(current):])
+        doomed = [name for name in self.entries() if name in later]
+        if doomed:
+            self.forget(doomed)
+        return doomed
+
+    def context_dir(self) -> Path | None:
+        """The library directory to show a proposer, or ``None`` while it is empty."""
+        return self.dir if self.entries() else None
+
     def forget(self, task_ids: Sequence[str]) -> None:
         removed = False
         for tid in task_ids:
@@ -711,6 +820,9 @@ class ExperienceLibrary:
             dim = _extract_md_bullet(exp_file, "dimension")
             rows.append(f"## `harnesses/{name}/`")
             rows.append(f"- experience: `harnesses/{name}/EXPERIENCE.md`")
+            inventory = _harness_inventory(self.dir / "harnesses" / name / "harness")
+            if inventory:
+                rows.append(f"- harness: {inventory}")
             if dim:
                 rows.append(f"- dimension: `{dim}`")
             if cue:
@@ -721,6 +833,34 @@ class ExperienceLibrary:
         self.dir.mkdir(parents=True, exist_ok=True)
         self.index_path.write_text("\n".join(rows), encoding="utf-8")
         return self.index_path
+
+
+def _harness_inventory(hdir: Path) -> str:
+    """One-line inventory of a stored harness snapshot (skills, sub_agents, scripts, size)."""
+    if not hdir.is_dir():
+        return ""
+    files = [p for p in hdir.rglob("*") if p.is_file()]
+    rels = [p.relative_to(hdir).as_posix() for p in files]
+    skills = sum(1 for r in rels if r.endswith("/SKILL.md"))
+    subs = sum(1 for r in rels if r.endswith("/AGENT.md"))
+    scripts = sum(1 for r in rels if r.endswith(".py"))
+    chars = sum(p.stat().st_size for p in files)
+    return f"{skills} skill(s), {subs} sub_agent(s), {scripts} script(s), {chars:,} chars in {len(files)} file(s)"
+
+
+# Words a task-facing prompt must not contain: they tell the model it is being
+# measured, which invites optimising for the measurement (Harness² rejects
+# adapter prompts containing them at construction).
+MEASUREMENT_WORDS: tuple[str, ...] = ("benchmark", "evaluation", "grader", "rubric", "score")
+
+
+def lint_task_prompt(text: str, words: Sequence[str] = MEASUREMENT_WORDS) -> list[str]:
+    """Return the measurement words found in a task-facing prompt (empty when clean)."""
+    found = []
+    for word in words:
+        if re.search(rf"\b{re.escape(word)}s?\b", text or "", re.IGNORECASE):
+            found.append(word)
+    return found
 
 
 def _extract_md_bullet(path: Path, field_name: str) -> str:

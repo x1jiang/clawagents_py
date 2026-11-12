@@ -99,10 +99,10 @@ class ChannelRouter:
         # one. ``get_event_loop`` without a running loop is a
         # DeprecationWarning on 3.12+ and an error on 3.14.
         loop = asyncio.get_running_loop()
-        handle = loop.call_later(
-            self._debounce_ms / 1000.0,
-            lambda k=key: asyncio.ensure_future(self._flush_debounce(k)),
-        )
+        def _fire(k: str = key) -> "asyncio.Future[None]":
+            return asyncio.ensure_future(self._flush_debounce(k))
+
+        handle = loop.call_later(self._debounce_ms / 1000.0, _fire)
         self._debounce_tasks[key] = handle
 
     async def _flush_debounce(self, key: str) -> None:

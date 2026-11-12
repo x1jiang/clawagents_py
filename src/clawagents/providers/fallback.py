@@ -137,7 +137,13 @@ class FallbackProvider(LLMProvider):
         on_chunk: OnChunkCallback = None,
         cancel_event: asyncio.Event | None = None,
         tools: list[NativeToolSchema] | None = None,
+        *,
+        session_id: str | None = None,
+        on_first_token: Any | None = None,
     ) -> LLMResponse:
+        # ``session_id`` / ``on_first_token`` are accepted for LLMProvider
+        # signature compatibility; they are not forwarded to wrapped providers
+        # (same as before, when callers detected their absence and omitted them).
         # Run health checks for any quarantined providers before attempting calls
         await self._health_check_quarantined()
 

@@ -193,7 +193,11 @@ class RunBootstrapper:
     def __init__(self, config: AgentRunConfig) -> None:
         self.c = config  # shorthand for the config
 
-        # Populated by phases — typed as Optional so each phase is explicit.
+        # Populated by phases. Collaborators that every later phase relies on
+        # are typed non-optional: they are assigned in ``_setup_*`` before any
+        # read, and typing them Optional only produced a wall of spurious
+        # "None has no attribute" errors that hid real ones. Fields that are
+        # genuinely checked for None keep their Optional type.
         self._registry: ToolRegistry = ToolRegistry()
         self._native_schemas: list[NativeToolSchema] | None = None
         self._tool_desc: str = ""
@@ -201,19 +205,19 @@ class RunBootstrapper:
         self._handoff_map: dict[str, Handoff] = {}
         self._loop_tracker: _ToolCallTracker | None = None
         self._failure_tracker: _FailureTracker | None = None
-        self._base_emit: Callable[..., None] | None = None
-        self._emit: Callable[..., None] | None = None
-        self._run_context: RunContext | None = None
-        self._usage: Usage | None = None
+        self._base_emit: Callable[..., None] = None  # type: ignore[assignment]
+        self._emit: Callable[..., None] = None  # type: ignore[assignment]
+        self._run_context: RunContext = None  # type: ignore[assignment]
+        self._usage: Usage = None  # type: ignore[assignment]
         self._provider_session_id: str = ""
         self._active_hooks: list[RunHooks] = []
         self._recorder: Any = None
         self._session_writer: Any = None
         self._ext_hook_runner: Any = None
         self._taxonomy_dispatcher: Any = None
-        self._events: RunEvents | None = None
-        self._hook_dispatcher: HookDispatcher | None = None
-        self._session_journal: SessionMessageJournal | None = None
+        self._events: RunEvents = None  # type: ignore[assignment]
+        self._hook_dispatcher: HookDispatcher = None  # type: ignore[assignment]
+        self._session_journal: SessionMessageJournal = None  # type: ignore[assignment]
         self._task_type: str = "general"
         self._compaction_savings: list[float] = []
         self._cached_sys_tokens: int = 0
@@ -453,8 +457,9 @@ class RunBootstrapper:
         meta = run_context._metadata
         if not isinstance(meta.get("workspace"), str):
             meta["workspace"] = os.getcwd()
-        if getattr(self._registry, "_permission_engine", None) is not None:
-            meta.setdefault("permission_engine", self._registry._permission_engine)
+        _registry_perm_engine = getattr(self._registry, "_permission_engine", None)
+        if _registry_perm_engine is not None:
+            meta.setdefault("permission_engine", _registry_perm_engine)
         if c.before_tool is not None:
             meta["before_tool"] = c.before_tool
         if c.approval_handler is not None:

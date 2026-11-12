@@ -192,7 +192,7 @@ def _safe_load_frontmatter(yaml_content: str) -> Optional[Dict[str, Any]]:
     if not text.strip():
         return {}
     try:
-        import yaml  # type: ignore[import-untyped]
+        import yaml
     except ImportError:
         return None
     try:
@@ -1029,9 +1029,9 @@ class SkillStore:
                 + "; ".join(findings)
             )
 
-        reason = skill_ineligibility_reason(skill)
-        if reason is not None:
-            self.ineligible[skill.name] = reason
+        ineligible_reason = skill_ineligibility_reason(skill)
+        if ineligible_reason is not None:
+            self.ineligible[skill.name] = ineligible_reason
             return
         self.skills[skill.name] = skill
         # A clean load supersedes stale ineligible/quarantine records.
@@ -1077,7 +1077,7 @@ class SkillStore:
                 except OSError:
                     continue
 
-        snapshot_rows = sorted(
+        snapshot_rows: list[tuple[Any, ...]] = sorted(
             (
                 "loaded",
                 _norm_skill_key(skill.name),
@@ -1587,7 +1587,7 @@ def create_skill_tools(
                     )
                 if content_hash != pending_hash:
                     reasons.append(
-                        f"skill file changed on disk ({pending_hash[:12]}… → "
+                        f"skill file changed on disk ({str(pending_hash)[:12]}… → "
                         f"{content_hash[:12]}…)"
                     )
                 if reasons:

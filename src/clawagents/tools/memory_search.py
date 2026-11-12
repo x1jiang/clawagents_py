@@ -42,7 +42,8 @@ class MemorySearchTool:
         if not query:
             return ToolResult(success=False, output="", error="query is required")
         max_results = int(args.get("max_results") or 8)
-        min_score = float(args.get("min_score") if args.get("min_score") is not None else 0.15)
+        raw_min_score = args.get("min_score")
+        min_score = float(raw_min_score if raw_min_score is not None else 0.15)
         cfg = MemorySearchConfig(
             max_results=min(max(max_results, 1), 20),
             min_score=max(0.0, min(min_score, 1.0)),

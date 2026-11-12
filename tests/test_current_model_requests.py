@@ -33,7 +33,7 @@ def gemini_provider(model="gemini-3.8-flash", effort="", max_tokens=100000):
                                          reasoning_effort=effort, temperature=0.2, max_tokens=max_tokens))
 
 
-@pytest.mark.parametrize("model", ["gemini-3.8-flash", "gemini-4-argon"])
+@pytest.mark.parametrize("model", ["gemini-3.8-flash", "gemini-4-argon", "gemini-4-carbon"])
 @pytest.mark.parametrize("effort,expected", [("", None), ("none", "low"), ("minimal", "low"),
                                              ("low", "low"), ("medium", "medium"),
                                              ("high", "high"), ("xhigh", "high"),

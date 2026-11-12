@@ -11,7 +11,7 @@ import json
 import os
 import re
 import traceback
-from typing import Any, Dict, Iterable, List, Optional, Protocol
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Protocol
 
 
 class ToolResult:
@@ -71,10 +71,21 @@ def format_tool_error(err: BaseException, *, include_traceback: bool | None = No
 
 
 class Tool(Protocol):
-    name: str
-    description: str
-    keywords: List[str]
-    parameters: Dict[str, Dict[str, Any]]
+    # Read-only members: a tool may declare these as class attributes,
+    # instance attributes, or properties, and ``parameters`` values may be
+    # typed as loosely as ``object``.
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def description(self) -> str: ...
+
+    @property
+    def parameters(self) -> Mapping[str, Any]: ...
+
+    # ``keywords`` is deliberately not a protocol member: it is optional and
+    # read with ``getattr`` (see below). Declaring it here made every tool
+    # without keywords fail the structural check.
 
     async def execute(self, args: Dict[str, Any]) -> ToolResult:
         ...

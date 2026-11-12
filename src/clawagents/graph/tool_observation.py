@@ -256,7 +256,7 @@ async def _wait_for_tool_approval(
         try:
             result = approval_handler(tool_name, args, call_id)
             if hasattr(result, "__await__"):
-                result = await result  # type: ignore[misc]
+                result = await result
             return bool(result)
         except Exception as exc:
             emit("warn", {"message": f"approval_handler error: {exc}"})

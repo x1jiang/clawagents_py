@@ -178,7 +178,8 @@ def emit_openai_schema_node(node: dict[str, Any]) -> dict[str, Any]:
     if isinstance(node.get("enum"), list) and node["enum"]:
         out["enum"] = list(node["enum"])
     if ptype == "array":
-        items = node.get("items") if isinstance(node.get("items"), dict) else {"type": "string"}
+        raw_items = node.get("items")
+        items: dict[str, Any] = raw_items if isinstance(raw_items, dict) else {"type": "string"}
         out["items"] = emit_openai_schema_node(items)
     elif ptype == "object":
         props = node.get("properties")
@@ -207,7 +208,8 @@ def emit_gemini_schema_node(node: dict[str, Any]) -> dict[str, Any]:
     if isinstance(node.get("enum"), list) and node["enum"]:
         out["enum"] = list(node["enum"])
     if ptype == "ARRAY":
-        items = node.get("items") if isinstance(node.get("items"), dict) else {"type": "string"}
+        raw_items = node.get("items")
+        items: dict[str, Any] = raw_items if isinstance(raw_items, dict) else {"type": "string"}
         out["items"] = emit_gemini_schema_node(items)
     elif ptype == "OBJECT":
         props = node.get("properties")

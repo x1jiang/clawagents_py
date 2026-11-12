@@ -64,6 +64,7 @@ def parse_version(text: str | None) -> Optional[VersionTuple]:
 
 
 def version_at_least(version: str | VersionTuple | None, minimum: VersionTuple) -> bool:
+    parts: Optional[VersionTuple]
     if isinstance(version, tuple):
         parts = version
     else:

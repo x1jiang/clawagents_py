@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any
+from collections.abc import Set as AbstractSet
+from typing import Any, cast
 
 from clawagents.handoffs import Handoff, HandoffInputData
 from clawagents.providers.llm import LLMMessage, NativeToolCall
@@ -54,7 +55,7 @@ class HandoffRouter:
         from_agent: str,
         task: str,
         use_native_tools: bool,
-        session_initial_ids: set[int],
+        session_initial_ids: AbstractSet[int],
         on_stream_event: Any,
     ) -> None:
         self._handoffs = handoffs
@@ -249,7 +250,8 @@ class HandoffRouter:
             ),
             None,
         )
-        return last_user.content if last_user is not None else self._task
+        # The generator above only yields messages whose content is a str.
+        return cast(str, last_user.content) if last_user is not None else self._task
 
     @staticmethod
     def _preload_messages(

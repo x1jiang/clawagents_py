@@ -26,7 +26,15 @@ import logging
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
-import httpx
+try:
+    import httpx
+except ImportError:  # newer OpenAI SDKs ship httpx2 instead of httpx
+    try:
+        import httpx2 as httpx  # type: ignore[no-redef]
+    except ImportError:
+        # Keep the package importable (the gateway and the VS Code sidecar
+        # only need its hooks and store); fail when the client is used.
+        httpx = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +76,8 @@ def parse_sse_chunk(
 
 def _extract_file_path(data: dict[str, Any]) -> str | None:
     """Extract a file path from tool args or top-level data."""
-    args = data.get("args") if isinstance(data.get("args"), dict) else data
+    raw_args = data.get("args")
+    args: dict[str, Any] = raw_args if isinstance(raw_args, dict) else data
     raw = (
         args.get("path")
         or args.get("file_path")

@@ -73,7 +73,7 @@ async def await_plan_approval(
     if cb is None:
         raw = run_context._metadata.get(PLAN_APPROVAL_META_KEY)
         if callable(raw):
-            cb = raw  # type: ignore[assignment]
+            cb = raw
     if cb is None:
         return PlanApprovalDecision(PlanApprovalAction.APPROVE)
 

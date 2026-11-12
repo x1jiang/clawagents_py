@@ -217,7 +217,7 @@ class PauseGoalTool:
 class ResumeGoalTool:
     name = "resume_goal"
     description = "Resume a paused goal."
-    parameters = {}
+    parameters: dict[str, Any] = {}
 
     async def execute(self, args: dict[str, Any], run_context: Any = None) -> ToolResult:
         tracker = _tracker(run_context)
@@ -233,7 +233,7 @@ class ResumeGoalTool:
 class GoalStatusTool:
     name = "goal_status"
     description = "Show active goal status, plan path, and recent notes."
-    parameters = {}
+    parameters: dict[str, Any] = {}
 
     async def execute(self, args: dict[str, Any], run_context: Any = None) -> ToolResult:
         tracker = _tracker(run_context)

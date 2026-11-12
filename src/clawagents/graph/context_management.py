@@ -17,7 +17,7 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Literal, Optional, cast
 
 from clawagents.providers.llm import LLMProvider, LLMMessage, NativeToolSchema
 from clawagents.run_context import RunContext
@@ -1119,12 +1119,13 @@ async def _compact_if_needed(
 
             def _reuse_original(role: str, content: str) -> LLMMessage:
                 text = content or ""
+                typed_role = cast('Literal["system", "user", "assistant", "tool"]', role)
                 if role in ("assistant", "tool") and not text.strip():
-                    return LLMMessage(role=role, content=text)
+                    return LLMMessage(role=typed_role, content=text)
                 bucket = _originals_by_key.get((role, _content_key_text(text)))
                 if bucket:
                     return bucket.pop()
-                return LLMMessage(role=role, content=text)
+                return LLMMessage(role=typed_role, content=text)
 
             compact_out = [
                 _reuse_original(m.role, m.content or "")

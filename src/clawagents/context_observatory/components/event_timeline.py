@@ -30,7 +30,7 @@ def render_event_timeline(store: EventStore) -> None:
         show_trim = st.checkbox("Trim", value=True, key="tl_trim")
 
     # Collect filtered events
-    events = []
+    events: list[CompactionEvent | CrushEvent | TrimEvent] = []
     if show_compaction:
         events.extend(store.get_compaction_events())
     if show_crush:
