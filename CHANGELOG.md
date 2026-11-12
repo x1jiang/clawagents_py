@@ -1,5 +1,23 @@
 # Changelog
 
+## 6.20.99
+
+Harness² completion (distilled from `google-research/harness2`):
+
+- **Substrate & end-to-end workspace optimizer (`clawagents.trajectory.harness_substrate`):** new `Substrate` protocol, `ClawAgentSubstrate` (`surface`, `preflight`, `materialise` with `{{token}}` interpolation, `execute` with `skip_memory=True` probe isolation, `read_trajectory`), `render_trajectory_markdown`, `compute_unified_diffs`, `backup_and_apply_harness`, and `optimize_workspace_harness(...)`.
+- **Completion markers & resumable stages (`clawagents.trajectory.harness_runmark`):** `.adapt_complete` content-addressed runmarks (`tree_fingerprint`, `inputs_fingerprint`, `write_runmark`, `read_runmark`, `is_runmark_valid`, `prepare_clean_run_dir`) so interrupted PPC runs resume completed stages cleanly while wiping partial staging directories.
+- **Budget ledger & ceilings (`clawagents.trajectory.harness_ledger`):** `HarnessLedger` (`expected_rollouts`, `expected_sessions`, duplicate-first `assert_identity()`, `max_usd` ceiling enforcement via `BudgetExceededError`, and adaptive-probe savings accounting where `rollouts_executed + rollouts_saved == rollouts_total`), exposed on `PPCResult.harness_ledger` while preserving `PPCResult.ledger` backward compatibility.
+- **Evidence staging workspace (`clawagents.trajectory.harness_context`):** `materialize_evidence_workspace` builds structured `context/` directories (`task.md`, `source/`, `decisions/`, `rollouts/`, `deliverables/<label>/INDEX.md`, `harness/`, `library/`) with `deliverables_mode="contents" | "names"`.
+- **Schema-constrained proposer & blind selector (`clawagents.trajectory.harness_surface`):** `proposal_json_schema`, `selector_json_schema`, and `parse_proposal_reply` alongside backward-compatible ```` ```choice ```` fence parsing.
+
+Inference efficiency (distilled from `deepseek-ai/deepinfer`):
+
+- **Adaptive probe short-circuiting (`harness_recursion.py`):** DSpark-inspired `adaptive_probe` + `score_rollout_confidence` deduplicates identical harness fingerprints and skips redundant `[DOM]` probes when `[INV]` matches base and base finishes cleanly above confidence threshold.
+- **Step-quantized compaction watermarks (`graph/context_management.py`, `graph/turn_driver.py`):** `should_advance_compaction_watermark` advances micro-compact and soft-trim watermarks in discrete message steps (`6` / `8`) instead of every turn above 40% context usage, preserving prefix KV-cache reuse while honoring urgent budget overrides.
+- **Overlapped post-step persistence (`graph/deferred_flush.py`, `graph/agent_loop.py`):** `DeferredStepFlush` (`DeferredRelease` pattern) overlaps `session_writer.write_usage` and `external_hooks.post_llm` I/O with the next LLM prefill wait, with deterministic `await drain()` before turn finalization.
+- **Structured control-plane decoding (`structured_output.py`, `hooks/prompt_hook.py`):** `verdict_json_schema`, `choice_json_schema`, `local_engine_structured_args` (`deepinfer`, `vllm`, `sglang`), and `invoke_structured_control` (with automatic fallback if an endpoint rejects `response_format`).
+- **Decode throughput & latency telemetry (`usage.py`, `stream_events.py`, `graph/turn_llm.py`):** per-call `elapsed_ms` and `decode_tokens_per_sec`, plus run-summary `avg_ttft_ms`, warmup-aware `steady_decode_tps`, `max_step_ms`, and `cache_hit_ratio`.
+
 ## 6.20.98
 
 Security hardening. **Breaking for channel users:** messaging channels now refuse every sender until an allowlist is set.

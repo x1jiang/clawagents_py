@@ -227,6 +227,31 @@ _MICRO_COMPACT_KEEP_RECENT = 3  # keep last N compactable tool results intact
 # the context window. Running it unconditionally blanked all but the last 3
 # read/grep/exec results every round, degrading multi-file tasks at low usage.
 _MICRO_COMPACT_MIN_USAGE_RATIO = 0.4
+# Step-quantized compaction watermarks (inspired by DeepInfer's block-aligned
+# KV cache & YOCO bounded-suffix reuse): instead of mutating 1 aged tool result
+# on every single turn above the 40% ratio (which invalidates the provider
+# prompt prefix cache on 100% of turns), hold the prefix frozen across a step
+# window of appended messages unless approaching an urgent budget ceiling.
+_MICRO_COMPACT_STEP_MESSAGES = 6
+_SOFT_TRIM_STEP_MESSAGES = 8
+
+
+def should_advance_compaction_watermark(
+    current_msg_count: int,
+    last_epoch_msg_count: int,
+    *,
+    step_messages: int,
+    current_tokens: int,
+    urgent_ceiling: int | None = None,
+) -> bool:
+    """Return True when a prefix-mutating trim/micro-compact epoch should fire."""
+    if last_epoch_msg_count <= 0:
+        return True
+    if urgent_ceiling is not None and current_tokens >= urgent_ceiling:
+        return True
+    if current_msg_count < last_epoch_msg_count:
+        return True
+    return (current_msg_count - last_epoch_msg_count) >= max(1, int(step_messages))
 _ARTIFACT_ID_RE = re.compile(
     r"(?:Artifact id:\s*|id=)([A-Za-z0-9._-]{4,80})",
     re.IGNORECASE,

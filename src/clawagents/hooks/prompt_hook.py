@@ -115,6 +115,10 @@ class PromptHook:
         full_prompt = self._render_prompt(payload)
 
         from clawagents.providers.llm import LLMMessage
+        from clawagents.structured_output import (
+            invoke_structured_control,
+            verdict_json_schema,
+        )
 
         messages = [
             LLMMessage(role="system", content=_VERDICT_SYSTEM),
@@ -122,18 +126,20 @@ class PromptHook:
         ]
 
         try:
-            response = await asyncio.wait_for(
-                llm.chat(messages, on_chunk=None, cancel_event=None, tools=None),
-                timeout=self.timeout_s,
+            verdict, _response = await invoke_structured_control(
+                llm,
+                messages,
+                schema=verdict_json_schema(),
+                parse_fn=lambda txt: _parse_verdict(txt, fail_closed=self.fail_closed),
+                timeout_s=self.timeout_s,
             )
+            return verdict
         except asyncio.TimeoutError:
             logger.warning("PromptHook: timed out after %.1fs — failing open", self.timeout_s)
             return self._degraded("timeout")
         except Exception as e:
             logger.warning("PromptHook: llm error %s — failing open", e)
             return self._degraded(f"error: {e}")
-
-        return _parse_verdict(response.content or "", fail_closed=self.fail_closed)
 
     def _degraded(self, why: str) -> "PromptHookVerdict":
         """Verdict for a path where no real judgement was obtained."""

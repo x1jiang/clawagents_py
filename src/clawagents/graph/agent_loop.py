@@ -514,6 +514,9 @@ async def _run_agent_graph_core(
     try:
         return await _execute_loop(rs)
     finally:
+        df = rs.deferred_flush
+        if df is not None:
+            await df.drain()
         rs.completion_handler.restore_output_budget()
 
 

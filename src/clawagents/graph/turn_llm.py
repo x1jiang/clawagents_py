@@ -23,6 +23,7 @@ class LLMCallResult:
     response: LLMResponse
     resolved_model_name: str | None
     time_to_first_token_ms: float | None = None
+    elapsed_ms: float | None = None
     request_messages: list[LLMMessage] | None = None
 
 
@@ -74,6 +75,7 @@ class TurnLLMCaller:
         external_hooks: Any,
         accumulate_usage: Callable[..., Any],
         provider_session_id: str | None = None,
+        deferred_flush: Any = None,
     ) -> None:
         self._llm = llm
         self._events = events
@@ -83,6 +85,7 @@ class TurnLLMCaller:
         self._external_hooks = external_hooks
         self._accumulate_usage = accumulate_usage
         self._provider_session_id = provider_session_id
+        self._deferred_flush = deferred_flush
 
     async def call(
         self,
@@ -141,6 +144,10 @@ class TurnLLMCaller:
         )
         request_messages = projection.messages
 
+        if self._deferred_flush is not None:
+            # Overlap any pending post-turn telemetry from step t-1 with step t's prefill wait.
+            self._deferred_flush.kick()
+
         response = await _llm_chat(
             self._llm,
             request_messages,
@@ -150,16 +157,25 @@ class TurnLLMCaller:
             session_id=self._provider_session_id,
             on_first_token=_record_first_token if streaming else None,
         )
+        elapsed_ms = (time.perf_counter() - request_started_at) * 1000.0
         commit_projection(projection, run_context)
         model_name = resolved_model_name or response.model
 
         # Record provider-reported token counts and telemetry.
         peak_memory_bytes = usage.sample_memory()
-        req_usage = self._accumulate_usage(
-            response,
-            time_to_first_token_ms=time_to_first_token_ms,
-            peak_memory_bytes=peak_memory_bytes,
-        )
+        try:
+            req_usage = self._accumulate_usage(
+                response,
+                time_to_first_token_ms=time_to_first_token_ms,
+                elapsed_ms=elapsed_ms,
+                peak_memory_bytes=peak_memory_bytes,
+            )
+        except TypeError:
+            req_usage = self._accumulate_usage(
+                response,
+                time_to_first_token_ms=time_to_first_token_ms,
+                peak_memory_bytes=peak_memory_bytes,
+            )
 
         if self._hooks.hooks:
             await self._hooks.fire(
@@ -168,24 +184,44 @@ class TurnLLMCaller:
                 response.content or "",
                 req_usage,
             )
-        if self._session_writer:
-            self._session_writer.write_usage(
-                response.tokens_used,
-                cache_read_tokens=response.cache_read_tokens,
-                cache_creation_tokens=response.cache_creation_tokens,
-            )
-        if self._external_hooks:
-            try:
-                await self._external_hooks.post_llm(
-                    response.content[:500], len(response.tool_calls or [])
+        if self._deferred_flush is not None:
+            if self._session_writer:
+                sw = self._session_writer
+                tok_used = response.tokens_used
+                c_read = response.cache_read_tokens
+                c_write = response.cache_creation_tokens
+                self._deferred_flush.defer(
+                    lambda: sw.write_usage(
+                        tok_used,
+                        cache_read_tokens=c_read,
+                        cache_creation_tokens=c_write,
+                    )
                 )
-            except Exception:
-                pass
+            if self._external_hooks:
+                ext = self._external_hooks
+                preview = (response.content or "")[:500]
+                n_tools = len(response.tool_calls or [])
+                self._deferred_flush.defer(lambda: ext.post_llm(preview, n_tools))
+        else:
+            if self._session_writer:
+                self._session_writer.write_usage(
+                    response.tokens_used,
+                    cache_read_tokens=response.cache_read_tokens,
+                    cache_creation_tokens=response.cache_creation_tokens,
+                )
+            if self._external_hooks:
+                try:
+                    await self._external_hooks.post_llm(
+                        response.content[:500], len(response.tool_calls or [])
+                    )
+                except Exception:
+                    pass
         self._emit_cache_usage(response)
         return LLMCallResult(
             response=response,
             resolved_model_name=model_name,
             time_to_first_token_ms=time_to_first_token_ms,
+            elapsed_ms=elapsed_ms,
             request_messages=request_messages,
         )
 

@@ -947,14 +947,138 @@ def build_blind_selector_prompt(
     )
 
 
+def selector_json_schema(choices: Sequence[str]) -> dict[str, Any]:
+    """Strict JSON Schema for blind artifact selection (grammar-constrained decoding)."""
+    allowed = sorted({str(c).strip() for c in choices if str(c).strip()})
+    choice_prop: dict[str, Any] = {"type": "string"}
+    if allowed:
+        choice_prop["enum"] = allowed
+    return {
+        "type": "object",
+        "properties": {
+            "why": {
+                "type": "string",
+                "description": (
+                    "Concise rationale naming the deciding criterion "
+                    "(COVERAGE, CORRECTNESS, or FIDELITY) and runner-up defect."
+                ),
+            },
+            "choice": choice_prop,
+        },
+        "required": ["why", "choice"],
+        "additionalProperties": False,
+    }
+
+
+def proposal_json_schema() -> dict[str, Any]:
+    """Strict JSON Schema for single-shot harness edit proposals."""
+    return {
+        "type": "object",
+        "properties": {
+            "keep_base": {"type": "boolean"},
+            "notes": {"type": "string"},
+            "edits": {
+                "type": "object",
+                "additionalProperties": {"type": "string"},
+            },
+            "removed": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+        },
+        "required": ["keep_base", "notes", "edits", "removed"],
+        "additionalProperties": False,
+    }
+
+
 def parse_choice_reply(reply_text: str, id_map: Mapping[str, str]) -> tuple[str, str, str]:
-    """Parse `(chosen_anon_id, chosen_label, why)` from a blind selector reply; raises ValueError if invalid."""
-    m = _CHOICE_RE.search(reply_text or "")
-    if not m:
-        raise ValueError("no ```choice block in selector reply")
-    anon = m.group(1).strip()
-    if anon not in id_map:
-        raise ValueError(f"selector chose {anon!r}, which is not in {sorted(id_map)}")
-    w = _WHY_RE.search(reply_text or "")
-    why = (w.group(1).strip() if w else "")[:2000]
-    return anon, id_map[anon], why
+    """Parse `(chosen_anon_id, chosen_label, why)` from a blind selector reply.
+
+    Accepts either:
+    * Schema-constrained JSON ``{"choice": "<id>", "why": "..."}`` (bare or fenced), or
+    * Harness²'s ``<why>...</why>`` + ```` ```choice ```` block.
+    """
+    raw = (reply_text or "").strip()
+    m = _CHOICE_RE.search(raw)
+    if m:
+        anon = m.group(1).strip()
+        if anon not in id_map:
+            raise ValueError(f"selector chose {anon!r}, which is not in {sorted(id_map)}")
+        w = _WHY_RE.search(raw)
+        why = (w.group(1).strip() if w else "")[:2000]
+        return anon, id_map[anon], why
+
+    # Fallback / primary path for JSON-schema constrained replies:
+    candidate = raw
+    if candidate.startswith("```"):
+        candidate = re.sub(r"^```(?:json)?\s*", "", candidate)
+        candidate = re.sub(r"\s*```\s*$", "", candidate).strip()
+    obj_match = re.search(r"\{[\s\S]*\}", candidate)
+    if obj_match:
+        try:
+            parsed = json.loads(obj_match.group(0))
+        except (json.JSONDecodeError, TypeError):
+            parsed = None
+        if isinstance(parsed, dict) and isinstance(parsed.get("choice"), str):
+            anon = parsed["choice"].strip()
+            if anon not in id_map:
+                raise ValueError(f"selector chose {anon!r}, which is not in {sorted(id_map)}")
+            why = str(parsed.get("why") or "").strip()[:2000]
+            return anon, id_map[anon], why
+
+    raise ValueError("no ```choice block or valid JSON choice in selector reply")
+
+
+_NOTES_RE = re.compile(r"<notes>(.*?)</notes>", re.DOTALL)
+
+
+def parse_proposal_reply(
+    reply_text: str,
+) -> tuple[dict[str, str], tuple[str, ...], str, bool]:
+    """Parse ``(edits, removed, notes, keep_base)`` from an LLM proposal reply."""
+    raw = (reply_text or "").strip()
+    if not raw:
+        return {}, (), "", True
+
+    notes_match = _NOTES_RE.search(raw)
+    extracted_notes = notes_match.group(1).strip() if notes_match else ""
+
+    candidate = raw
+    if candidate.startswith("```"):
+        candidate = re.sub(r"^```(?:json)?\s*", "", candidate)
+        candidate = re.sub(r"\s*```\s*$", "", candidate).strip()
+
+    # Explicit KEEP_BASE token outside JSON
+    if candidate == "KEEP_BASE" or (
+        "KEEP_BASE" in raw and "{" not in raw
+    ):
+        return {}, (), extracted_notes, True
+
+    obj_match = re.search(r"\{[\s\S]*\}", candidate)
+    if obj_match:
+        try:
+            data = json.loads(obj_match.group(0))
+        except (json.JSONDecodeError, TypeError):
+            data = None
+        if isinstance(data, dict):
+            keep_base = bool(data.get("keep_base", False))
+            raw_edits = data.get("edits")
+            edits = (
+                {str(k): str(v) for k, v in raw_edits.items() if str(k).strip()}
+                if isinstance(raw_edits, dict)
+                else {}
+            )
+            raw_removed = data.get("removed")
+            removed = (
+                tuple(str(r) for r in raw_removed if str(r).strip())
+                if isinstance(raw_removed, list)
+                else ()
+            )
+            notes = str(data.get("notes") or extracted_notes).strip()
+            if keep_base or (not edits and not removed):
+                return {}, (), notes, True
+            return edits, removed, notes, False
+
+    if "KEEP_BASE" in raw:
+        return {}, (), extracted_notes, True
+    raise ValueError("proposal reply did not contain valid JSON edits or KEEP_BASE")

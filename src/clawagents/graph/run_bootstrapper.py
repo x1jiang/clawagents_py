@@ -30,6 +30,7 @@ from clawagents.usage import RequestUsage, Usage
 
 from .completion_handler import CompletionHandler
 from .context_layers import build_default_layers, collect_dynamic_context
+from .deferred_flush import DeferredStepFlush
 from .context_management import (
     _looks_like_truncated_json,
     _preflight_context_check,
@@ -171,6 +172,7 @@ class RunSession:
     # Config
     max_rounds: int
     input_guardrails: list[Any] | None
+    deferred_flush: DeferredStepFlush | None = None
 
 
 # ── Bootstrapper ─────────────────────────────────────────────────────────
@@ -278,6 +280,7 @@ class RunBootstrapper:
             completion_handler=collaborators["completion_handler"],
             max_rounds=effective_max_rounds,
             input_guardrails=self.c.input_guardrails,
+            deferred_flush=collaborators["deferred_flush"],
         )
 
     # ── Phase 1: Config Resolution ──────────────────────────────────
@@ -777,6 +780,7 @@ class RunBootstrapper:
             resp: LLMResponse,
             *,
             time_to_first_token_ms: float | None = None,
+            elapsed_ms: float | None = None,
             peak_memory_bytes: int = 0,
         ) -> RequestUsage:
             prompt_t = int(getattr(resp, "prompt_tokens", 0) or 0)
@@ -805,6 +809,7 @@ class RunBootstrapper:
                 reasoning_tokens=reasoning_t,
                 cache_creation_tokens=cache_write_t,
                 time_to_first_token_ms=time_to_first_token_ms,
+                elapsed_ms=elapsed_ms,
                 peak_memory_bytes=peak_memory_bytes,
             )
             events_ref.typed(
@@ -819,11 +824,20 @@ class RunBootstrapper:
                     "reasoning_tokens": req.reasoning_tokens,
                     "cache_creation_tokens": req.cache_creation_tokens,
                     "time_to_first_token_ms": req.time_to_first_token_ms,
+                    "elapsed_ms": req.elapsed_ms,
+                    "decode_ms": req.decode_ms,
+                    "decode_tokens_per_sec": req.decode_tokens_per_sec,
+                    "avg_ttft_ms": usage.avg_ttft_ms,
+                    "steady_decode_tps": usage.steady_decode_tps,
+                    "max_step_ms": usage.max_step_ms,
+                    "cache_hit_ratio": usage.cache_hit_ratio,
                     "peak_memory_bytes": usage.peak_memory_bytes,
                     "model": req.model,
                 },
             )
             return req
+
+        deferred_flush = DeferredStepFlush()
 
         llm_caller = TurnLLMCaller(
             llm=c.llm,
@@ -834,6 +848,7 @@ class RunBootstrapper:
             external_hooks=self._ext_hook_runner,
             accumulate_usage=_accumulate_usage,
             provider_session_id=self._provider_session_id,
+            deferred_flush=deferred_flush,
         )
         response_interpreter = TurnResponseInterpreter(
             llm=c.llm,
@@ -936,6 +951,7 @@ class RunBootstrapper:
             accumulate_usage=_accumulate_usage,
             taxonomy_dispatcher=self._taxonomy_dispatcher,
             session_end_tail=c.session_end_tail,
+            deferred_flush=deferred_flush,
         )
         turn_driver = TurnDriver(
             llm=c.llm,
@@ -988,6 +1004,7 @@ class RunBootstrapper:
             "finalizer": run_finalizer,
             "advisor": advisor,
             "completion_handler": completion_handler,
+            "deferred_flush": deferred_flush,
             "started_at": t0,
         }
 

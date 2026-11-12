@@ -42,6 +42,7 @@ class RunFinalizer:
         accumulate_usage: Callable[[Any], Any],
         taxonomy_dispatcher: Any,
         session_end_tail: bool,
+        deferred_flush: Any = None,
     ) -> None:
         self._events = events
         self._hooks = hooks
@@ -59,9 +60,12 @@ class RunFinalizer:
         self._accumulate_usage = accumulate_usage
         self._taxonomy_dispatcher = taxonomy_dispatcher
         self._session_end_tail = session_end_tail
+        self._deferred_flush = deferred_flush
 
     async def finalize(self, state: Any, messages: list[LLMMessage], *, elapsed: float) -> Any:
         """Finalize a completed run without changing its terminal decision."""
+        if self._deferred_flush is not None:
+            await self._deferred_flush.drain()
         self._write_session_completion(state)
         run_summary = self._finalize_trajectory(state)
         await self._judge_and_learn(state, run_summary)

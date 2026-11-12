@@ -13,6 +13,8 @@ from .context_management import (
     _MAX_OVERFLOW_RETRIES,
     _MICRO_COMPACT_KEEP_RECENT,
     _MICRO_COMPACT_MIN_USAGE_RATIO,
+    _MICRO_COMPACT_STEP_MESSAGES,
+    _SOFT_TRIM_STEP_MESSAGES,
     _compact_if_needed,
     _extract_artifact_id,
     _micro_compact_tool_results,
@@ -21,6 +23,7 @@ from .context_management import (
     _InputBudgetExceeded,
     _estimate_native_schema_tokens,
     _resolve_input_budget,
+    should_advance_compaction_watermark,
 )
 from .message_repair import _patch_dangling_tool_calls
 from .model_profiles import resolve_long_context_threshold
@@ -237,7 +240,18 @@ class TurnDriver:
             messages, current_tokens = self._micro_compact(
                 messages, current_tokens
             )
-            if current_tokens > soft_trim_budget:
+            soft_urgent_ceiling = compaction_budget
+            if long_ctx:
+                soft_urgent_ceiling = min(
+                    soft_urgent_ceiling, max(8_000, int(long_ctx * 0.98))
+                )
+            if current_tokens > soft_trim_budget and should_advance_compaction_watermark(
+                len(messages),
+                int(getattr(self, "_soft_trim_epoch_len", 0) or 0),
+                step_messages=_SOFT_TRIM_STEP_MESSAGES,
+                current_tokens=current_tokens,
+                urgent_ceiling=soft_urgent_ceiling,
+            ):
                 trimmed = _soft_trim_messages(
                     messages,
                     self._context_window,
@@ -251,10 +265,13 @@ class TurnDriver:
                     from clawagents.efficiency import record_compaction
                     record_compaction(self._run_context, "soft_trim")
                     messages = trimmed
+                    setattr(self, "_soft_trim_epoch_len", len(messages))
                     current_tokens = self._rebase_ledger(messages)
                     self._note_context_change()
             if current_tokens > compaction_budget:
                 messages = await self._compact(messages)
+                setattr(self, "_micro_compact_epoch_len", 0)
+                setattr(self, "_soft_trim_epoch_len", 0)
                 self._rebase_ledger(messages)
                 self._note_context_change()
         # Compaction / trim can still leave pairs inconsistent — sanitize again.
@@ -349,20 +366,36 @@ class TurnDriver:
         if current_tokens > self._context_window * ratio or (
             economic_trigger is not None and current_tokens > economic_trigger
         ):
-            compacted = _micro_compact_tool_results(messages, keep_recent=keep_recent)
-            if compacted != messages:
-                from clawagents.efficiency import get_efficiency, record_compaction
-                from .tool_observation import _estimate_tokens
-                counters = get_efficiency(self._run_context)
-                for before, after in zip(messages, compacted):
-                    if before != after and isinstance(after.content, str) and _extract_artifact_id(after.content):
-                        counters["tokens_avoided_by_handles"] += max(
-                            0, _estimate_tokens(before.content) - _estimate_tokens(after.content)
-                        )
-                record_compaction(self._run_context, "micro")
-                messages = compacted
-                current_tokens = self._rebase_ledger(messages)
-                self._note_context_change()
+            budget_fn = getattr(self, "_input_budget", None)
+            urgent_ceiling = (
+                int(budget_fn())
+                if callable(budget_fn)
+                else int(self._context_window * 0.75)
+            )
+            if economic_trigger is not None:
+                urgent_ceiling = min(urgent_ceiling, economic_trigger)
+            if should_advance_compaction_watermark(
+                len(messages),
+                int(getattr(self, "_micro_compact_epoch_len", 0) or 0),
+                step_messages=_MICRO_COMPACT_STEP_MESSAGES,
+                current_tokens=current_tokens,
+                urgent_ceiling=urgent_ceiling,
+            ):
+                compacted = _micro_compact_tool_results(messages, keep_recent=keep_recent)
+                if compacted != messages:
+                    from clawagents.efficiency import get_efficiency, record_compaction
+                    from .tool_observation import _estimate_tokens
+                    counters = get_efficiency(self._run_context)
+                    for before, after in zip(messages, compacted):
+                        if before != after and isinstance(after.content, str) and _extract_artifact_id(after.content):
+                            counters["tokens_avoided_by_handles"] += max(
+                                0, _estimate_tokens(before.content) - _estimate_tokens(after.content)
+                            )
+                    record_compaction(self._run_context, "micro")
+                    messages = compacted
+                    setattr(self, "_micro_compact_epoch_len", len(messages))
+                    current_tokens = self._rebase_ledger(messages)
+                    self._note_context_change()
         return messages, current_tokens
 
     async def _compact(self, messages: list[LLMMessage]) -> list[LLMMessage]:

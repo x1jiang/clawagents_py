@@ -105,6 +105,8 @@ class UsageEvent(StreamEvent):
     cached_input_tokens: int = 0
     cache_creation_tokens: int = 0
     time_to_first_token_ms: float | None = None
+    elapsed_ms: float | None = None
+    decode_tokens_per_sec: float | None = None
     peak_memory_bytes: int = 0
     model: str = ""
     kind: str = "usage"

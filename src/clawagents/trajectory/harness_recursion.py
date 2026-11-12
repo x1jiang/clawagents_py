@@ -33,10 +33,23 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal, Mapping, Sequence
 
+from clawagents.trajectory.harness_context import (
+    DeliverablesMode,
+    RolloutEvidence,
+    materialize_evidence_workspace,
+)
+from clawagents.trajectory.harness_ledger import BudgetExceededError, HarnessLedger
+from clawagents.trajectory.harness_runmark import (
+    inputs_fingerprint,
+    prepare_clean_run_dir,
+    tree_fingerprint,
+    write_runmark,
+)
 from clawagents.trajectory.harness_surface import (
     DEFAULT_SURFACE,
     REJECTION_TEXT_MAX,
@@ -63,6 +76,11 @@ STAGE_ATTEMPTS = 2
 # How much of a rollout transcript a later stage is shown.
 TRAJECTORY_EXCERPT_MAX = 6_000
 
+_INCOMPLETE_RE = re.compile(
+    r"\b(?:TODO|FIXME|TBD|PLACEHOLDER)\b|\[interrupted\]|\[cancelled\]|Reached maximum",
+    re.IGNORECASE,
+)
+
 
 @dataclass(frozen=True)
 class Rollout:
@@ -75,10 +93,37 @@ class Rollout:
     trajectory: str = ""
     """Transcript (or a summary of it) shown to later edit stages."""
     error: str = ""
+    usd: float = 0.0
+    deliverable_files: Mapping[str, str] = field(default_factory=dict)
+    confidence: float | None = None
 
     @property
     def selectable(self) -> bool:
         return self.ok and self.delivered and bool(self.deliverable.strip())
+
+
+def score_rollout_confidence(rollout: Rollout | None) -> float:
+    """DSpark-inspired deterministic confidence score ``[0.0, 1.0]`` for a rollout.
+
+    Used when ``adaptive_probe=True`` to short-circuit speculative candidate/compose
+    rounds when all base rollouts already produce complete, clean deliverables.
+    """
+    if rollout is None or not rollout.selectable:
+        return 0.0
+    if rollout.confidence is not None:
+        return max(0.0, min(1.0, float(rollout.confidence)))
+    body = rollout.deliverable.strip()
+    score = 0.85 if len(body) >= 40 else 0.60
+    if _INCOMPLETE_RE.search(body):
+        score -= 0.45
+    if rollout.error.strip():
+        score -= 0.40
+    if len(body) >= 80 and not _INCOMPLETE_RE.search(body):
+        score += 0.08
+    traj = rollout.trajectory.strip()
+    if traj and "Traceback (most recent call last)" not in traj[-800:]:
+        score += 0.05
+    return round(max(0.0, min(1.0, score)), 4)
 
 
 @dataclass(frozen=True)
@@ -89,6 +134,7 @@ class Proposal:
     removed: tuple[str, ...] = ()
     notes: str = ""
     keep_base: bool = False
+    usd: float = 0.0
 
     @property
     def is_noop(self) -> bool:
@@ -100,7 +146,7 @@ RolloutFn = Callable[[Tree, str], Awaitable[Rollout]]
 ProposeFn = Callable[[str, str], Awaitable[Proposal]]
 """``(prompt, label) -> Proposal``. One edit session (INV, DOM or compose)."""
 SelectFn = Callable[[str], Awaitable[str]]
-"""``selector_prompt -> reply`` ending in a ```` ```choice ```` block."""
+"""``selector_prompt -> reply`` ending in a ```` ```choice ```` block or JSON choice."""
 
 
 @dataclass
@@ -116,6 +162,11 @@ class StageRecord:
     notes: str = ""
     attempts: int = 0
     autotriggered: tuple[str, ...] = ()
+    cached: bool = False
+    reused_from: str = ""
+    skipped: bool = False
+    skip_reason: str = ""
+    evidence_workspace: str = ""
 
 
 @dataclass
@@ -130,6 +181,7 @@ class PPCResult:
     ledger: dict[str, int]
     diversity: dict[str, Any]
     warnings: list[str] = field(default_factory=list)
+    harness_ledger: HarnessLedger | None = None
 
     def stage(self, label: str) -> StageRecord:
         for s in self.stages:
@@ -154,6 +206,7 @@ class PPCResult:
             "chosen": self.chosen,
             "selection": self.selection,
             "ledger": dict(self.ledger),
+            "harness_ledger": self.harness_ledger.to_dict() if self.harness_ledger else None,
             "diversity": self.diversity,
             "warnings": list(self.warnings),
             "stages": [
@@ -166,6 +219,11 @@ class PPCResult:
                     "error": s.error,
                     "attempts": s.attempts,
                     "autotriggered": list(s.autotriggered),
+                    "cached": s.cached,
+                    "reused_from": s.reused_from,
+                    "skipped": s.skipped,
+                    "skip_reason": s.skip_reason,
+                    "evidence_workspace": s.evidence_workspace,
                     "files": sorted(s.tree),
                     "rollout": None
                     if s.rollout is None
@@ -174,6 +232,8 @@ class PPCResult:
                         "delivered": s.rollout.delivered,
                         "deliverable_chars": len(s.rollout.deliverable),
                         "error": s.rollout.error,
+                        "usd": s.rollout.usd,
+                        "confidence": score_rollout_confidence(s.rollout),
                     },
                 }
                 for s in self.stages
@@ -301,6 +361,71 @@ def _candidate_summary(surface: SurfaceSpec, parent: Tree, stage: StageRecord) -
     return "\n".join(parts)
 
 
+def _save_rollout_payload(stage_dir: Path, r: Rollout) -> None:
+    payload = {
+        "ok": r.ok,
+        "delivered": r.delivered,
+        "deliverable": r.deliverable,
+        "trajectory": r.trajectory,
+        "error": r.error,
+        "usd": r.usd,
+        "deliverable_files": dict(r.deliverable_files),
+        "confidence": r.confidence,
+    }
+    tmp = stage_dir / "rollout.json.tmp"
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    tmp.replace(stage_dir / "rollout.json")
+
+
+def _load_rollout_payload(stage_dir: Path) -> Rollout | None:
+    p = stage_dir / "rollout.json"
+    if not p.is_file():
+        return None
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    raw_files = raw.get("deliverable_files")
+    files_map = (
+        {str(k): str(v) for k, v in raw_files.items()}
+        if isinstance(raw_files, dict)
+        else {}
+    )
+    conf_raw = raw.get("confidence")
+    return Rollout(
+        ok=bool(raw.get("ok")),
+        delivered=bool(raw.get("delivered")),
+        deliverable=str(raw.get("deliverable") or ""),
+        trajectory=str(raw.get("trajectory") or ""),
+        error=str(raw.get("error") or ""),
+        usd=float(raw.get("usd") or 0.0),
+        deliverable_files=files_map,
+        confidence=float(conf_raw) if isinstance(conf_raw, (int, float)) else None,
+    )
+
+
+def _to_rollout_evidence(records: Sequence[StageRecord]) -> list[RolloutEvidence]:
+    out: list[RolloutEvidence] = []
+    for rec in records:
+        r = rec.rollout
+        if r is None:
+            continue
+        out.append(
+            RolloutEvidence(
+                label=rec.label,
+                ok=r.ok,
+                delivered=r.delivered,
+                trajectory=r.trajectory,
+                deliverable=r.deliverable,
+                deliverable_files=r.deliverable_files,
+                error=r.error,
+            )
+        )
+    return out
+
+
 async def propose_probe_compose(
     task: str,
     base_tree: Mapping[str, str],
@@ -317,6 +442,13 @@ async def propose_probe_compose(
     concurrency: int = 2,
     stage_attempts: int = STAGE_ATTEMPTS,
     allow_subagents: bool = True,
+    adaptive_probe: bool = False,
+    confidence_threshold: float = 0.90,
+    max_usd: float | None = None,
+    run_dir: Path | str | None = None,
+    deliverables_mode: DeliverablesMode = "contents",
+    source_dir: Path | str | None = None,
+    on_stage_event: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> PPCResult:
     """Run one task through Propose–Probe–Compose and pick a harness blind.
 
@@ -334,6 +466,17 @@ async def propose_probe_compose(
     base = dict(base_tree)
     stages: list[StageRecord] = []
     ledger = {"rollouts": 0, "stages": 0}
+    h_ledger = HarnessLedger(
+        mode=mode,
+        task_id=task_id,
+        k=k,
+        max_usd=max_usd,
+        adaptive_probe=adaptive_probe,
+    )
+    run_root = Path(run_dir) if run_dir is not None else None
+    in_digest = inputs_fingerprint(task, source_dir) if run_root is not None else None
+    probed_by_fp: dict[str, StageRecord] = {}
+
     warnings: list[str] = []
     leaked = lint_task_prompt(task)
     if leaked:
@@ -342,39 +485,161 @@ async def propose_probe_compose(
             f"{leaked}: a model told it is being measured tends to optimise for the measurement"
         )
     gate = asyncio.Semaphore(max(1, concurrency))
-    propose_fn = cache.wrap(propose) if cache is not None else propose
     library_index = ""
-    if library is not None and library.context_dir() is not None:
+    library_ctx_dir = library.context_dir() if library is not None else None
+    if library is not None and library_ctx_dir is not None:
         try:
             library_index = library.index_path.read_text(encoding="utf-8")
         except OSError:
             library_index = ""
 
+    def _emit_stage(event_kind: str, payload: dict[str, Any]) -> None:
+        if on_stage_event is not None:
+            try:
+                on_stage_event(event_kind, payload)
+            except Exception:
+                pass
+
     async def probe(stage: StageRecord) -> StageRecord:
+        fp = tree_fingerprint(stage.tree)
+        if adaptive_probe and stage.kind != "base" and fp in probed_by_fp:
+            prior = probed_by_fp[fp]
+            if prior.rollout is not None and prior.rollout.ok:
+                stage.rollout = prior.rollout
+                stage.reused_from = prior.label
+                h_ledger.record_rollout(stage.label, reused_fingerprint=fp)
+                _emit_stage(
+                    "stage_completed",
+                    {"label": stage.label, "kind": stage.kind, "reused_from": prior.label},
+                )
+                return stage
+
+        if run_root is not None:
+            stage_dir = run_root / "rollouts" / stage.label
+            if prepare_clean_run_dir(
+                stage_dir,
+                expected_harness=stage.tree,
+                expected_inputs_digest=in_digest,
+            ):
+                loaded = _load_rollout_payload(stage_dir)
+                if loaded is not None:
+                    stage.rollout = loaded
+                    stage.cached = True
+                    h_ledger.record_rollout(stage.label, cached=True)
+                    if loaded.ok:
+                        probed_by_fp.setdefault(fp, stage)
+                    _emit_stage(
+                        "stage_completed",
+                        {"label": stage.label, "kind": stage.kind, "cached": True},
+                    )
+                    return stage
+
         async with gate:
+            h_ledger.check_can_proceed()
+            _emit_stage("stage_started", {"label": stage.label, "kind": stage.kind, "phase": "probe"})
             ledger["rollouts"] += 1
             try:
                 stage.rollout = await rollout(dict(stage.tree), stage.label)
+            except (BudgetExceededError, asyncio.CancelledError):
+                raise
             except Exception as exc:  # a crashed rollout is evidence, not a crash
-                stage.rollout = Rollout(ok=False, error=f"{type(exc).__name__}: {exc}"[:REJECTION_TEXT_MAX])
+                stage.rollout = Rollout(
+                    ok=False,
+                    error=f"{type(exc).__name__}: {exc}"[:REJECTION_TEXT_MAX],
+                )
+            r_usd = float(stage.rollout.usd) if stage.rollout is not None else 0.0
+            h_ledger.record_rollout(stage.label, usd=r_usd)
+            if stage.rollout is not None and stage.rollout.ok:
+                probed_by_fp.setdefault(fp, stage)
+                if run_root is not None:
+                    stage_dir = run_root / "rollouts" / stage.label
+                    _save_rollout_payload(stage_dir, stage.rollout)
+                    write_runmark(
+                        stage_dir,
+                        run_id=stage.label,
+                        harness=stage.tree,
+                        inputs_digest=in_digest,
+                    )
+            _emit_stage(
+                "stage_completed",
+                {
+                    "label": stage.label,
+                    "kind": stage.kind,
+                    "ok": bool(stage.rollout and stage.rollout.ok),
+                    "usd": h_ledger.usd,
+                },
+            )
         return stage
 
-    async def edit_stage(label: str, kind: str, prompt: str, parent_label: str, parent: Tree) -> StageRecord:
+    async def edit_stage(
+        label: str,
+        kind: str,
+        prompt: str,
+        parent_label: str,
+        parent: Tree,
+        evidence_records: Sequence[StageRecord] = (),
+        decisions: Mapping[str, str] | None = None,
+    ) -> StageRecord:
         """One edit session with accept-or-repair; falls back to ``parent``."""
         ledger["stages"] += 1
         record = StageRecord(label=label, kind=kind, tree=dict(parent), parent=parent_label)
+        if run_root is not None:
+            ws_dir = run_root / "sessions" / label
+            ev_ws = materialize_evidence_workspace(
+                ws_dir,
+                task=task,
+                parent_harness=parent,
+                rollouts=_to_rollout_evidence(evidence_records),
+                deliverables_mode=deliverables_mode,
+                source_dir=source_dir,
+                decisions=decisions,
+                library_dir=library_ctx_dir,
+            )
+            record.evidence_workspace = str(ev_ws.root)
+
         current_prompt = prompt
+        session_usd = 0.0
+        all_cached = True
         for attempt in range(1, max(1, stage_attempts) + 1):
             record.attempts = attempt
-            try:
-                async with gate:
-                    proposal = await propose_fn(current_prompt, label)
-            except Exception as exc:
-                record.error = f"proposer failed: {type(exc).__name__}: {exc}"[:REJECTION_TEXT_MAX]
-                continue
+            proposal: Proposal | None = None
+            hit = cache.get(label, current_prompt) if cache is not None else None
+            if hit is not None:
+                proposal = hit
+            else:
+                all_cached = False
+                try:
+                    async with gate:
+                        h_ledger.check_can_proceed()
+                        _emit_stage(
+                            "stage_started",
+                            {"label": label, "kind": kind, "phase": "propose", "attempt": attempt},
+                        )
+                        proposal = await propose(current_prompt, label)
+                        session_usd += float(proposal.usd or 0.0)
+                        if cache is not None:
+                            cache.put(label, current_prompt, proposal)
+                except (BudgetExceededError, asyncio.CancelledError):
+                    raise
+                except Exception as exc:
+                    record.error = f"proposer failed: {type(exc).__name__}: {exc}"[:REJECTION_TEXT_MAX]
+                    continue
+
             record.notes = proposal.notes
             if proposal.is_noop:
-                record.tree, record.kept_base, record.fell_back, record.error = dict(parent), True, False, ""
+                record.tree, record.kept_base, record.fell_back, record.error = (
+                    dict(parent),
+                    True,
+                    False,
+                    "",
+                )
+                record.cached = all_cached and cache is not None
+                h_ledger.record_session(
+                    label,
+                    usd=session_usd,
+                    cached=record.cached,
+                    attempts=attempt,
+                )
                 return record
             accepted, kept_base, fell_back, error, triggered = accept_or_repair_tree(
                 apply_edits(parent, proposal),
@@ -385,11 +650,30 @@ async def propose_probe_compose(
             )
             record.autotriggered = tuple(triggered)
             if not fell_back:
-                record.tree, record.kept_base, record.fell_back, record.error = accepted, kept_base, False, ""
+                record.tree, record.kept_base, record.fell_back, record.error = (
+                    accepted,
+                    kept_base,
+                    False,
+                    "",
+                )
+                record.cached = all_cached and cache is not None
+                h_ledger.record_session(
+                    label,
+                    usd=session_usd,
+                    cached=record.cached,
+                    attempts=attempt,
+                )
                 return record
             record.error = error
             current_prompt = _rejection_feedback(prompt, error)
         record.tree, record.kept_base, record.fell_back = dict(parent), False, True
+        record.cached = all_cached and cache is not None
+        h_ledger.record_session(
+            label,
+            usd=session_usd,
+            cached=record.cached,
+            attempts=record.attempts,
+        )
         return record
 
     def evidence(records: Sequence[StageRecord]) -> list[str]:
@@ -412,39 +696,112 @@ async def propose_probe_compose(
     stages.extend(bases)
 
     finals: list[StageRecord] = []
-    if mode == "parallel":
+    base_confident = adaptive_probe and all(
+        b.rollout is not None
+        and b.rollout.selectable
+        and score_rollout_confidence(b.rollout) >= confidence_threshold
+        for b in bases
+    )
+
+    if base_confident:
+        # DSpark-inspired confidence short-circuit: record skipped edit/probe
+        # stages so the 4k/3k accounting identity still holds while saving 3k
+        # edit sessions and 3k rollouts.
+        for i in range(1, k + 1):
+            for dim in ("INV", "DOM"):
+                lbl = f"{dim}{i}"
+                cand_rec = StageRecord(
+                    label=lbl,
+                    kind=dim,
+                    tree=dict(base),
+                    rollout=bases[i - 1].rollout,
+                    parent="base",
+                    kept_base=True,
+                    skipped=True,
+                    skip_reason="base_confident",
+                )
+                h_ledger.record_session(lbl, skipped=True, skip_reason="base_confident")
+                h_ledger.record_rollout(lbl, skipped=True, skip_reason="base_confident")
+                stages.append(cand_rec)
+            fin_lbl = f"agg{i}" if mode == "parallel" else f"c{i}"
+            fin_rec = StageRecord(
+                label=fin_lbl,
+                kind="compose",
+                tree=dict(base),
+                rollout=bases[i - 1].rollout,
+                parent="base",
+                kept_base=True,
+                skipped=True,
+                skip_reason="base_confident",
+            )
+            h_ledger.record_session(fin_lbl, skipped=True, skip_reason="base_confident")
+            h_ledger.record_rollout(fin_lbl, skipped=True, skip_reason="base_confident")
+            stages.append(fin_rec)
+            finals.append(fin_rec)
+    elif mode == "parallel":
         candidates = await asyncio.gather(*(
-            edit_stage(f"{dim}{i}", dim, propose_prompt(dim, bases), "base", base)
+            edit_stage(f"{dim}{i}", dim, propose_prompt(dim, bases), "base", base, bases)
             for i in range(1, k + 1)
             for dim in ("INV", "DOM")
         ))
         await asyncio.gather(*(probe(c) for c in candidates))
         stages.extend(candidates)
         prompt = compose_prompt(base, candidates)
+        cand_decisions = {c.label: c.notes for c in candidates if c.notes.strip()}
         finals = list(await asyncio.gather(*(
-            edit_stage(f"agg{i}", "compose", prompt, "base", base) for i in range(1, k + 1)
+            edit_stage(
+                f"agg{i}",
+                "compose",
+                prompt,
+                "base",
+                base,
+                [*bases, *candidates],
+                cand_decisions,
+            )
+            for i in range(1, k + 1)
         )))
         await asyncio.gather(*(probe(f) for f in finals))
         stages.extend(finals)
     else:
         checkpoint, checkpoint_label, seen = base, "base", list(bases)
+        prior_decisions: dict[str, str] = {}
         for t in range(1, k + 1):
             round_candidates = list(await asyncio.gather(*(
-                edit_stage(f"{dim}{t}", dim, propose_prompt(dim, seen), checkpoint_label, checkpoint)
+                edit_stage(
+                    f"{dim}{t}",
+                    dim,
+                    propose_prompt(dim, seen),
+                    checkpoint_label,
+                    checkpoint,
+                    seen,
+                    prior_decisions,
+                )
                 for dim in ("INV", "DOM")
             )))
             await asyncio.gather(*(probe(c) for c in round_candidates))
             stages.extend(round_candidates)
+            for rc in round_candidates:
+                if rc.notes.strip():
+                    prior_decisions[rc.label] = rc.notes
             composed = await edit_stage(
-                f"c{t}", "compose", compose_prompt(checkpoint, round_candidates),
-                checkpoint_label, checkpoint,
+                f"c{t}",
+                "compose",
+                compose_prompt(checkpoint, round_candidates),
+                checkpoint_label,
+                checkpoint,
+                [*seen, *round_candidates],
+                prior_decisions,
             )
+            if composed.notes.strip():
+                prior_decisions[composed.label] = composed.notes
             await probe(composed)
             stages.append(composed)
             finals.append(composed)
             checkpoint, checkpoint_label, seen = dict(composed.tree), composed.label, [composed]
 
+    h_ledger.assert_identity()
     selection = await _select_final(task, task_id, k, mode, finals, bases, select)
+    _emit_stage("selection_completed", {"chosen": selection["chosen"], "selection": selection})
     return PPCResult(
         task_id=task_id,
         mode=mode,
@@ -456,6 +813,7 @@ async def propose_probe_compose(
         ledger=ledger,
         diversity=tree_diversity({f.label: f.tree for f in finals}),
         warnings=warnings,
+        harness_ledger=h_ledger,
     )
 
 
@@ -621,5 +979,6 @@ __all__ = [
     "propose_probe_compose",
     "read_tree",
     "record_experience",
+    "score_rollout_confidence",
     "write_tree",
 ]
