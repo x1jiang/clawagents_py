@@ -20,6 +20,10 @@ Harness² (from the reference implementation, github.com/google-research/harness
 - New `clawagents.trajectory.harness_recursion`: the **Propose–Probe–Compose** loop that the existing surface/prompt/selection/library helpers were missing. `propose_probe_compose(...)` runs `parallel` (k bases, 2k INV/DOM candidates, k compositions) or `sequential` (k rounds, each building on the last checkpoint) at 4k rollouts / 3k edit stages, with omitted-is-inherited edits, `KEEP_BASE`, one retry carrying the rejection text, fallback to the parent tree, blind seeded selection among the compositions, a content-addressed proposer cache, a post-adoption reflection prompt and `record_experience`. Rollout and proposal are caller-supplied callables.
 - `validate_harness_tree` now validates the hooks file (it was declared on `SurfaceSpec` but never checked) and can reject off-surface paths (`reject_off_surface`). `accept_or_repair_tree` accepts a `repair` callback with bounded attempts. Autotrigger descriptions are capped at 600 chars. `ExperienceLibrary` gains `retain_before` (a task sees only earlier tasks' entries), `context_dir`, and a harness inventory line in `INDEX.md`. `lint_task_prompt` flags measurement words in task text.
 
+Structure:
+
+- `providers/llm.py` (5,100 lines) is split into one module per provider family — `base`, `stream_retry`, `tool_convert`, `openai_provider`, `gemini_provider`, `anthropic_provider`, `bedrock_provider`, `factory` — layered without import cycles. `clawagents.providers.llm` remains the import path for every public and private name, and assigning a name on it (as tests and the VS Code sidecar's Gemini shim do) still reaches the implementation. No behaviour change; classes now report their new `__module__`.
+
 Fixes found while clearing the type checker (mypy is now clean and runs in CI):
 
 - **`web_fetch` over HTTPS never worked:** it passed `server_hostname=` to `http.client.HTTPSConnection`, which raises `TypeError`. It now dials the pinned IP and verifies the certificate against the real hostname.

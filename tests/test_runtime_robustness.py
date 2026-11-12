@@ -395,7 +395,8 @@ async def test_none_callback_is_a_no_op():
 
 
 def test_every_stream_retry_loop_uses_the_guard():
-    src = Path(__file__).resolve().parents[1].joinpath("src/clawagents/providers/llm.py").read_text()
+    providers = Path(__file__).resolve().parents[1].joinpath("src/clawagents/providers")
+    src = "".join((providers / f"{n}_provider.py").read_text() for n in ("openai", "gemini", "anthropic"))
     assert src.count("replay_guard = _StreamReplayGuard(on_chunk)") == 4
     assert src.count("replay_guard.begin_attempt()") == 4
 

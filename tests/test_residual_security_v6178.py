@@ -134,9 +134,14 @@ def test_stream_breaker_helpers_exist():
     assert callable(llm_mod._get_stream_breaker)
     assert callable(llm_mod._admit_stream_breaker)
     assert callable(llm_mod._record_stream_breaker)
-    # All four stream entrypoints reference admit helper
-    src = Path(llm_mod.__file__).read_text(encoding="utf-8")
-    assert src.count("_admit_stream_breaker") >= 4
+    # All four stream entrypoints reference admit helper. The provider code
+    # lives in sibling modules of the ``llm`` facade.
+    providers_dir = Path(llm_mod.__file__).parent
+    src = "".join(
+        (providers_dir / f"{name}_provider.py").read_text(encoding="utf-8")
+        for name in ("openai", "gemini", "anthropic")
+    )
+    assert src.count("await _admit_stream_breaker(") >= 4
 
 
 def test_doom_force_response_flag_semantics():
