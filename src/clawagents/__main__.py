@@ -737,12 +737,15 @@ async def cmd_adapt(
     adaptive_probe: bool = True,
     max_usd: float | None = None,
     apply: bool = False,
+    reflect: bool = True,
     json_output: bool = False,
 ) -> None:
     """Run Harness² Propose–Probe–Compose workspace optimization from the CLI."""
     from clawagents.trajectory.harness_substrate import optimize_workspace_harness
+    from clawagents.trajectory.harness_surface import ExperienceLibrary
 
     ws = Path(workspace).expanduser().resolve()
+    library = ExperienceLibrary(ws / ".clawagents" / "experience_library")
     out = await optimize_workspace_harness(
         tasks[0] if len(tasks) == 1 else tasks,
         ws,
@@ -750,7 +753,9 @@ async def cmd_adapt(
         mode=mode,  # type: ignore[arg-type]
         adaptive_probe=adaptive_probe,
         max_usd=max_usd,
+        library=library,
         apply=apply,
+        reflect=reflect,
     )
     ppc = out["result"]
     ledger = (
@@ -766,6 +771,7 @@ async def cmd_adapt(
         "diff_summary": out["diff_summary"],
         "unified_diffs": out["unified_diffs"],
         "applied": out["applied"],
+        "experience": out.get("experience"),
     }
     if json_output:
         print(json.dumps(payload, indent=2, default=str))
@@ -773,6 +779,8 @@ async def cmd_adapt(
     print(f"Chosen candidate: {ppc.chosen}")
     print(f"Diff summary: {out['diff_summary']}")
     print(f"Ledger: {ledger}")
+    if out.get("experience"):
+        print(f"Recorded causal reflection to {ws / '.clawagents' / 'experience_library'}")
     if out["applied"]:
         print(f"Applied to workspace; backup saved at {out['applied'].get('backup_dir')}")
     elif out["unified_diffs"]:
@@ -862,6 +870,7 @@ def main():
     )
     parser.add_argument("--max-usd", type=float, default=None, help="Optional USD budget ceiling for --adapt")
     parser.add_argument("--apply", action="store_true", help="Apply adopted Harness² edits to workspace with backup")
+    parser.add_argument("--no-reflect", action="store_true", help="Disable recording post-PPC causal reflection to .clawagents/experience_library")
     parser.add_argument("--no-adaptive-probe", action="store_true", help="Disable DSpark adaptive probe short-circuiting")
     parser.add_argument("--workspace", type=str, default=".", help="Workspace path for --adapt / --rollback-harness")
     parser.add_argument("--rollback-harness", type=str, metavar="BACKUP_DIR", help="Restore a workspace harness backup created by --adapt --apply")
@@ -908,6 +917,7 @@ def main():
                     adaptive_probe=not args.no_adaptive_probe,
                     max_usd=args.max_usd,
                     apply=args.apply,
+                    reflect=not args.no_reflect,
                     json_output=args.json,
                 )
             )

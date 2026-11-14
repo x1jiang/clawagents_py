@@ -23,7 +23,7 @@ from clawagents.graph.deferred_flush import DeferredStepFlush
 from clawagents.graph.run_runtime import HookDispatcher, RunEvents
 from clawagents.graph.turn_driver import TurnDriver
 from clawagents.graph.turn_llm import TurnLLMCaller
-from clawagents.providers.llm import LLMMessage, LLMResponse
+from clawagents.providers.llm import LLMMessage, LLMProvider, LLMResponse
 from clawagents.run_context import RunContext
 from clawagents.session.persistence import SessionReader, SessionWriter
 from clawagents.structured_output import (
@@ -363,3 +363,101 @@ async def test_structured_control_concurrent_calls_do_not_leak_schema():
     assert r1[0]["ok"] is True and r2[0]["ok"] is True
     assert {item["title"] for item in seen} == {"s1", "s2"}
     assert not hasattr(shared, "_structured_json_schema")
+
+
+@pytest.mark.asyncio
+async def test_background_job_cleans_subprocess_transport_on_exit():
+    import sys
+    from clawagents.background import BackgroundJobManager
+
+    mgr = BackgroundJobManager()
+    job = await mgr.start([sys.executable, "-c", "print('ok')"])
+    done = await mgr.await_complete(job.id, timeout=10.0)
+    assert done.exit_code == 0
+    assert done.running is False
+    assert done._process is None
+
+
+@pytest.mark.asyncio
+async def test_fallback_provider_locks_structured_schema_concurrently():
+    from clawagents.providers.fallback import FallbackProvider
+
+    observed: list[Any] = []
+
+    class SharedPrimary(LLMProvider):
+        name = "primary"
+        model = "stub"
+
+        async def chat(self, messages, on_chunk=None, cancel_event=None, tools=None, **_kwargs):
+            observed.append(getattr(self, "_structured_json_schema", None))
+            await asyncio.sleep(0.015)
+            return LLMResponse(content='{"ok": true}', model="stub", tokens_used=5)
+
+    fb = FallbackProvider(SharedPrimary(), [])
+    r1, r2 = await asyncio.gather(
+        invoke_structured_control(fb, [LLMMessage(role="user", content="a")], schema={"type": "object", "title": "one"}, parse_fn=json.loads),
+        invoke_structured_control(fb, [LLMMessage(role="user", content="b")], schema={"type": "object", "title": "two"}, parse_fn=json.loads),
+    )
+    assert r1[0]["ok"] is True and r2[0]["ok"] is True
+    assert {item["title"] for item in observed} == {"one", "two"}
+    assert not hasattr(fb.primary, "_structured_json_schema")
+
+    # Also ensure two distinct FallbackProviders sharing one primary serialize via _get_llm_control_lock
+    observed.clear()
+    shared_primary = SharedPrimary()
+    fb_a = FallbackProvider(shared_primary, [])
+    fb_b = FallbackProvider(shared_primary, [])
+    setattr(fb_a, "_structured_json_schema", {"type": "object", "title": "alpha"})
+    setattr(fb_b, "_structured_json_schema", {"type": "object", "title": "beta"})
+    await asyncio.gather(
+        fb_a.chat([LLMMessage(role="user", content="a")]),
+        fb_b.chat([LLMMessage(role="user", content="b")]),
+    )
+    assert {item["title"] for item in observed} == {"alpha", "beta"}
+    assert not hasattr(shared_primary, "_structured_json_schema")
+
+
+@pytest.mark.asyncio
+async def test_maybe_extract_memories_writes_to_workspace_with_full_tail(tmp_path: Path):
+    from clawagents.config.features import set_overrides
+    from clawagents.trajectory.background_memory import maybe_extract_memories
+
+    captured_prompts: list[str] = []
+
+    class CapturingLLM:
+        async def chat(self, messages, **_kwargs):
+            captured_prompts.append(str(messages[-1].content))
+            return LLMResponse(
+                content=json.dumps({
+                    "memories": [
+                        {"type": "project", "content": "Late tool output fact", "confidence": 0.92}
+                    ]
+                }),
+                model="stub",
+                tokens_used=10,
+            )
+
+    set_overrides({"background_memory": True})
+    try:
+        # Build > 12 messages across 10 rounds (simulating multi-tool turns)
+        msgs: list[LLMMessage] = []
+        for i in range(10):
+            msgs.append(LLMMessage(role="user", content=f"user-{i}"))
+            msgs.append(LLMMessage(role="assistant", content=f"assistant-{i}"))
+            msgs.append(LLMMessage(role="tool", content=f"tool-detail-{i}-sentinel"))
+
+        next_turn = await maybe_extract_memories(
+            CapturingLLM(),
+            msgs,
+            round_idx=10,
+            last_extraction_turn=5,
+            workspace=tmp_path,
+        )
+        assert next_turn == 10
+        assert captured_prompts
+        assert "tool-detail-9-sentinel" in captured_prompts[0]
+        extracted_file = tmp_path / ".clawagents" / "memories" / "extracted.md"
+        assert extracted_file.is_file()
+        assert "Late tool output fact" in extracted_file.read_text(encoding="utf-8")
+    finally:
+        set_overrides({})

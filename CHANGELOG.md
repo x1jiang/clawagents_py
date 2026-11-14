@@ -1,5 +1,11 @@
 # Changelog
 
+## 6.20.101
+
+- **Workspace-isolated Harness² rollouts & staging cleanup (`clawagents.trajectory.harness_substrate`):** `ClawAgentSubstrate.execute` passes `workspace=str(staging)` directly into `create_claw_agent` without mutating process-global `os.chdir()` during parallel rollouts; multi-task benchmark suites run with bounded concurrency (`asyncio.Semaphore(4)`) when `mode="parallel"`; explicit `run_dir` runs remove temporary `run_dir/staging/` directories on completion.
+- **CLI Harness² experience reflection (`clawagents.__main__`):** `clawagents --adapt` wires `.clawagents/experience_library` (`ExperienceLibrary`) and `reflect=True` by default (with `--no-reflect` to opt out).
+- **Subprocess & provider concurrency hardening (`clawagents.background`, `providers/fallback.py`, `trajectory/background_memory.py`, `tools/registry.py`):** close finished subprocess transports and clear `_process` handles in `BackgroundJobManager` to prevent GC event-loop warnings; serialize `_structured_json_schema` propagation across concurrent `FallbackProvider` calls via `_get_llm_control_lock`; support explicit `workspace` and round-accurate message-offset bounds in `background_memory`; and record external snapshot manifests under `.clawagents/snapshots_meta/`.
+
 ## 6.20.100
 
 - **Workspace harness rollback (`clawagents.trajectory.harness_substrate`):** new `rollback_workspace_harness(...)` and `.rollback_manifest.json` snapshot metadata in `backup_and_apply_harness(...)` to restore prior workspace files, remove newly added skill/subagent files, prune empty added directories, enforce path-containment and symlink guards, and clear reused backup directories cleanly.

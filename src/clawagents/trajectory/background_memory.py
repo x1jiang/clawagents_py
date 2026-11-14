@@ -57,8 +57,31 @@ Types:
 """
 
 
-def _get_memories_dir() -> Path:
-    return Path.cwd() / ".clawagents" / _MEMORIES_DIR_NAME
+def _get_memories_dir(workspace: Path | str | None = None) -> Path:
+    root = Path(workspace).resolve() if workspace is not None else Path.cwd()
+    return root / ".clawagents" / _MEMORIES_DIR_NAME
+
+
+def _segment_bounds(
+    messages: list[Any],
+    round_idx: int,
+    last_extraction_turn: int,
+) -> tuple[int, int]:
+    """Map logical round deltas onto actual ``messages`` list indices."""
+    end = len(messages)
+    if end == 0 or last_extraction_turn <= 0:
+        return 0, end
+    rounds_delta = max(1, round_idx - last_extraction_turn)
+    assistant_seen = 0
+    for idx in range(end - 1, -1, -1):
+        role = str(getattr(messages[idx], "role", "") or "").lower()
+        if role == "assistant":
+            assistant_seen += 1
+            if assistant_seen >= rounds_delta:
+                prev_role = str(getattr(messages[max(0, idx - 1)], "role", "") or "").lower()
+                start = max(0, idx - 1) if idx > 0 and prev_role == "user" else idx
+                return start, end
+    return max(0, min(last_extraction_turn, end)), end
 
 
 def _format_messages_segment(messages: list[Any], start: int, end: int) -> str:
@@ -149,13 +172,18 @@ async def extract_background_memories(
         return []
 
 
-def save_memories(memories: list[dict[str, Any]], turn_index: int) -> Optional[str]:
+def save_memories(
+    memories: list[dict[str, Any]],
+    turn_index: int,
+    *,
+    workspace: Path | str | None = None,
+) -> Optional[str]:
     """Save extracted memories to .clawagents/memories/ as typed markdown files."""
     if not memories:
         return None
 
     try:
-        mem_dir = _get_memories_dir()
+        mem_dir = _get_memories_dir(workspace)
         mem_dir.mkdir(parents=True, exist_ok=True)
 
         ts = int(time.time())
@@ -178,7 +206,7 @@ timestamp: {ts}
 
         # Append to memories file
         mem_file = mem_dir / "extracted.md"
-        with open(mem_file, "a") as f:
+        with open(mem_file, "a", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
 
         return str(mem_file)
@@ -193,6 +221,8 @@ async def maybe_extract_memories(
     round_idx: int,
     last_extraction_turn: int,
     interval: int = _EXTRACTION_INTERVAL,
+    *,
+    workspace: Path | str | None = None,
 ) -> int:
     """Run background memory extraction if enough turns have passed.
 
@@ -207,11 +237,10 @@ async def maybe_extract_memories(
 
     # Run extraction as a background task
     try:
-        start = max(0, last_extraction_turn)
-        end = min(len(messages), round_idx + 2)  # +2 for the latest pair
+        start, end = _segment_bounds(messages, round_idx, last_extraction_turn)
         memories = await extract_background_memories(llm, messages, start, end)
         if memories:
-            save_memories(memories, round_idx)
+            save_memories(memories, round_idx, workspace=workspace)
             logger.debug("Extracted %d background memories at turn %d", len(memories), round_idx)
     except Exception as exc:
         logger.debug("Background memory extraction error: %s", exc)

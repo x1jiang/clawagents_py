@@ -246,6 +246,20 @@ def _snapshot_before_write(tool_name: str, args: Dict[str, Any]) -> None:
         dest = snap_dir / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(str(resolved), str(dest))
+        # Record file manifest outside snapshots/<ts>/ so SnapshotDiffTool keeps clean files only.
+        meta_dir = root / ".clawagents" / "snapshots_meta"
+        meta_dir.mkdir(parents=True, exist_ok=True)
+        meta_file = meta_dir / f"{snap_dir.name}.json"
+        existing_files: list[str] = []
+        if meta_file.is_file():
+            try:
+                loaded = json.loads(meta_file.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict) and isinstance(loaded.get("files"), list):
+                    existing_files = [str(x) for x in loaded["files"] if isinstance(x, str)]
+            except Exception:
+                existing_files = []
+        updated_files = sorted({*existing_files, rel.as_posix()})[:200]
+        meta_file.write_text(json.dumps({"files": updated_files}), encoding="utf-8")
     except Exception:
         pass  # Snapshot failure should never block tool execution
 

@@ -161,23 +161,38 @@ class FallbackProvider(LLMProvider):
                 continue
 
             try:
-                # Propagate structured-output schema onto the concrete provider.
+                # Propagate structured-output schema onto the concrete provider,
+                # serialized per (provider, loop) so concurrent requests cannot race.
                 schema = getattr(self, "_structured_json_schema", None)
                 if schema is not None:
-                    setattr(provider, "_structured_json_schema", schema)
-                try:
+                    from clawagents.structured_output import _get_llm_control_lock
+
+                    async with _get_llm_control_lock(provider):
+                        prior_has_schema = hasattr(provider, "_structured_json_schema")
+                        prior_schema = getattr(provider, "_structured_json_schema", None)
+                        setattr(provider, "_structured_json_schema", schema)
+                        try:
+                            response = await provider.chat(
+                                messages,
+                                on_chunk=on_chunk,
+                                cancel_event=cancel_event,
+                                tools=tools,
+                            )
+                        finally:
+                            if prior_has_schema:
+                                setattr(provider, "_structured_json_schema", prior_schema)
+                            else:
+                                try:
+                                    delattr(provider, "_structured_json_schema")
+                                except Exception:
+                                    setattr(provider, "_structured_json_schema", None)
+                else:
                     response = await provider.chat(
                         messages,
                         on_chunk=on_chunk,
                         cancel_event=cancel_event,
                         tools=tools,
                     )
-                finally:
-                    if schema is not None and hasattr(provider, "_structured_json_schema"):
-                        try:
-                            delattr(provider, "_structured_json_schema")
-                        except Exception:
-                            setattr(provider, "_structured_json_schema", None)
                 state.record_success()
                 return response
 

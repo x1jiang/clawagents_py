@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -501,3 +503,118 @@ def test_cli_adapt_and_rollback_harness(tmp_path: Path, monkeypatch, capsys):
     rb_json = json.loads(capsys.readouterr().out)
     assert "AGENTS.md" in rb_json["restored"]
     assert (ws / "AGENTS.md").read_text(encoding="utf-8") == "# Old CLI rules\n"
+
+
+@pytest.mark.asyncio
+async def test_substrate_execute_uses_explicit_workspace_without_chdir(tmp_path: Path, monkeypatch):
+    import clawagents.agent as agent_mod
+    from types import SimpleNamespace
+    from clawagents.trajectory.harness_substrate import ClawAgentSubstrate, RunRequest
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    staging = tmp_path / "staging"
+    seen_workspaces: list[str] = []
+    seen_cwds: list[Path] = []
+    initial_cwd = Path.cwd()
+
+    class StubAgent:
+        async def invoke(self, task, **_kwargs):
+            seen_cwds.append(Path.cwd())
+            return SimpleNamespace(status="done", result="ok", trajectory_file="", session_file="", usage=None)
+
+    def fake_create_claw_agent(**kwargs):
+        seen_workspaces.append(str(kwargs.get("workspace")))
+        return StubAgent()
+
+    monkeypatch.setattr(agent_mod, "create_claw_agent", fake_create_claw_agent)
+    sub = ClawAgentSubstrate(ws, llm=object())
+    install = sub.materialise({"AGENTS.md": "# test\n"}, staging)
+    rollout = await sub.execute(RunRequest(task="hello", workspace=staging, label="s0"), install)
+    assert rollout.ok is True
+    assert seen_workspaces == [str(staging)]
+    assert seen_cwds == [initial_cwd]
+    assert Path.cwd() == initial_cwd
+
+
+@pytest.mark.asyncio
+async def test_optimize_workspace_harness_cleans_staging_and_parallel_suite(tmp_path: Path):
+    from clawagents.providers.base import LLMResponse
+    from clawagents.trajectory.harness_substrate import optimize_workspace_harness
+
+    ws = tmp_path / "ws_parallel"
+    ws.mkdir()
+    (ws / "AGENTS.md").write_text("# Base\n", encoding="utf-8")
+    run_dir = tmp_path / "explicit_run_dir"
+
+    class KeepBaseLLM:
+        model = "stub-model"
+
+        async def chat(self, messages, **kwargs):
+            text = "\n".join(str(getattr(m, "content", "")) for m in messages)
+            if '"keep_base"' in text or "Propose minimal" in text:
+                return LLMResponse(content='{"keep_base": true, "notes": "clean", "edits": {}, "removed": []}', model="stub-model", tokens_used=10)
+            return LLMResponse(content='{"why": "ok", "choice": "A"}', model="stub-model", tokens_used=10)
+
+    out = await optimize_workspace_harness(
+        ["Task alpha", "Task beta"],
+        ws,
+        llm=KeepBaseLLM(),
+        k=1,
+        mode="parallel",
+        run_dir=run_dir,
+        rollout_fn=lambda _tree, label: asyncio.sleep(
+            0.01,
+            result=Rollout(ok=True, delivered=True, deliverable=f"d:{label}", trajectory=f"t:{label}", usd=0.01),
+        ),
+    )
+    assert out["ok"] is True
+    assert run_dir.is_dir()
+    assert not (run_dir / "staging").exists()
+
+
+def test_cli_adapt_wires_experience_library_and_no_reflect(tmp_path: Path, monkeypatch):
+    from clawagents import __main__ as cli_main
+    from clawagents.trajectory import harness_substrate as hs
+    from clawagents.trajectory.harness_surface import ExperienceLibrary
+
+    ws = tmp_path / "cli_refl"
+    ws.mkdir()
+    captured: list[dict[str, Any]] = []
+
+    async def fake_opt(task, workspace, **kwargs):
+        captured.append({"task": task, "workspace": workspace, **kwargs})
+        return {
+            "ok": True,
+            "result": type("PPC", (), {"chosen": "s0", "selection": {}, "ledger": {}, "harness_ledger": None})(),
+            "diff_summary": "",
+            "unified_diffs": {},
+            "applied": None,
+            "experience": {"chosen_label": "s0"},
+        }
+
+    monkeypatch.setattr(hs, "optimize_workspace_harness", fake_opt)
+    monkeypatch.setattr(sys, "argv", ["clawagents", "--adapt", "Task 1", "--workspace", str(ws), "--json"])
+    cli_main.main()
+    assert captured[-1]["reflect"] is True
+    assert isinstance(captured[-1]["library"], ExperienceLibrary)
+
+    monkeypatch.setattr(sys, "argv", ["clawagents", "--adapt", "Task 1", "--workspace", str(ws), "--no-reflect", "--json"])
+    cli_main.main()
+    assert captured[-1]["reflect"] is False
+
+
+def test_snapshot_meta_written_outside_snapshots_dir(tmp_path: Path, monkeypatch):
+    from clawagents.tools import registry
+
+    ws = tmp_path / "snap_ws"
+    ws.mkdir()
+    f = ws / "app.py"
+    f.write_text("print(1)\n", encoding="utf-8")
+    monkeypatch.chdir(ws)
+    registry._snapshot_before_write("write_file", {"path": str(f)})
+    meta_files = list((ws / ".clawagents" / "snapshots_meta").glob("*.json"))
+    assert len(meta_files) == 1
+    meta = json.loads(meta_files[0].read_text(encoding="utf-8"))
+    assert "app.py" in meta["files"]
+    assert not list((ws / ".clawagents" / "snapshots").rglob(".snapshot_meta.json"))

@@ -40,6 +40,23 @@ JobNotifier = Callable[["BackgroundJob"], Optional[Awaitable[None]]]
 """Callback signature. Returning a coroutine awaits it; otherwise sync."""
 
 
+def _cleanup_finished_process(
+    job: BackgroundJob,
+    proc: asyncio.subprocess.Process,
+) -> None:
+    """Close finished subprocess transports cleanly to prevent GC loop-closed warnings."""
+    if proc.returncode is None:
+        return
+    transport = getattr(proc, "_transport", None)
+    if transport is not None:
+        try:
+            transport.close()
+        except Exception:  # noqa: BLE001
+            pass
+    if job._process is proc:
+        job._process = None
+
+
 def _filtered(text: str, fn: Optional[Callable[[str], str]]) -> str:
     """Apply an optional output filter, keeping the raw text if it misbehaves."""
     if fn is None or not text:
@@ -210,6 +227,7 @@ class BackgroundJobManager:
             finally:
                 if job.exit_code is None:
                     job.exit_code = proc.returncode if proc.returncode is not None else -1
+                _cleanup_finished_process(job, proc)
                 job.ended_at = time.time()
                 job._done_event.set()
                 if notify_on_complete is not None:
@@ -289,6 +307,7 @@ class BackgroundJobManager:
             finally:
                 if job.exit_code is None:
                     job.exit_code = proc.returncode if proc.returncode is not None else -1
+                _cleanup_finished_process(job, proc)
                 job.ended_at = time.time()
                 job._done_event.set()
                 if notify_on_complete is not None:

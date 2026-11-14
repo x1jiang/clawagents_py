@@ -17,6 +17,7 @@ ClawAgents' native runtime:
 
 from __future__ import annotations
 
+import asyncio
 import difflib
 import json
 import os
@@ -475,30 +476,23 @@ class ClawAgentSubstrate:
         from clawagents.run_context import RunContext
 
         llm = self._resolve_llm()
-        prev_cwd = Path.cwd()
         staging = install.staging_dir
         baseline = self._baselines.get(staging, {})
-        try:
-            os.chdir(staging)
-            agent = create_claw_agent(
-                model=llm,
-                streaming=False,
-                trajectory=True,
-                learn=False,
-            )
-            rc: RunContext[Any] = RunContext(skip_memory=True)
-            rc._metadata["workspace"] = str(staging)
-            state = await agent.invoke(
-                request.task,
-                max_iterations=request.max_iterations or self.max_iterations,
-                timeout_s=request.timeout_s or self.timeout_s,
-                run_context=rc,
-            )
-        finally:
-            try:
-                os.chdir(prev_cwd)
-            except OSError:
-                pass
+        agent = create_claw_agent(
+            model=llm,
+            streaming=False,
+            trajectory=True,
+            learn=False,
+            workspace=str(staging),
+        )
+        rc: RunContext[Any] = RunContext(skip_memory=True)
+        rc._metadata["workspace"] = str(staging)
+        state = await agent.invoke(
+            request.task,
+            max_iterations=request.max_iterations or self.max_iterations,
+            timeout_s=request.timeout_s or self.timeout_s,
+            run_context=rc,
+        )
 
         traj_md = ""
         if getattr(state, "trajectory_file", ""):
@@ -829,9 +823,9 @@ async def optimize_workspace_harness(
                 )
                 return await substrate.execute(req, install)
 
-            # Multi-task suite: evaluate every task cleanly and aggregate evidence.
-            sub_rollouts: list[Rollout] = []
-            for idx, item_task in enumerate(task_list):
+            # Multi-task suite: evaluate every task cleanly (bounded-parallel when
+            # mode=="parallel") and aggregate evidence in task order.
+            async def _run_subtask(idx: int, item_task: str) -> Rollout:
                 sub_label = f"{label}_t{idx}"
                 staging = effective_run_dir / "staging" / sub_label
                 install = substrate.materialise(tree, staging, ctx={"workspace": str(staging)})
@@ -842,7 +836,24 @@ async def optimize_workspace_harness(
                     max_iterations=max_iterations,
                     timeout_s=timeout_s,
                 )
-                sub_rollouts.append(await substrate.execute(req, install))
+                return await substrate.execute(req, install)
+
+            if mode == "parallel":
+                sem = asyncio.Semaphore(4)
+
+                async def _guarded(idx: int, item_task: str) -> Rollout:
+                    async with sem:
+                        return await _run_subtask(idx, item_task)
+
+                sub_rollouts = list(
+                    await asyncio.gather(
+                        *(_guarded(idx, item_task) for idx, item_task in enumerate(task_list))
+                    )
+                )
+            else:
+                sub_rollouts = []
+                for idx, item_task in enumerate(task_list):
+                    sub_rollouts.append(await _run_subtask(idx, item_task))
 
             combined_delivs: dict[str, str] = {}
             md_parts: list[str] = []
@@ -946,6 +957,8 @@ async def optimize_workspace_harness(
     finally:
         if owns_temp:
             shutil.rmtree(effective_run_dir, ignore_errors=True)
+        else:
+            shutil.rmtree(effective_run_dir / "staging", ignore_errors=True)
 
 
 __all__ = [
