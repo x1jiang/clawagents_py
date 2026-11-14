@@ -81,6 +81,7 @@ from clawagents.trajectory.harness_substrate import (
     compute_unified_diffs,
     optimize_workspace_harness,
     render_trajectory_markdown,
+    rollback_workspace_harness,
 )
 from clawagents.trajectory.judge import (
     judge_run,

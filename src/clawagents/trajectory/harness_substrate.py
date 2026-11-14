@@ -632,11 +632,23 @@ def backup_and_apply_harness(
 
     if backup_dir is not None:
         bdir = Path(backup_dir).resolve()
+        if bdir == ws or bdir in ws.parents:
+            raise ValueError(f"backup_dir must not equal or contain workspace: {bdir}")
+        if bdir.exists():
+            shutil.rmtree(bdir)
         bdir.mkdir(parents=True, exist_ok=True)
-        for rel, old_content in before_tree.items():
-            dest = bdir / rel
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_text(old_content, encoding="utf-8")
+        write_tree(bdir, before_tree)
+        # Record exact file sets so rollback_workspace_harness restores custom files and removes additions cleanly.
+        added_files = sorted(set(candidate) - set(before_tree))
+        manifest = {
+            "before_files": sorted(before_tree),
+            "overwritten": sorted(set(before_tree) & set(candidate)),
+            "removed": sorted(set(before_tree) - set(candidate)),
+            "added": added_files,
+        }
+        (bdir / ".rollback_manifest.json").write_text(
+            json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+        )
 
     # Remove surface files deleted by the adopted tree
     removed_files = sorted(set(before_tree) - set(candidate))
@@ -654,10 +666,97 @@ def backup_and_apply_harness(
     }
 
 
+def rollback_workspace_harness(
+    workspace: Path | str,
+    backup_dir: Path | str,
+    *,
+    surface: SurfaceSpec = DEFAULT_SURFACE,
+) -> dict[str, Any]:
+    """Restore a workspace harness snapshot saved by :func:`backup_and_apply_harness`."""
+    ws = Path(workspace).resolve()
+    bdir = Path(backup_dir).resolve()
+    if not bdir.is_dir():
+        raise FileNotFoundError(f"Backup directory does not exist: {bdir}")
+
+    manifest_path = bdir / ".rollback_manifest.json"
+    added_files: list[str] = []
+    before_files: list[str] = []
+    if manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if isinstance(manifest, dict):
+                if isinstance(manifest.get("added"), list):
+                    added_files = [str(p) for p in manifest["added"] if isinstance(p, str)]
+                if isinstance(manifest.get("before_files"), list):
+                    before_files = [str(p) for p in manifest["before_files"] if isinstance(p, str)]
+        except Exception:  # noqa: BLE001
+            added_files = []
+            before_files = []
+
+    restored_tree = read_tree(bdir, surface)
+    for rel in before_files:
+        if rel in restored_tree or Path(rel).is_absolute():
+            continue
+        raw_src = bdir / rel
+        if raw_src.is_symlink():
+            continue
+        src = raw_src.resolve()
+        if bdir in src.parents and src.is_file():
+            restored_tree[rel] = src.read_text(encoding="utf-8")
+
+    # write_tree enforces workspace containment on every restored path.
+    restored = write_tree(ws, restored_tree)
+    removed_added: list[str] = []
+    for rel in added_files:
+        if rel in restored_tree or Path(rel).is_absolute():
+            continue
+        raw_target = ws / rel
+        if raw_target.is_symlink():
+            continue
+        target = raw_target.resolve()
+        if ws in target.parents and target.is_file():
+            target.unlink()
+            removed_added.append(rel)
+            parent = target.parent
+            while parent != ws and ws in parent.parents:
+                try:
+                    parent.rmdir()
+                except OSError:
+                    break
+                parent = parent.parent
+
+    return {
+        "restored": restored,
+        "removed": removed_added,
+        "backup_dir": str(bdir),
+    }
+
+
+def _normalize_task_suite(
+    task: str | Sequence[str],
+    tasks: Sequence[str] | None,
+) -> list[str]:
+    raw: list[str] = []
+    if isinstance(task, str):
+        if task.strip():
+            raw.append(task.strip())
+    else:
+        raw.extend(str(t).strip() for t in task if str(t).strip())
+    if tasks is not None:
+        for t in tasks:
+            s = str(t).strip()
+            if s and s not in raw:
+                raw.append(s)
+    if not raw:
+        raise ValueError("At least one non-empty benchmark task is required")
+    return raw
+
+
 async def optimize_workspace_harness(
-    task: str,
+    task: str | Sequence[str],
     workspace: Path | str,
     *,
+    tasks: Sequence[str] | None = None,
     llm: Any = None,
     proposer_llm: Any = None,
     selector_llm: Any = None,
@@ -681,6 +780,14 @@ async def optimize_workspace_harness(
 ) -> dict[str, Any]:
     """Run Propose–Probe–Compose on ``workspace`` and return result + unified diffs."""
     ws = Path(workspace).resolve()
+    task_list = _normalize_task_suite(task, tasks)
+    suite_prompt = (
+        task_list[0]
+        if len(task_list) == 1
+        else "Benchmark suite:\n"
+        + "\n".join(f"{idx + 1}. {item}" for idx, item in enumerate(task_list))
+    )
+
     substrate = ClawAgentSubstrate(
         ws,
         llm=llm,
@@ -710,16 +817,63 @@ async def optimize_workspace_harness(
         async def _substrate_rollout(tree: Tree, label: str) -> Rollout:
             if rollout_fn is not None:
                 return await rollout_fn(tree, label)
-            staging = effective_run_dir / "staging" / label
-            install = substrate.materialise(tree, staging, ctx={"workspace": str(staging)})
-            req = RunRequest(
-                task=task,
-                workspace=staging,
-                label=label,
-                max_iterations=max_iterations,
-                timeout_s=timeout_s,
+            if len(task_list) == 1:
+                staging = effective_run_dir / "staging" / label
+                install = substrate.materialise(tree, staging, ctx={"workspace": str(staging)})
+                req = RunRequest(
+                    task=task_list[0],
+                    workspace=staging,
+                    label=label,
+                    max_iterations=max_iterations,
+                    timeout_s=timeout_s,
+                )
+                return await substrate.execute(req, install)
+
+            # Multi-task suite: evaluate every task cleanly and aggregate evidence.
+            sub_rollouts: list[Rollout] = []
+            for idx, item_task in enumerate(task_list):
+                sub_label = f"{label}_t{idx}"
+                staging = effective_run_dir / "staging" / sub_label
+                install = substrate.materialise(tree, staging, ctx={"workspace": str(staging)})
+                req = RunRequest(
+                    task=item_task,
+                    workspace=staging,
+                    label=sub_label,
+                    max_iterations=max_iterations,
+                    timeout_s=timeout_s,
+                )
+                sub_rollouts.append(await substrate.execute(req, install))
+
+            combined_delivs: dict[str, str] = {}
+            md_parts: list[str] = []
+            deliv_parts: list[str] = []
+            errors: list[str] = []
+            for idx, (item_task, r) in enumerate(zip(task_list, sub_rollouts)):
+                md_parts.append(
+                    f"## Task {idx + 1}: {item_task}\n"
+                    f"- ok: `{r.ok}` | delivered: `{r.delivered}`\n\n"
+                    f"{r.trajectory}"
+                )
+                if r.deliverable:
+                    deliv_parts.append(f"## Task {idx + 1}: {item_task}\n{r.deliverable}")
+                if r.error:
+                    errors.append(f"Task {idx + 1}: {r.error}")
+                for rel_p, body in r.deliverable_files.items():
+                    combined_delivs[f"task_{idx + 1}/{rel_p}"] = body
+
+            all_ok = all(r.ok for r in sub_rollouts)
+            all_delivered = all(r.delivered for r in sub_rollouts)
+            confs = [r.confidence for r in sub_rollouts if r.confidence is not None]
+            return Rollout(
+                ok=all_ok,
+                delivered=all_delivered,
+                deliverable="\n\n---\n\n".join(deliv_parts),
+                trajectory="\n\n---\n\n".join(md_parts),
+                error="; ".join(errors),
+                usd=sum(r.usd for r in sub_rollouts),
+                deliverable_files=combined_delivs,
+                confidence=(min(confs) if confs else None),
             )
-            return await substrate.execute(req, install)
 
         async def _propose(prompt: str, _label: str) -> Proposal:
             return await _llm_propose_once(edit_llm, prompt, surface)
@@ -733,7 +887,7 @@ async def optimize_workspace_harness(
             return await _llm_select_once(pick_llm, selector_prompt, choices)
 
         ppc_result: PPCResult = await propose_probe_compose(
-            task,
+            suite_prompt,
             base_tree,
             rollout=_substrate_rollout,
             propose=_propose,
@@ -760,7 +914,7 @@ async def optimize_workspace_harness(
         if reflect and library is not None:
             from clawagents.providers.llm import LLMMessage
 
-            refl_prompt = build_reflection_prompt(task, ppc_result, surface)
+            refl_prompt = build_reflection_prompt(suite_prompt, ppc_result, surface)
             refl_resp = await edit_llm.chat([LLMMessage(role="user", content=refl_prompt)])
             experience_entry = record_experience(
                 ppc_result,
@@ -805,4 +959,5 @@ __all__ = [
     "interpolate_harness_tree",
     "optimize_workspace_harness",
     "render_trajectory_markdown",
+    "rollback_workspace_harness",
 ]

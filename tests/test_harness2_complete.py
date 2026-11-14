@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -392,3 +393,111 @@ async def test_substrate_trajectory_rendering_and_optimize_workspace_harness(tmp
         backup_dir=tmp_path / "backup_snap",
     )
     assert "skills/csv-reconcile/SKILL.md" in backup_info["written"]
+
+    # Rollback restores base AGENTS.md and deletes newly added skill files
+    from clawagents.trajectory.harness_substrate import rollback_workspace_harness
+
+    target_ws = tmp_path / "apply_target"
+    assert (target_ws / "skills" / "csv-reconcile" / "SKILL.md").is_file()
+    rb = rollback_workspace_harness(target_ws, tmp_path / "backup_snap")
+    assert "AGENTS.md" in rb["restored"]
+    assert not (target_ws / "skills" / "csv-reconcile" / "SKILL.md").exists()
+    assert not (target_ws / "skills" / "csv-reconcile").exists()
+    assert (target_ws / "AGENTS.md").read_text(encoding="utf-8") == BASE_TREE["AGENTS.md"]
+
+
+@pytest.mark.asyncio
+async def test_optimize_workspace_harness_multi_task_suite(tmp_path: Path):
+    from clawagents.providers.base import LLMResponse
+    from clawagents.trajectory.harness_substrate import optimize_workspace_harness
+
+    ws = tmp_path / "suite_ws"
+    ws.mkdir()
+    (ws / "AGENTS.md").write_text("# Suite base\n", encoding="utf-8")
+
+    class SuiteFakeLLM:
+        model = "stub-model"
+
+        async def chat(self, messages, **kwargs):
+            text = "\n".join(str(getattr(m, "content", "")) for m in messages)
+            if '"keep_base"' in text or "Propose minimal" in text:
+                return LLMResponse(content='{"keep_base": true, "notes": "no edits needed", "edits": {}, "removed": []}', model="stub-model", tokens_used=10)
+            return LLMResponse(content='{"why": "clean", "choice": "A"}', model="stub-model", tokens_used=10)
+
+    seen_prompts: list[str] = []
+
+    async def fake_rollout(tree, label):
+        seen_prompts.append(label)
+        return Rollout(
+            ok=True,
+            delivered=True,
+            deliverable=f"done {label}",
+            trajectory=f"ran {label}",
+            usd=0.005,
+        )
+
+    out = await optimize_workspace_harness(
+        ["Task one: verify unit tests", "Task two: verify lint"],
+        ws,
+        llm=SuiteFakeLLM(),
+        k=1,
+        rollout_fn=fake_rollout,
+    )
+    assert out["ok"] is True
+    assert out["result"].chosen in {"s0", "agg1"}
+    assert len(seen_prompts) >= 1
+
+
+def test_cli_adapt_and_rollback_harness(tmp_path: Path, monkeypatch, capsys):
+    from clawagents import __main__ as cli_main
+    from clawagents.trajectory import harness_substrate as hs
+
+    ws = tmp_path / "cli_ws"
+    ws.mkdir()
+    (ws / "AGENTS.md").write_text("# Old CLI rules\n", encoding="utf-8")
+    backup_dir = ws / ".clawagents" / "harness_runs" / "workspace-harness" / "backup"
+
+    async def fake_opt(task, workspace, **kwargs):
+        binfo = hs.backup_and_apply_harness(
+            workspace,
+            {"AGENTS.md": "# Old CLI rules\n"},
+            {"AGENTS.md": "# New CLI rules\n"},
+            backup_dir=backup_dir,
+        )
+        return {
+            "ok": True,
+            "result": type(
+                "PPC",
+                (),
+                {
+                    "chosen": "s1",
+                    "selection": {"chosen_label": "s1"},
+                    "ledger": {"rollouts": 3, "stages": 3},
+                    "harness_ledger": None,
+                },
+            )(),
+            "diff_summary": "modified AGENTS.md",
+            "unified_diffs": {"AGENTS.md": "+# New CLI rules"},
+            "applied": binfo,
+        }
+
+    monkeypatch.setattr(hs, "optimize_workspace_harness", fake_opt)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["clawagents", "--adapt", "Fix tests", "--workspace", str(ws), "--apply", "--json"],
+    )
+    cli_main.main()
+    out_json = json.loads(capsys.readouterr().out)
+    assert out_json["chosen"] == "s1"
+    assert (ws / "AGENTS.md").read_text(encoding="utf-8") == "# New CLI rules\n"
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["clawagents", "--rollback-harness", str(backup_dir), "--workspace", str(ws), "--json"],
+    )
+    cli_main.main()
+    rb_json = json.loads(capsys.readouterr().out)
+    assert "AGENTS.md" in rb_json["restored"]
+    assert (ws / "AGENTS.md").read_text(encoding="utf-8") == "# Old CLI rules\n"

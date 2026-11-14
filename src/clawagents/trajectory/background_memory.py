@@ -33,19 +33,21 @@ Extract 0-3 short, typed memories from this conversation segment. Each memory \
 should be a reusable fact, preference, or project detail that would help the agent \
 in future runs.
 
-Respond with a JSON array. Each entry:
+Respond with a JSON object containing a `memories` array:
 ```json
-[
-  {{
-    "type": "project|user|feedback|reference",
-    "content": "one-line actionable memory",
-    "confidence": 0.0-1.0
-  }}
-]
+{{
+  "memories": [
+    {{
+      "type": "project|user|feedback|reference",
+      "content": "one-line actionable memory",
+      "confidence": 0.0-1.0
+    }}
+  ]
+}}
 ```
 
 Only extract HIGH-CONFIDENCE memories (>0.7). If nothing is worth remembering, \
-respond with `[]`.
+respond with `{{"memories": []}}`.
 
 Types:
 - project: project-specific facts (file paths, architecture, tech stack)
@@ -91,17 +93,49 @@ async def extract_background_memories(
     )
 
     try:
-        response = await llm.chat([LLMMessage(role="user", content=prompt)])
-        # Parse JSON response
-        text = response.content.strip()
-        # Handle fenced code blocks
-        if "```" in text:
-            import re
-            match = re.search(r'```(?:json)?\s*\n?(.*?)\n?\s*```', text, re.DOTALL)
-            if match:
-                text = match.group(1).strip()
+        from clawagents.structured_output import invoke_structured_control
 
-        memories = json.loads(text)
+        def _parse_memories(raw_text: str) -> list[dict[str, Any]]:
+            text = (raw_text or "").strip()
+            if "```" in text:
+                import re
+
+                match = re.search(r"```(?:json)?\s*\n?(.*?)\n?\s*```", text, re.DOTALL)
+                if match:
+                    text = match.group(1).strip()
+            parsed = json.loads(text)
+            if isinstance(parsed, dict) and isinstance(parsed.get("memories"), list):
+                return parsed["memories"]
+            if isinstance(parsed, list):
+                return parsed
+            return []
+
+        memory_schema = {
+            "type": "object",
+            "properties": {
+                "memories": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "type": {"type": "string"},
+                            "content": {"type": "string"},
+                            "confidence": {"type": "number"},
+                        },
+                        "required": ["type", "content", "confidence"],
+                        "additionalProperties": False,
+                    },
+                }
+            },
+            "required": ["memories"],
+            "additionalProperties": False,
+        }
+        memories, _resp = await invoke_structured_control(
+            llm,
+            [LLMMessage(role="user", content=prompt)],
+            schema=memory_schema,
+            parse_fn=_parse_memories,
+        )
         if not isinstance(memories, list):
             return []
 

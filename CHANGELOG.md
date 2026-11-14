@@ -1,5 +1,12 @@
 # Changelog
 
+## 6.20.100
+
+- **Workspace harness rollback (`clawagents.trajectory.harness_substrate`):** new `rollback_workspace_harness(...)` and `.rollback_manifest.json` snapshot metadata in `backup_and_apply_harness(...)` to restore prior workspace files, remove newly added skill/subagent files, prune empty added directories, enforce path-containment and symlink guards, and clear reused backup directories cleanly.
+- **Multi-task Harness² benchmark suites (`harness_substrate.py`):** `optimize_workspace_harness(task: str | Sequence[str], workspace, *, tasks=...)` now evaluates candidate harnesses across multi-task suites and aggregates trajectories, deliverables, errors, confidence, and USD cost so optimizations avoid overfitting to a single prompt.
+- **CLI Harness² workflow (`__main__.py`):** added `clawagents --adapt TASK [TASK ...]` (`--k`, `--adapt-mode`, `--max-usd`, `--apply`, `--no-adaptive-probe`, `--workspace`, `--json`) and `clawagents --rollback-harness BACKUP_DIR`.
+- **Concurrent control-plane schema isolation & memory extraction (`structured_output.py`, `trajectory/background_memory.py`):** wired `invoke_structured_control` into `extract_background_memories` with aligned `{"memories": [...]}` prompts, serialized temporary `_structured_json_schema` attachment per `(llm, event_loop)` so parallel `INV`/`DOM` proposals never race or leak schemas onto shared worker LLMs, and preserved compatibility with minimal 1-argument `chat(messages)` stubs.
+
 ## 6.20.99
 
 Harness² completion (distilled from `google-research/harness2`):

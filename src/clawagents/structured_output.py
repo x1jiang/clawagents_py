@@ -7,10 +7,42 @@ Anthropic output_config.format.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
+import weakref
 from typing import Any, Callable, Literal, Sequence, TypeVar
 
 T = TypeVar("T")
+
+_LLM_CONTROL_LOCKS: dict[tuple[int, int], tuple[weakref.ref[Any] | None, asyncio.Lock]] = {}
+
+
+def _get_llm_control_lock(llm: Any) -> asyncio.Lock:
+    """Return a per-(llm, event-loop) lock so concurrent control calls never leak `_structured_json_schema`."""
+    loop = asyncio.get_running_loop()
+    key = (id(llm), id(loop))
+    existing = _LLM_CONTROL_LOCKS.get(key)
+    if existing is not None:
+        existing_ref, existing_lock = existing
+        if existing_ref is None or existing_ref() is llm:
+            return existing_lock
+
+    # Prune dead weakrefs opportunistically to bound dict size
+    if len(_LLM_CONTROL_LOCKS) > 256:
+        dead = [k for k, (r, _) in _LLM_CONTROL_LOCKS.items() if r is not None and r() is None]
+        for k in dead:
+            _LLM_CONTROL_LOCKS.pop(k, None)
+
+    def _cleanup(_ref: Any) -> None:
+        _LLM_CONTROL_LOCKS.pop(key, None)
+
+    try:
+        ref: weakref.ref[Any] | None = weakref.ref(llm, _cleanup)
+    except TypeError:
+        ref = None
+    lock = asyncio.Lock()
+    _LLM_CONTROL_LOCKS[key] = (ref, lock)
+    return lock
 
 STRUCTURED_OUTPUT_NAME = "structured_output"
 
@@ -148,6 +180,17 @@ def local_engine_structured_args(
     raise ValueError(f"Unsupported local engine {engine!r}")
 
 
+def _accepts_chat_kwargs(chat_fn: Any) -> bool:
+    try:
+        sig = inspect.signature(chat_fn)
+    except (TypeError, ValueError):
+        return True
+    for param in sig.parameters.values():
+        if param.kind == inspect.Parameter.VAR_KEYWORD:
+            return True
+    return {"on_chunk", "cancel_event", "tools"}.issubset(sig.parameters.keys())
+
+
 async def invoke_structured_control(
     llm: Any,
     messages: list[Any],
@@ -158,53 +201,61 @@ async def invoke_structured_control(
 ) -> tuple[T, Any]:
     """Invoke a control-plane LLM call with grammar-constrained schema decoding.
 
-    Temporarily attaches ``_structured_json_schema`` to ``llm`` (restoring any
-    prior value on exit). If the provider endpoint explicitly rejects structured
-    output wire parameters, retries once without ``_structured_json_schema`` so
-    prompt-level parsing continues cleanly.
+    Serializes temporary ``_structured_json_schema`` attachment per ``(llm, loop)``
+    so concurrent control calls (e.g. parallel Harness² proposals) never race or
+    leak schemas onto ``llm``. If the provider endpoint explicitly rejects structured
+    output wire parameters, retries once without ``_structured_json_schema``.
     """
-    had_attr = hasattr(llm, "_structured_json_schema")
-    prev_schema = getattr(llm, "_structured_json_schema", None)
-    schema_applied = False
-    try:
-        setattr(llm, "_structured_json_schema", schema)
-        schema_applied = True
-    except (AttributeError, TypeError):
-        schema_applied = False
+    use_kwargs = _accepts_chat_kwargs(getattr(llm, "chat", None))
 
     async def _do_call() -> Any:
-        coro = llm.chat(messages, on_chunk=None, cancel_event=None, tools=None)
+        coro = (
+            llm.chat(messages, on_chunk=None, cancel_event=None, tools=None)
+            if use_kwargs
+            else llm.chat(messages)
+        )
         if timeout_s is not None and timeout_s > 0:
             return await asyncio.wait_for(coro, timeout=timeout_s)
         return await coro
 
-    try:
+    lock = _get_llm_control_lock(llm)
+    async with lock:
+        had_attr = hasattr(llm, "_structured_json_schema")
+        prev_schema = getattr(llm, "_structured_json_schema", None)
+        schema_applied = False
         try:
-            response = await _do_call()
-        except asyncio.TimeoutError:
-            raise
-        except Exception as exc:
-            msg_lower = str(exc).lower()
-            if schema_applied and any(m in msg_lower for m in _SCHEMA_UNSUPPORTED_MARKERS):
-                try:
-                    setattr(llm, "_structured_json_schema", None)
-                except (AttributeError, TypeError):
-                    pass
-                response = await _do_call()
-            else:
-                raise
-    finally:
-        if schema_applied:
+            setattr(llm, "_structured_json_schema", schema)
+            schema_applied = True
+        except (AttributeError, TypeError):
+            schema_applied = False
+
+        try:
             try:
-                if had_attr:
-                    setattr(llm, "_structured_json_schema", prev_schema)
+                response = await _do_call()
+            except asyncio.TimeoutError:
+                raise
+            except Exception as exc:
+                msg_lower = str(exc).lower()
+                if schema_applied and any(m in msg_lower for m in _SCHEMA_UNSUPPORTED_MARKERS):
+                    try:
+                        setattr(llm, "_structured_json_schema", None)
+                    except (AttributeError, TypeError):
+                        pass
+                    response = await _do_call()
                 else:
-                    delattr(llm, "_structured_json_schema")
-            except (AttributeError, TypeError):
+                    raise
+        finally:
+            if schema_applied:
                 try:
-                    setattr(llm, "_structured_json_schema", prev_schema)
+                    if had_attr:
+                        setattr(llm, "_structured_json_schema", prev_schema)
+                    else:
+                        delattr(llm, "_structured_json_schema")
                 except (AttributeError, TypeError):
-                    pass
+                    try:
+                        setattr(llm, "_structured_json_schema", prev_schema)
+                    except (AttributeError, TypeError):
+                        pass
 
     raw_text = str(getattr(response, "content", "") or "")
     return parse_fn(raw_text), response

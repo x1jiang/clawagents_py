@@ -728,6 +728,57 @@ async def cmd_resume(session_id: str, timeout_s: int = 0):
         sys.stdout.write(result.result + "\n")
 
 
+async def cmd_adapt(
+    tasks: list[str],
+    *,
+    workspace: str = ".",
+    k: int = 1,
+    mode: str = "parallel",
+    adaptive_probe: bool = True,
+    max_usd: float | None = None,
+    apply: bool = False,
+    json_output: bool = False,
+) -> None:
+    """Run Harness² Propose–Probe–Compose workspace optimization from the CLI."""
+    from clawagents.trajectory.harness_substrate import optimize_workspace_harness
+
+    ws = Path(workspace).expanduser().resolve()
+    out = await optimize_workspace_harness(
+        tasks[0] if len(tasks) == 1 else tasks,
+        ws,
+        k=k,
+        mode=mode,  # type: ignore[arg-type]
+        adaptive_probe=adaptive_probe,
+        max_usd=max_usd,
+        apply=apply,
+    )
+    ppc = out["result"]
+    ledger = (
+        ppc.harness_ledger.to_dict()
+        if getattr(ppc, "harness_ledger", None) is not None
+        else dict(ppc.ledger)
+    )
+    payload = {
+        "ok": True,
+        "chosen": ppc.chosen,
+        "selection": ppc.selection,
+        "ledger": ledger,
+        "diff_summary": out["diff_summary"],
+        "unified_diffs": out["unified_diffs"],
+        "applied": out["applied"],
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, default=str))
+        return
+    print(f"Chosen candidate: {ppc.chosen}")
+    print(f"Diff summary: {out['diff_summary']}")
+    print(f"Ledger: {ledger}")
+    if out["applied"]:
+        print(f"Applied to workspace; backup saved at {out['applied'].get('backup_dir')}")
+    elif out["unified_diffs"]:
+        print("Re-run with --apply to write the adopted harness to the workspace.")
+
+
 # ─── Entry Point ──────────────────────────────────────────────────────────
 
 def main():
@@ -796,6 +847,25 @@ def main():
         help="tools (default) or code (CodeAct)",
     )
     parser.add_argument(
+        "--adapt",
+        nargs="+",
+        metavar="TASK",
+        help="Run Harness² Propose–Probe–Compose optimization on one or more tasks",
+    )
+    parser.add_argument("--k", type=int, default=1, help="Harness² PPC depth k (default: 1)")
+    parser.add_argument(
+        "--adapt-mode",
+        type=str,
+        choices=["parallel", "sequential"],
+        default="parallel",
+        help="Harness² PPC schedule (default: parallel)",
+    )
+    parser.add_argument("--max-usd", type=float, default=None, help="Optional USD budget ceiling for --adapt")
+    parser.add_argument("--apply", action="store_true", help="Apply adopted Harness² edits to workspace with backup")
+    parser.add_argument("--no-adaptive-probe", action="store_true", help="Disable DSpark adaptive probe short-circuiting")
+    parser.add_argument("--workspace", type=str, default=".", help="Workspace path for --adapt / --rollback-harness")
+    parser.add_argument("--rollback-harness", type=str, metavar="BACKUP_DIR", help="Restore a workspace harness backup created by --adapt --apply")
+    parser.add_argument(
         "command",
         nargs="?",
         default=None,
@@ -813,6 +883,38 @@ def main():
         from clawagents.evals_cli import main_evals
 
         sys.exit(main_evals(args))
+
+    if args.rollback_harness:
+        from clawagents.trajectory.harness_substrate import rollback_workspace_harness
+
+        res = rollback_workspace_harness(
+            Path(args.workspace).expanduser(),
+            Path(args.rollback_harness).expanduser(),
+        )
+        if args.json:
+            print(json.dumps(res, indent=2))
+        else:
+            print(f"Restored {len(res['restored'])} file(s), removed {len(res['removed'])} added file(s).")
+        return
+
+    if args.adapt:
+        try:
+            asyncio.run(
+                cmd_adapt(
+                    args.adapt,
+                    workspace=args.workspace,
+                    k=args.k,
+                    mode=args.adapt_mode,
+                    adaptive_probe=not args.no_adaptive_probe,
+                    max_usd=args.max_usd,
+                    apply=args.apply,
+                    json_output=args.json,
+                )
+            )
+        except KeyboardInterrupt:
+            sys.stderr.write("\nInterrupted.\n")
+            sys.exit(1)
+        return
 
     if args.prune_trajectories is not None:
         cmd_prune_trajectories(args.prune_trajectories)

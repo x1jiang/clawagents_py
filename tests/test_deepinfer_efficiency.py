@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -312,3 +313,53 @@ async def test_structured_control_schema_binding_fallback_and_local_engine_args(
     assert attempts == 2
     assert "fallback worked" in parsed_fb
     assert not hasattr(legacy, "_structured_json_schema")
+
+
+@pytest.mark.asyncio
+async def test_background_memory_uses_structured_control():
+    from clawagents.trajectory.background_memory import extract_background_memories
+
+    seen_schemas: list[Any] = []
+
+    class MemLLM:
+        _structured_json_schema: Any = None
+
+        async def chat(self, messages, **kwargs):
+            seen_schemas.append(self._structured_json_schema)
+            return LLMResponse(
+                content=json.dumps({
+                    "memories": [
+                        {"type": "fact", "content": "Project uses pytest", "confidence": 0.9},
+                        {"type": "fact", "content": "Low confidence guess", "confidence": 0.4},
+                    ]
+                }),
+                model="stub",
+                tokens_used=20,
+            )
+
+    msgs = [LLMMessage(role="user", content="Run pytest"), LLMMessage(role="assistant", content="Done")]
+    mems = await extract_background_memories(MemLLM(), msgs, 0, 2)
+    assert len(seen_schemas) == 1 and seen_schemas[0]["type"] == "object"
+    assert len(mems) == 1 and mems[0]["content"] == "Project uses pytest"
+
+
+@pytest.mark.asyncio
+async def test_structured_control_concurrent_calls_do_not_leak_schema():
+    seen: list[Any] = []
+
+    class SharedMinimalStubLLM:
+        async def chat(self, messages):  # minimal 1-arg signature (no **kwargs)
+            seen.append(getattr(self, "_structured_json_schema", None))
+            await asyncio.sleep(0.01)
+            return LLMResponse(content='{"ok": true, "reason": "clean"}', model="stub", tokens_used=5)
+
+    shared = SharedMinimalStubLLM()
+    s1 = {"type": "object", "title": "s1"}
+    s2 = {"type": "object", "title": "s2"}
+    r1, r2 = await asyncio.gather(
+        invoke_structured_control(shared, [LLMMessage(role="user", content="1")], schema=s1, parse_fn=json.loads),
+        invoke_structured_control(shared, [LLMMessage(role="user", content="2")], schema=s2, parse_fn=json.loads),
+    )
+    assert r1[0]["ok"] is True and r2[0]["ok"] is True
+    assert {item["title"] for item in seen} == {"s1", "s2"}
+    assert not hasattr(shared, "_structured_json_schema")
