@@ -26,11 +26,15 @@ from clawagents.graph.model_profiles import (
 @pytest.mark.parametrize(
     "model",
     [
+        "claude-fable-5-2",
+        "claude-fable-5.2",
+        "claude-mythos-5-2",
         "claude-fable-5-1",
         "claude-fable-5",
         "claude-mythos-5",
         "claude-opus-5",
         "claude-opus-4-8",
+        "claude-opus-4.8",
         "claude-opus-4-7",
         "claude-opus-4-6",
         "claude-sonnet-5",
@@ -40,6 +44,9 @@ from clawagents.graph.model_profiles import (
         "anthropic.claude-opus-4-8",
         "us.anthropic.claude-opus-4-7-20250514-v1:0",
         "bedrock/global.anthropic.claude-sonnet-5-v1:0",
+        "us.anthropic.claude-fable-5-2",
+        "global.anthropic.claude-fable-5-2",
+        "anthropic.claude-fable-5-2",
         "anthropic.claude-fable-5",
     ],
 )

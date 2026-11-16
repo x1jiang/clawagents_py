@@ -22,7 +22,10 @@ from clawagents.providers import llm
 
 
 @pytest.mark.parametrize("model,window,output", [
+    ("gemini-4-hydrogen", 1_048_576, 65_536),
     ("gemini-4-carbon", 1_048_576, 65_536),
+    ("claude-fable-5-2", 1_000_000, 128_000),
+    ("claude-mythos-5-2", 1_000_000, 128_000),
     ("gpt-6-cyber", 1_050_000, 128_000),
     ("muse-spark-1.3", 1_048_576, None),
     ("muse-spark-1.3-contributor", 1_048_576, None),
@@ -54,7 +57,7 @@ def test_self_hosted_glimmer_profile_is_untouched():
 # ── Gemini 4 Carbon ──────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("model", ["gemini-4-carbon", "models/gemini-4-carbon", "gemini-4-argon"])
+@pytest.mark.parametrize("model", ["gemini-4-hydrogen", "models/gemini-4-hydrogen", "gemini-4-carbon", "models/gemini-4-carbon", "gemini-4-argon"])
 def test_gemini_4_family_uses_thinking_level_contract(model):
     assert llm._gemini_38_model(model)
     assert llm._gemini_4_fallback_model(model) == "gemini-3.8-flash"

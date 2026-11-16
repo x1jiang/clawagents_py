@@ -28,6 +28,12 @@ from clawagents.providers.llm import (
         ("anthropic.claude-sonnet-4-5", False),
         ("anthropic.claude-sonnet-5", True),
         ("anthropic.claude-fable-5", True),
+        ("claude-fable-5-2", True),
+        ("claude-fable-5.2", True),
+        ("claude-mythos-5-2", True),
+        ("us.anthropic.claude-fable-5-2", True),
+        ("global.anthropic.claude-fable-5-2", True),
+        ("anthropic.claude-fable-5-2", True),
         ("gpt-4o", False),
     ],
 )

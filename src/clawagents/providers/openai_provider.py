@@ -151,13 +151,13 @@ def anthropic_model_rejects_sampling_params(model: str) -> bool:
     import re
 
     m = (model or "").strip().lower().replace("_", "-")
-    # Collapse dotted minors: opus-4.8 → opus-4-8; keep geo/FM prefixes intact.
-    m = re.sub(r"((?:opus|sonnet|haiku|fable)-\d+)\.(\d+)", r"\1-\2", m)
+    # Collapse dotted minors: opus-4.8 → opus-4-8, fable-5.2 → fable-5-2; keep geo/FM prefixes intact.
+    m = re.sub(r"((?:opus|sonnet|haiku|fable|mythos)-\d+)\.(\d+)", r"\1-\2", m)
     hit = re.search(r"opus-4-(\d+)", m)
     if hit:
         return int(hit.group(1)) >= 7
-    # Claude 5+ generations across Opus, Sonnet, Haiku, and Fable reject sampling params.
-    if re.search(r"(?:opus|sonnet|haiku|fable)-([5-9]|[1-9]\d+)(?:-|\b)", m):
+    # Claude 5+ generations across Opus, Sonnet, Haiku, Fable, and Mythos reject sampling params.
+    if re.search(r"(?:opus|sonnet|haiku|fable|mythos)-([5-9]|[1-9]\d+)(?:-|\b)", m):
         return True
     return False
 

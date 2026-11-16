@@ -53,6 +53,74 @@ async def test_gemini38_request_sampling_output_limit_and_effort(gemini_client, 
     assert result.tokens_used == 21 and result.reasoning_tokens == 7
 
 
+@pytest.mark.parametrize("effort,expected", [("", None), ("none", "low"), ("minimal", "low"),
+                                             ("low", "low"), ("medium", "medium"),
+                                             ("high", "high"), ("xhigh", "xhigh"),
+                                             ("max", "xhigh"), ("EXTRA HIGH", "xhigh")])
+async def test_gemini4_hydrogen_supports_xhigh_and_clamps_on_older_sdk_or_fallback(
+    gemini_client, monkeypatch, effort, expected
+):
+    provider = gemini_provider(model="gemini-4-hydrogen", effort=effort)
+    result = await provider.chat([llm.LLMMessage("user", "hello")])
+    config = gemini_client.aio.models.generate_content.call_args.kwargs["config"]
+    wire = config.model_dump(exclude_none=True)
+    assert not {"temperature", "top_p", "top_k", "candidate_count"} & wire.keys()
+    assert wire["max_output_tokens"] == 65536
+    sdk_expected = "high" if (expected == "xhigh" and not llm._sdk_supports_xhigh_thinking_level()) else expected
+    if sdk_expected is None:
+        assert "thinking_config" not in wire
+    else:
+        assert str(wire["thinking_config"]["thinking_level"]).lower().split(".")[-1] == sdk_expected
+    assert result.tokens_used == 21 and result.reasoning_tokens == 7
+
+    # Exercise both SDK generations (with and without ThinkingLevel.XHIGH) regardless of host Python version.
+    if expected == "xhigh":
+        from google.genai import types as _gtypes
+        monkeypatch.setattr(_gtypes, "ThinkingLevel", SimpleNamespace(LOW="LOW", MEDIUM="MEDIUM", HIGH="HIGH", XHIGH="XHIGH"))
+        assert llm._gemini_thinking_level_for_effort("gemini-4-hydrogen", effort) == "xhigh"
+        monkeypatch.setattr(_gtypes, "ThinkingLevel", SimpleNamespace(LOW="LOW", MEDIUM="MEDIUM", HIGH="HIGH"))
+        assert llm._gemini_thinking_level_for_effort("gemini-4-hydrogen", effort) == "high"
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_gemini4_hydrogen_prompt_block_fallback_clamps_xhigh_to_high(gemini_client, streaming):
+    clamped = llm._gemini_fallback_config(
+        SimpleNamespace(thinking_config={"thinking_level": "xhigh"}, max_output_tokens=65536),
+        "gemini-3.8-flash",
+    )
+    assert str(clamped.thinking_config.thinking_level).lower().split(".")[-1] == "high"
+    if not llm._sdk_supports_xhigh_thinking_level():
+        pytest.skip("google-genai<3.3.0 on Python <3.11 lacks ThinkingLevel.XHIGH")
+
+    blocked = SimpleNamespace(
+        candidates=None,
+        prompt_feedback=SimpleNamespace(block_reason=SimpleNamespace(name="OTHER")),
+        usage_metadata=SimpleNamespace(prompt_token_count=0, candidates_token_count=0, thoughts_token_count=0, cached_content_token_count=0),
+    )
+    ok = gemini_response()
+    seen_configs = []
+    if streaming:
+        async def fake_stream(*, model, contents, config):
+            seen_configs.append((model, config))
+            async def gen():
+                yield blocked if model == "gemini-4-hydrogen" else ok
+            return gen()
+        gemini_client.aio.models.generate_content_stream = fake_stream
+    else:
+        async def fake_generate(*, model, contents, config):
+            seen_configs.append((model, config))
+            return blocked if model == "gemini-4-hydrogen" else ok
+        gemini_client.aio.models.generate_content = fake_generate
+
+    provider = gemini_provider(model="gemini-4-hydrogen", effort="xhigh")
+    result = await provider.chat([llm.LLMMessage("user", "hello")], on_chunk=MagicMock() if streaming else None)
+    assert [m for m, _ in seen_configs] == ["gemini-4-hydrogen", "gemini-3.8-flash"]
+    lvl_first = str(seen_configs[0][1].thinking_config.thinking_level).lower().split(".")[-1]
+    lvl_fallback = str(seen_configs[1][1].thinking_config.thinking_level).lower().split(".")[-1]
+    assert lvl_first == "xhigh" and lvl_fallback == "high"
+    assert result.model == "gemini-3.8-flash" and result.content == "answer"
+
+
 @pytest.mark.parametrize("model", ["gemini-2.5-flash", "gemini-3.7-flash", "gemini-3.80-flash"])
 async def test_older_gemini_requests_keep_existing_configuration(gemini_client, model):
     await gemini_provider(model=model, effort="high").chat([llm.LLMMessage("user", "hello")])
@@ -129,6 +197,8 @@ def anthropic_client(monkeypatch):
 
 
 @pytest.mark.parametrize("model", [
+    "claude-fable-5-2", "claude-mythos-5-2",
+    "us.anthropic.claude-fable-5-2", "global.anthropic.claude-fable-5-2", "anthropic.claude-fable-5-2",
     "claude-fable-5-1", "claude-opus-5-5", "claude-opus-5",
     "claude-sonnet-5-5", "claude-sonnet-5", "claude-haiku-5-5",
     "us.anthropic.claude-haiku-5-5", "au.anthropic.claude-haiku-5-5",
@@ -147,7 +217,7 @@ async def test_claude_current_models_send_effort_without_sampling(anthropic_clie
 
 
 @pytest.mark.parametrize("model", [
-    "claude-fable-5-1", "claude-opus-5-5", "claude-opus-5",
+    "claude-fable-5-2", "claude-fable-5-1", "claude-opus-5-5", "claude-opus-5",
     "claude-sonnet-5-5", "claude-sonnet-5", "claude-haiku-5-5",
     "claude-opus-4-8", "claude-sonnet-4-5",
 ])
@@ -156,10 +226,12 @@ async def test_unset_claude_effort_preserves_model_default(anthropic_client, mod
     await provider.chat([llm.LLMMessage("user", "hello")])
     wire = anthropic_client.messages.create.call_args.kwargs
     assert "output_config" not in wire
-    assert ("thinking" in wire) == (model == "claude-fable-5-1")
+    assert ("thinking" in wire) == (model in ("claude-fable-5-1", "claude-fable-5-2"))
 
 
 @pytest.mark.parametrize("model,thinking", [
+    ("claude-fable-5-2", "adaptive"),
+    ("claude-mythos-5-2", "adaptive"),
     ("claude-fable-5-1", "adaptive"),
     ("claude-opus-5-5", "adaptive"),
     ("claude-sonnet-5-5", "adaptive"),
@@ -202,6 +274,7 @@ async def test_older_claude_effort_request_is_unchanged(anthropic_client):
 
 
 @pytest.mark.parametrize("model", [
+    "claude-fable-5-2", "claude-mythos-5-2", "us.anthropic.claude-fable-5-2", "global.anthropic.claude-fable-5-2",
     "claude-fable-5-1", "claude-opus-5-5", "claude-opus-5",
     "claude-sonnet-5-5", "claude-sonnet-5", "claude-haiku-5-5",
     "us.anthropic.claude-haiku-5-5",
@@ -559,7 +632,8 @@ def test_signed_round_guard_handles_advisor_messages_and_fallback_wrappers(anthr
     assert not llm.has_active_anthropic_tool_turn(messages, FallbackProvider(SimpleNamespace(model="other"), []))
 
 
-async def test_fable_binding_controls_reach_real_sdk_request_without_network():
+@pytest.mark.parametrize("model", ["claude-fable-5-1", "claude-fable-5-2"])
+async def test_fable_binding_controls_reach_real_sdk_request_without_network(model):
     import json
     import anthropic
     from anthropic import _base_client
@@ -571,10 +645,10 @@ async def test_fable_binding_controls_reach_real_sdk_request_without_network():
     def respond(request):
         captured.append(request)
         return httpx.Response(200, json={"id": "msg_fixture", "type": "message", "role": "assistant",
-            "model": "claude-fable-5-1", "content": [{"type": "text", "text": "ok"}],
+            "model": model, "content": [{"type": "text", "text": "ok"}],
             "stop_reason": "end_turn", "stop_sequence": None, "usage": {"input_tokens": 12, "output_tokens": 1}})
     provider = llm.AnthropicProvider.__new__(llm.AnthropicProvider)
-    provider.model = "claude-fable-5-1"
+    provider.model = model
     provider._max_tokens = 1000
     provider._temperature = 0.2
     provider._reasoning_effort = "high"
@@ -589,6 +663,61 @@ async def test_fable_binding_controls_reach_real_sdk_request_without_network():
     assert request.headers["anthropic-beta"] == "thinking-binding-controls-2026-08-01"
     assert wire["thinking"] == {"type": "adaptive", "block_binding": {"prefix_mismatch_behavior": "drop_block"}}
     assert wire["messages"][1]["content"] == signed_blocks(1)
+
+
+@pytest.mark.parametrize("model", ["claude-fable-5-2", "claude-mythos-5-2", "claude-opus-5-5", "claude-opus-5", "claude-fable-5.2"])
+def test_anthropic_fast_mode_supported_models(model):
+    assert llm.supports_anthropic_fast_mode(model)
+
+
+@pytest.mark.parametrize("model", ["claude-fable-5-1", "claude-sonnet-5-5", "claude-sonnet-4-5", "claude-haiku-5-5", "us.anthropic.claude-fable-5-2", "anthropic.claude-fable-5-2"])
+def test_anthropic_fast_mode_unsupported_models(model):
+    assert not llm.supports_anthropic_fast_mode(model)
+
+
+async def test_anthropic_fast_mode_sends_speed_on_2x_and_extra_body_on_095(monkeypatch):
+    import json
+    import anthropic
+    from anthropic import _base_client
+
+    httpx = getattr(_base_client, "httpx2", None) or _base_client.httpx
+    captured = []
+    def respond(request):
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, json={"id": "msg_fast", "type": "message", "role": "assistant",
+            "model": "claude-fable-5-2", "content": [{"type": "text", "text": "ok"}],
+            "stop_reason": "end_turn", "stop_sequence": None, "usage": {"input_tokens": 10, "output_tokens": 1}})
+    provider = llm.AnthropicProvider(EngineConfig(
+        anthropic_api_key="test", anthropic_model="claude-fable-5-2", anthropic_fast_mode=True,
+    ))
+    provider.client = anthropic.AsyncAnthropic(api_key="test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)))
+    try:
+        res = await provider.chat([llm.LLMMessage("user", "hello")])
+    finally:
+        await provider.client.close()
+    assert res.content == "ok"
+    assert captured[0]["speed"] == "fast"
+
+    # Legacy 0.95 signature without `speed` kwarg or `**kwargs`: uses extra_body["speed"].
+    legacy_create_called = {}
+    class LegacyMessages:
+        async def create(self, *, model, max_tokens, messages, extra_body=None, thinking=None, extra_headers=None, output_config=None):
+            legacy_create_called["extra_body"] = extra_body
+            return anthropic_response()
+    provider.client = SimpleNamespace(messages=LegacyMessages())
+    await provider.chat([llm.LLMMessage("user", "hello")])
+    assert legacy_create_called["extra_body"] == {"speed": "fast"}
+
+
+def test_anthropic_fast_mode_rejects_unsupported_model_or_proxy():
+    for cfg in (
+        EngineConfig(anthropic_api_key="test", anthropic_model="claude-sonnet-4-5", anthropic_fast_mode=True),
+        EngineConfig(anthropic_api_key="test", anthropic_model="claude-fable-5-1", anthropic_fast_mode=True),
+        EngineConfig(anthropic_api_key="test", anthropic_model="claude-fable-5-2", anthropic_fast_mode=True,
+                     anthropic_base_url="https://proxy.example.test/anthropic"),
+    ):
+        with pytest.raises(ValueError, match="Fast mode requires"):
+            llm.AnthropicProvider(cfg)
 
 
 def test_session_finalizer_does_not_attach_raw_response_to_rewritten_output(tmp_path):

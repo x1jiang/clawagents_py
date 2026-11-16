@@ -40,11 +40,13 @@ def render_sidebar(store: EventStore) -> dict[str, Any]:
             "gpt-5",
             "gpt-4o",
             "gpt-4o-mini",
+            "claude-fable-5-2",
             "claude-opus-5-5",
             "claude-sonnet-5-5",
             "claude-haiku-5-5",
             "claude-sonnet-4-20250514",
             "claude-opus-4-20250514",
+            "gemini-4-hydrogen",
             "gemini-4-carbon",
             "gemini-4-argon",
             "gemini-3.8-flash",
@@ -57,7 +59,7 @@ def render_sidebar(store: EventStore) -> dict[str, Any]:
 
     reasoning_effort = st.sidebar.selectbox(
         "Reasoning Effort",
-        ["low", "medium", "high"],
+        ["low", "medium", "high", "xhigh", "max"],
         index=1,
         key="obs_reasoning_effort",
         help="Reasoning effort for reasoning models (e.g., o1, o3-mini)",

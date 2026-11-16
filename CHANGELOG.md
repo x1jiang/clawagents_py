@@ -1,5 +1,11 @@
 # Changelog
 
+## 6.20.102
+
+- **Gemini 4 Hydrogen (`gemini-4-hydrogen`, GA 2026-11-12):** add the `1,048,576` unified input / `65,536` synchronous output model profile (`budget_ratio=0.90`), map `xhigh` / `max` effort to `thinking_config={"thinking_level": "xhigh"}` (`google-genai>=3.3.0` on Python `>=3.11`, clamping cleanly to `"high"` on older SDKs), and clamp `"xhigh"` → `"high"` before prompt-block fallback to `gemini-3.8-flash` across sync and streaming calls.
+- **Anthropic Claude Fable 5.2 (`claude-fable-5-2`, GA 2026-11-09) & Mythos 5.2 (`claude-mythos-5-2`):** add `1,000,000` input / `128,000` output profiles (`budget_ratio=0.85`, plus `128,000` output caps on Claude 5.x Fable/Mythos), normalize dotted-minor `claude-(fable|mythos|opus|sonnet|haiku)-X.Y` aliases, omit sampling parameters, keep adaptive thinking always on (`low`..`max`), enable `thinking-binding-controls-2026-08-01` (`drop_block`), and support native Bedrock (`us.` / `global.anthropic.claude-fable-5-2`) and Mantle (`anthropic.claude-fable-5-2`) model routing.
+- **Direct Anthropic Fast mode (`speed="fast"`) & Context Observatory:** add `EngineConfig.anthropic_fast_mode`, `supports_anthropic_fast_mode(...)`, and `AnthropicProvider` wire support (`speed="fast"` on `anthropic>=2.0` and `extra_body["speed"]="fast"` on `0.95.x`) for `claude-fable-5-2`, `claude-mythos-5-2`, `claude-opus-5-5`, and `claude-opus-5` on direct `https://api.anthropic.com`, plus updated Context Observatory sidebar model/effort pickers.
+
 ## 6.20.101
 
 - **Workspace-isolated Harness² rollouts & staging cleanup (`clawagents.trajectory.harness_substrate`):** `ClawAgentSubstrate.execute` passes `workspace=str(staging)` directly into `create_claw_agent` without mutating process-global `os.chdir()` during parallel rollouts; multi-task benchmark suites run with bounded concurrency (`asyncio.Semaphore(4)`) when `mode="parallel"`; explicit `run_dir` runs remove temporary `run_dir/staging/` directories on completion.

@@ -181,8 +181,9 @@ MODEL_PROFILES: dict[str, dict[str, int | float]] = {
     "nova-2-lite": {"max_input_tokens": 1_000_000, "max_output_tokens": 65_000, "budget_ratio": 0.85},
     "llama4-maverick": {"max_input_tokens": 1_000_000, "max_output_tokens": 8_000, "budget_ratio": 0.85},
     # ── Google — Gemini 4.x / 3.x (1M–2M context) ──────────────────────
-    # Carbon (GA 2026-11-10): 1,048,576 unified window, 65,536 synchronous
-    # output — https://ai.google.dev/gemini-api/docs/models/gemini-4-carbon
+    # Hydrogen (GA 2026-11-12), Carbon (GA 2026-11-10): 1,048,576 unified
+    # window, 65,536 synchronous output.
+    "gemini-4-hydrogen": {"max_input_tokens": 1_048_576, "max_output_tokens": 65_536, "budget_ratio": 0.90},
     "gemini-4-carbon": {"max_input_tokens": 1_048_576, "max_output_tokens": 65_536, "budget_ratio": 0.90},
     "gemini-4-argon": {"max_input_tokens": 1_048_576, "max_output_tokens": 65_536, "budget_ratio": 0.90},
     "gemini-4": {"max_input_tokens": 1_048_576, "max_output_tokens": 65_536, "budget_ratio": 0.90},
@@ -211,10 +212,12 @@ MODEL_PROFILES: dict[str, dict[str, int | float]] = {
     # Haiku 5.5 has a >100K long-context price cliff. Every other Claude model —
     # including Sonnet 4.5, Haiku 4.5 and Opus 4.5 — is 200K. Order matters:
     # dotted-minor ids ("opus-4-8") must precede the bare "claude-opus-4" family fallback.
+    "claude-fable-5-2": {"max_input_tokens": 1_000_000, "max_output_tokens": 128_000, "budget_ratio": 0.85},
     "claude-fable-5-1": {"max_input_tokens": 1_000_000, "max_output_tokens": 128_000, "budget_ratio": 0.85},
-    "claude-fable-5": {"max_input_tokens": 1_000_000, "budget_ratio": 0.85},
-    "claude-mythos-5-1": {"max_input_tokens": 1_000_000, "budget_ratio": 0.85},
-    "claude-mythos-5": {"max_input_tokens": 1_000_000, "budget_ratio": 0.85},
+    "claude-fable-5": {"max_input_tokens": 1_000_000, "max_output_tokens": 128_000, "budget_ratio": 0.85},
+    "claude-mythos-5-2": {"max_input_tokens": 1_000_000, "max_output_tokens": 128_000, "budget_ratio": 0.85},
+    "claude-mythos-5-1": {"max_input_tokens": 1_000_000, "max_output_tokens": 128_000, "budget_ratio": 0.85},
+    "claude-mythos-5": {"max_input_tokens": 1_000_000, "max_output_tokens": 128_000, "budget_ratio": 0.85},
     "claude-opus-5-5": {"max_input_tokens": 1_000_000, "max_output_tokens": 128_000, "budget_ratio": 0.85},
     "claude-opus-5": {"max_input_tokens": 1_000_000, "max_output_tokens": 128_000, "budget_ratio": 0.85},
     "claude-opus-4-8": {"max_input_tokens": 1_000_000, "budget_ratio": 0.85},
@@ -344,6 +347,11 @@ def normalize_model_id(model_name: str) -> str:
     # Drop the Bedrock ":0" revision suffix so prefix matching sees the model.
     if ":" in name:
         name = name.split(":", 1)[0]
+    if (
+        name.startswith(("claude-fable-", "claude-mythos-", "claude-opus-", "claude-sonnet-", "claude-haiku-"))
+        and "." in name
+    ):
+        name = name.replace(".", "-")
     return name
 
 

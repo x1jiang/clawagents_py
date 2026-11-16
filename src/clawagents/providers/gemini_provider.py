@@ -628,8 +628,37 @@ def _gemini_part_from_block(part: Any) -> dict[str, Any] | None:
 
 
 def _gemini_38_model(model: str) -> bool:
-    # Keep the migration scoped to 3.8 and 4.x (Argon, Carbon); 3.7 and older retain their sampling API.
-    return bool(_re.search(r"(?:^|/)gemini-(?:3\.8|4(?:-(?:argon|carbon))?)(?:-|$)", (model or "").lower()))
+    # Keep the migration scoped to 3.8 and 4.x (Argon, Carbon, Hydrogen); 3.7 and older retain their sampling API.
+    return bool(_re.search(r"(?:^|/)gemini-(?:3\.8|4(?:-(?:argon|carbon|hydrogen))?)(?:-|$)", (model or "").lower()))
+
+
+def _gemini_hydrogen_model(model: str) -> bool:
+    return bool(_re.search(r"(?:^|/)gemini-4-hydrogen(?:-|$)", (model or "").strip().lower()))
+
+
+def _sdk_supports_xhigh_thinking_level() -> bool:
+    tl = getattr(types, "ThinkingLevel", None)
+    return tl is not None and hasattr(tl, "XHIGH")
+
+
+def _gemini_thinking_level_for_effort(model: str, effort: str | None) -> str | None:
+    if not effort:
+        return None
+    if effort in ("none", "minimal", "low"):
+        return "low"
+    if effort == "medium":
+        return "medium"
+    if effort == "high":
+        return "high"
+    # Higher effort levels ("xhigh", "max", etc.): xhigh is exclusive to Hydrogen.
+    if _gemini_hydrogen_model(model):
+        if _sdk_supports_xhigh_thinking_level():
+            return "xhigh"
+        logger.warning(
+            "  [gemini] installed google-genai lacks ThinkingLevel.XHIGH — "
+            "clamping thinking_level to 'high' (upgrade to google-genai>=3.3.0)"
+        )
+    return "high"
 
 
 _GEMINI_BLOCK_FINISH_REASONS = (
@@ -674,9 +703,40 @@ def _gemini_prompt_block_reason(resp_or_chunk: Any) -> str | None:
 
 def _gemini_4_fallback_model(model: str) -> str | None:
     m = (model or "").strip().lower()
-    if _re.search(r"(?:^|/)gemini-4(?:-(?:argon|carbon))?(?:-|$)", m):
+    if _re.search(r"(?:^|/)gemini-4(?:-(?:argon|carbon|hydrogen))?(?:-|$)", m):
         return "gemini-3.8-flash"
     return None
+
+
+def _gemini_fallback_config(config: Any, fallback_model: str) -> Any:
+    """Clamp Hydrogen-only ``thinking_level='xhigh'`` before falling back to 3.8 Flash."""
+    if _gemini_hydrogen_model(fallback_model):
+        return config
+    tc = getattr(config, "thinking_config", None)
+    if tc is None:
+        return config
+    lvl = tc.get("thinking_level") if isinstance(tc, dict) else getattr(tc, "thinking_level", None)
+    if lvl is None:
+        return config
+    lvl_str = str(getattr(lvl, "value", lvl)).lower().split(".")[-1]
+    if lvl_str != "xhigh":
+        return config
+    options: dict[str, Any] = {}
+    for attr in (
+        "max_output_tokens",
+        "temperature",
+        "system_instruction",
+        "tools",
+        "tool_config",
+        "response_mime_type",
+        "response_schema",
+        "response_json_schema",
+    ):
+        value = getattr(config, attr, None)
+        if value is not None:
+            options[attr] = value
+    options["thinking_config"] = {"thinking_level": "high"}
+    return types.GenerateContentConfig(**options)
 
 
 def _gemini_function_retry_config(config: Any) -> Any:
@@ -777,14 +837,13 @@ class GeminiProvider(LLMProvider):
 
         config_opts: dict[str, Any] = {"max_output_tokens": self._max_tokens}
         if _gemini_38_model(self.model):
-            # 3.8 rejects sampling controls and minimal thinking. Omitting the
-            # level preserves its medium default; shared UI effort maps safely.
+            # 3.8 and 4.x reject sampling controls and minimal thinking. Omitting the
+            # level preserves the model default; shared UI effort maps safely.
             config_opts["max_output_tokens"] = min(self._max_tokens, 65_536)
-            effort = getattr(self, "_reasoning_effort", None)
-            if effort:
-                level = "low" if effort in ("none", "minimal", "low") else (
-                    "medium" if effort == "medium" else "high"
-                )
+            level = _gemini_thinking_level_for_effort(
+                self.model, getattr(self, "_reasoning_effort", None)
+            )
+            if level:
                 config_opts["thinking_config"] = {"thinking_level": level}
         else:
             config_opts["temperature"] = self._temperature
@@ -915,7 +974,10 @@ class GeminiProvider(LLMProvider):
                 )
                 self.model = fallback_model
                 return await self._request_once(
-                    user_contents, gemini_config, _malformed_retry=_malformed_retry, _block_fallback=True
+                    user_contents,
+                    _gemini_fallback_config(gemini_config, fallback_model),
+                    _malformed_retry=_malformed_retry,
+                    _block_fallback=True,
                 )
             raise RuntimeError(
                 f"Gemini blocked the request (reason={block_label}). "
@@ -1091,7 +1153,7 @@ class GeminiProvider(LLMProvider):
                         self.model = fallback_model
                         return await self._stream_with_retry(
                             user_contents,
-                            gemini_config,
+                            _gemini_fallback_config(gemini_config, fallback_model),
                             on_chunk,
                             cancel_event,
                             on_first_token=on_first_token,

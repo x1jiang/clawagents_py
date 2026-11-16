@@ -163,6 +163,8 @@ class EngineConfig(BaseSettings):
     anthropic_model: str = "claude-sonnet-4-5"
     # Optional Anthropic SDK base (e.g. Mantle ``…/anthropic``). Empty = api.anthropic.com.
     anthropic_base_url: str = ""
+    # Explicit Anthropic Fast processing (``speed="fast"``) for supported direct API models.
+    anthropic_fast_mode: bool = False
     # Native Amazon Bedrock (IAM / instance role — no Anthropic API key).
     # Used when model IDs look like Bedrock (anthropic.claude-…:0, us.anthropic.…,
     # amazon.nova-…) or when PROVIDER=bedrock / profile=bedrock.

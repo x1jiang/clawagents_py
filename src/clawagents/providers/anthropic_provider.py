@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
+import inspect
 import json
 import logging
 from typing import Any
@@ -200,19 +201,56 @@ class _DeferredToolsMixin:
 
 
 _ALWAYS_ADAPTIVE_ANTHROPIC_MODELS = frozenset({
-    "fable-5-1", "fable-5", "opus-5-5", "sonnet-5-5",
+    "fable-5-2", "fable-5-1", "fable-5",
+    "mythos-5-2", "mythos-5-1", "mythos-5",
+    "opus-5-5", "sonnet-5-5",
+})
+
+_BINDING_CONTROL_ANTHROPIC_MODELS = frozenset({
+    "fable-5-2", "fable-5-1",
+    "mythos-5-2", "mythos-5-1",
 })
 
 
 def _current_anthropic_model(model: str) -> str | None:
     # Accept direct, Mantle and regional Bedrock IDs, including dated snapshots.
-    normalized = _re.sub(r"((?:opus|sonnet|haiku|fable)-\d+)\.(\d+)", r"\1-\2", (model or "").strip().lower())
+    normalized = _re.sub(
+        r"((?:opus|sonnet|haiku|fable|mythos)-\d+)\.(\d+)",
+        r"\1-\2",
+        (model or "").strip().lower(),
+    )
     match = _re.search(
-        r"(?:^|[./])claude-(fable-5-1|fable-5|opus-5-5|opus-5|sonnet-5-5|sonnet-5|haiku-5-5|haiku-5)"
+        r"(?:^|[./])claude-(fable-5-2|fable-5-1|fable-5|mythos-5-2|mythos-5-1|mythos-5|opus-5-5|opus-5|sonnet-5-5|sonnet-5|haiku-5-5|haiku-5)"
         r"(?:$|-(?:\d{8}(?:-v\d+)?|v\d+)(?::\d+)?$)",
         normalized,
     )
     return match.group(1) if match else None
+
+
+def supports_anthropic_fast_mode(model: str) -> bool:
+    """Models with documented Fast mode (``speed="fast"``) on direct Anthropic API."""
+    m = _re.sub(
+        r"((?:opus|sonnet|haiku|fable|mythos)-\d+)\.(\d+)",
+        r"\1-\2",
+        (model or "").strip().lower().replace("_", "-"),
+    )
+    return bool(_re.fullmatch(r"claude-(?:fable-5-2|mythos-5-2|opus-5-5|opus-5)(?:-\d{8})?", m))
+
+
+def _attach_anthropic_fast_speed(client: Any, kwargs: dict[str, Any]) -> None:
+    """Attach ``speed="fast"`` cleanly across anthropic 2.x and 0.95.x SDKs."""
+    use_top_level = False
+    try:
+        params = inspect.signature(client.messages.create).parameters
+        use_top_level = "speed" in params or any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+        )
+    except (TypeError, ValueError, AttributeError):
+        use_top_level = False
+    if use_top_level:
+        kwargs["speed"] = "fast"
+    else:
+        kwargs.setdefault("extra_body", {})["speed"] = "fast"
 
 
 def _apply_current_anthropic_effort(kwargs: dict[str, Any], model: str, effort: str | None) -> None:
@@ -222,15 +260,16 @@ def _apply_current_anthropic_effort(kwargs: dict[str, Any], model: str, effort: 
         return
     if effort == "none" and current not in _ALWAYS_ADAPTIVE_ANTHROPIC_MODELS:
         kwargs["thinking"] = {"type": "disabled"}
-    # Fable 5.x and Opus/Sonnet 5.5 thinking is always adaptive; never send
-    # their rejected disabled mode. low also satisfies Opus 5 / Haiku 5.5's
-    # effort ceiling when thinking is disabled.
+    # Fable 5.x, Mythos 5.x, and Opus/Sonnet 5.5 thinking is always adaptive;
+    # never send their rejected disabled mode. low also satisfies Opus 5 / Haiku
+    # 5.5's effort ceiling when thinking is disabled.
     effective = "low" if effort in ("none", "minimal") else effort
     kwargs.setdefault("output_config", {})["effort"] = effective
 
 
 class AnthropicProvider(_DeferredToolsMixin, LLMProvider):
     name = "anthropic"
+    _fast_mode: bool = False
 
     def __init__(self, config: EngineConfig):
         if not _HAS_ANTHROPIC:
@@ -247,6 +286,19 @@ class AnthropicProvider(_DeferredToolsMixin, LLMProvider):
         self._max_tokens = config.max_tokens
         self._temperature = config.temperature
         self._reasoning_effort = normalize_reasoning_effort(config.reasoning_effort)
+        self._fast_mode = bool(
+            getattr(config, "anthropic_fast_mode", False)
+            or getattr(config, "openai_fast_mode", False)
+        )
+        direct_endpoint = not base or base.rstrip("/").lower() in (
+            "https://api.anthropic.com",
+            "https://api.anthropic.com/v1",
+        )
+        if self._fast_mode and (not direct_endpoint or not supports_anthropic_fast_mode(self.model)):
+            raise ValueError(
+                "Fast mode requires direct Anthropic API (https://api.anthropic.com) "
+                "and a supported model (claude-fable-5-2, claude-opus-5-5, claude-opus-5)."
+            )
 
     async def chat(
         self,
@@ -429,11 +481,13 @@ class AnthropicProvider(_DeferredToolsMixin, LLMProvider):
         _apply_current_anthropic_effort(
             kwargs, self.model, getattr(self, "_reasoning_effort", None)
         )
-        if _current_anthropic_model(self.model) == "fable-5-1":
+        if _current_anthropic_model(self.model) in _BINDING_CONTROL_ANTHROPIC_MODELS:
             # Documented recovery for edited/compacted prefixes. Send original
             # blocks; the server alone decides which bindings are invalid.
             kwargs["thinking"] = {"type": "adaptive", "block_binding": {"prefix_mismatch_behavior": "drop_block"}}
-            kwargs["extra_headers"] = {"anthropic-beta": "thinking-binding-controls-2026-08-01"}
+            kwargs.setdefault("extra_headers", {})["anthropic-beta"] = "thinking-binding-controls-2026-08-01"
+        if getattr(self, "_fast_mode", False):
+            _attach_anthropic_fast_speed(self.client, kwargs)
         if tools:
             from clawagents.providers.tool_schema import emit_openai_schema_node
 
