@@ -19,7 +19,7 @@ This small synthetic suite does not measure worker coding ability, general promp
 
 ## Reproduce
 
-See [setup and worker configuration](../../GEMMA_COORDINATION.md) and `python scripts/benchmark_gemma_coordination.py --help`. Raw trials, tool traces, runner hash, model revision and GGUF hash are in [results.json](results.json).
+See [setup and worker configuration](../../docs/gemma-coordination.md) and `python scripts/benchmark_gemma_coordination.py --help`. Raw trials, tool traces, runner hash, model revision and GGUF hash are in [results.json](results.json).
 
 ## Validation
 

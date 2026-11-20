@@ -106,4 +106,4 @@ Run `scripts/benchmark_gemma_coordination.py --repeats 2 --arms baseline coordin
 
 Choose **Gemma Agentic Q4 (coordinator)** in the provider picker. The default endpoint is `http://127.0.0.1:18080/v1` and model is `gemma4-agentic-v2`; start the server first. The picker does not download the model. Named worker clients and acceptance callbacks are configured through the Python API.
 
-See the [controlled Q4 comparison](benchmarks/gemma_coordination_20260906/REPORT.md): both arms passed 6/6; compact coordination used 29.8% less median wall time and 66.0% fewer median cumulative prompt tokens.
+See the [controlled Q4 comparison](../benchmarks/gemma_coordination_20260906/REPORT.md): both arms passed 6/6; compact coordination used 29.8% less median wall time and 66.0% fewer median cumulative prompt tokens.

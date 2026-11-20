@@ -173,7 +173,7 @@ result = await agent.invoke("Your coding task", timeout_s=240)
 Use the server's actual context capacity. The reasoning setting is a soft
 control; lower effort is a latency tradeoff, not a guarantee of equal accuracy.
 
-See [challenge results](benchmarks/meta_challenge_20260906/REPORT.md) and [methodology](benchmarks/meta_challenge_20260906/METHOD.md). On macOS, run:
+See [challenge results](../benchmarks/meta_challenge_20260906/REPORT.md) and [methodology](../benchmarks/meta_challenge_20260906/METHOD.md). On macOS, run:
 
 ```bash
 .venv/bin/python scripts/benchmark_meta_challenge.py --output results/challenges.json

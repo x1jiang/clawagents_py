@@ -140,4 +140,4 @@ Projection is a disposable provider view. Budget preparation uses that same view
 
 Astra is selectable as `gpt-6-astra` for OpenAI or `openai.gpt-6-astra` for Mantle in VS Code 1.0.192. Mantle uses Responses in us-west-2; unsupported regions produce an actionable error without silently moving requests. Limits and list-price estimates follow the official [OpenAI model card](https://developers.openai.com/api/docs/models/gpt-6-astra) and [AWS model card](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-6-astra.html).
 
-The initial bounded OpenAI Astra smoke comparison passed all four task verifiers but rejected the one-full-send candidate on cost. See [initial results](benchmarks/efficiency/INITIAL_RESULTS.md). This is why the projection policy remains opt-in.
+The initial bounded OpenAI Astra smoke comparison passed all four task verifiers but rejected the one-full-send candidate on cost. See [initial results](../benchmarks/efficiency/INITIAL_RESULTS.md). This is why the projection policy remains opt-in.

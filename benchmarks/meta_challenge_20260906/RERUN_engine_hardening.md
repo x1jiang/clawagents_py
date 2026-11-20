@@ -3,7 +3,7 @@
 Same frozen suite, runner (`scripts/benchmark_meta_challenge.py`), tasks, budgets
 (196,608 context, 6,144 max output tokens, 32 rounds, 240 s) and sandbox as
 [REPORT.md](REPORT.md). Only the engine changed (uncommitted working tree at
-pyproject 6.20.76; see `META_GLIMMER.md` "Reasoning channel and output budget").
+pyproject 6.20.76; see `docs/meta-glimmer.md` "Reasoning channel and output budget").
 No task-specific tuning was done after inspecting scored results; every change
 is a generic loop/transport behaviour that also applies to Luna.
 

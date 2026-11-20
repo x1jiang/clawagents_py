@@ -13,7 +13,6 @@ build/
 .venv/
 venv/
 env/
-docs/
 scratch/
 
 # IDE

@@ -45,7 +45,7 @@ Compared with Luna, tuned Glimmer took 1.26Ã— total wall time and consumed 2.28Ã
 - Uses the existing OpenAI-compatible streaming/native-tool client. The Glimmer profile sets context budgeting, earlier old-tool clearing, loop warnings, concise tool instructions, and core-tool activation. No dependencies were added.
 - Fixed structured values passed to string tool parameters: JSON serialization preserves objects, arrays, booleans, and null rather than silently writing Python repr. Already-string values remain byte-for-byte unchanged; non-JSON values yield validation errors.
 - VS Code Settings and per-chat model pickers expose Meta (Glimmer). Environment forwarding, context meter, explicit endpoint trust, and cross-provider key/endpoint isolation are covered. Extension build is complete; this work was not published to a marketplace or installed into a running editor.
-- Setup: [META_GLIMMER.md](../../META_GLIMMER.md). Reproducer: [benchmark_meta_glimmer.py](../../scripts/benchmark_meta_glimmer.py).
+- Setup: [docs/meta-glimmer.md](../../docs/meta-glimmer.md). Reproducer: [benchmark_meta_glimmer.py](../../scripts/benchmark_meta_glimmer.py).
 
 ## Verification
 

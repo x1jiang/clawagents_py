@@ -48,7 +48,7 @@ Security hardening. **Breaking for channel users:** messaging channels now refus
 - **Seatbelt:** the profile is passed inline via `sandbox-exec -p` instead of being written to `<cwd>/.clawagents/seatbelt.sb`, which the sandbox itself could overwrite.
 - **Bash validator:** classify by program basename (`/bin/rm`), look through `{ …; }`, `!` and `if`/`while` bodies, unwrap here-strings fed to a shell, block redirects into privileged config paths, treat `/.` and `../..` as root-like, and block or warn on a variable used as the program name.
 
-Models (details and sources in `MODEL_CATALOG_AUDIT.md`):
+Models (details and sources in [`docs/model-catalog-audit.md`](docs/model-catalog-audit.md)):
 
 - Add **Gemini 4 Carbon** (`gemini-4-carbon`), **GPT-6 Cyber** (`gpt-6-cyber`, gated) and the hosted **Muse** family on the Meta Model API (`muse-spark-1.1/1.2/1.3` and Contributor tiers, `muse-wonder-1.0`, `muse-ember-1.0`) through a new `meta-api` provider profile (`MODEL_API_KEY`). A bare Muse id selects that profile; it never falls back to another vendor's key.
 
@@ -118,3 +118,22 @@ Runtime robustness:
 - Generalize tool-summary wording in completion handling.
 - Exclude SQL source from ungrounded count checks while retaining checks for unsupported query results.
 - Respect SQL-only requests when correcting unsupported counts instead of requiring query execution.
+## 6.20.83
+
+- Add GPT-6 family support (`gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`) on OpenAI with Responses API defaults, `1,050,000` context window, `128,000` output cap, and reasoning effort normalization (`none`..`max`).
+
+## 6.20.82
+
+- Refresh provider model catalogs and request compatibility across OpenAI, Anthropic, Gemini, xAI, AWS Bedrock, and Mantle; preserve Claude signed thinking blocks through tool turns and session restore. See [`docs/model-catalog-audit.md`](docs/model-catalog-audit.md).
+
+## 6.20.81
+
+- Add GPT-6 Astra support for OpenAI and AWS Bedrock Mantle, opt-in observation projection (`RunContext(observation_full_sends=1|2)`), and the paired efficiency benchmark CLI (`benchmarks/efficiency/README.md`).
+
+## 6.20.80
+
+- Agent efficiency updates: fuse edits with explicit follow-up commands through existing approvals/sandboxing, page artifact recall, preserve verified diagnostic evidence through compaction, carry run-scoped todos, and expose efficiency counters. See [`docs/efficiency.md`](docs/efficiency.md).
+
+---
+
+For `v6.20.77` and earlier releases, see [docs/changelog-archive.md](docs/changelog-archive.md).
