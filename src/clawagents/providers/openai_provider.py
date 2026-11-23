@@ -164,15 +164,16 @@ def anthropic_model_rejects_sampling_params(model: str) -> bool:
 
 # Every GPT-6 id this module special-cases. Keep the request-contract helpers
 # below keyed on these tuples so a new model is added in one place.
+_GPT62_MODELS: tuple[str, ...] = ("gpt-6.2-sol", "gpt-6.2-astra")
 _GPT6_MODELS: tuple[str, ...] = (
-    "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-6-cyber",
+    *_GPT62_MODELS, "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-6-cyber",
 )
 # Chat Completions rejects function tools on these at every effort.
 # GPT-6 Cyber: its model page lists tools under the Responses API only and
 # does not document Chat Completions tool calling, so it takes the same
 # conservative route (Responses is documented for it either way).
 _GPT6_RESPONSES_ONLY_TOOLS: tuple[str, ...] = (
-    "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra", "gpt-6-cyber",
+    *_GPT62_MODELS, "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra", "gpt-6-cyber",
 )
 
 # Hosted Muse models on the Meta Model API (https://dev.meta.ai/docs/models.md).
@@ -191,18 +192,15 @@ def is_hosted_muse_model(model: str) -> bool:
 
 
 def _requires_responses_for_tools(model: str) -> bool:
-    """True when Chat Completions rejects function tools at every effort.
-
-    GPT-6.1 Sol and GPT-6 Astra accept only ``low`` and above, and Chat
-    Completions rejects tools with any ``reasoning_effort`` (verified live
-    2026-10-07), so tool calls must use Responses.
-    """
+    """True when Chat Completions rejects function tools at every effort."""
     return _bare_openai_model_id(model).startswith(_GPT6_RESPONSES_ONLY_TOOLS)
 
 
 def _responses_only_model_label(model: str) -> str:
     bare = _bare_openai_model_id(model)
-    return ("GPT-6 Astra" if bare.startswith("gpt-6-astra")
+    return ("GPT-6.2 Sol" if bare.startswith("gpt-6.2-sol")
+            else "GPT-6.2 Astra" if bare.startswith("gpt-6.2-astra")
+            else "GPT-6 Astra" if bare.startswith("gpt-6-astra")
             else "GPT-6.1 Terra" if bare.startswith("gpt-6.1-terra")
             else "GPT-6 Cyber" if bare.startswith("gpt-6-cyber")
             else "GPT-6.1 Sol")
@@ -257,7 +255,7 @@ def clamp_reasoning_effort_for_model(model: str, effort: str | None) -> str | No
     from clawagents.providers.model_classify import is_grok_model
 
     bare = _bare_openai_model_id(model)
-    if bare.startswith(("gpt-6-astra", "gpt-6.1-sol", "gpt-6-cyber")):
+    if bare.startswith((*_GPT62_MODELS, "gpt-6-astra", "gpt-6.1-sol", "gpt-6-cyber")):
         return "low" if effort in ("none", "minimal") else effort
     if is_hosted_muse_model(bare):
         # Meta Model API: "none" is a 400 on reasoning models, and the
@@ -310,7 +308,7 @@ def supports_openai_fast_mode(model: str) -> bool:
     """Models with documented Fast processing on the direct OpenAI API."""
     m = model.strip().lower()
     return bool(_re.fullmatch(
-        r"(?:gpt-6-(?:astra|sol|luna)|gpt-6\.1-(?:sol|terra)|gpt-5\.6(?:-(?:sol|terra|luna))?)"
+        r"(?:gpt-6-(?:astra|sol|luna)|gpt-6\.1-(?:sol|terra)|gpt-6\.2-(?:astra|sol)|gpt-5\.6(?:-(?:sol|terra|luna))?)"
         r"(?:-\d{4}-\d{2}-\d{2})?", m,
     ))
 
@@ -1133,7 +1131,12 @@ class OpenAIProvider(_ResponsesDeferredMixin, LLMProvider):
             kwargs["service_tier"] = "fast" if self._fast_mode else "default"
         _with_temperature(kwargs, self.model, self._temperature)
         if instructions:
-            kwargs["instructions"] = instructions
+            if _bare_openai_model_id(self.model).startswith(_GPT62_MODELS):
+                # GPT-6.2 appends top-level instructions after input. Keep
+                # the reusable system prompt at the start of the cache prefix.
+                input_items.insert(0, {"role": "developer", "content": instructions})
+            else:
+                kwargs["instructions"] = instructions
         resp_tools = _chat_tools_to_responses_tools(oai_tools)
         deferred_names = getattr(self, "_deferred_names", None) or set()
         if deferred_names:

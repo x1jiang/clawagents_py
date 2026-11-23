@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Add GPT-6.2 Sol and GPT-6.2 Astra with Responses tool routing, direct OpenAI Fast mode, reasoning effort from low to max, and a 1.05M context profile. Place reusable system instructions at the start of the Responses input to preserve prompt caching.
+
 ## 6.20.102
 
 - **Gemini 4 Hydrogen (`gemini-4-hydrogen`, GA 2026-11-12):** add the `1,048,576` unified input / `65,536` synchronous output model profile (`budget_ratio=0.90`), map `xhigh` / `max` effort to `thinking_config={"thinking_level": "xhigh"}` (`google-genai>=3.3.0` on Python `>=3.11`, clamping cleanly to `"high"` on older SDKs), and clamp `"xhigh"` → `"high"` before prompt-block fallback to `gemini-3.8-flash` across sync and streaming calls.
